@@ -1972,9 +1972,6 @@
       <button class="navitem" onclick={openGaps} title="I DOI che la tua libreria cita di più ma che non possiedi ancora">Gap di citazioni</button>
       <button class="navitem" class:active={filter.kind === "trash"} onclick={() => setFilter({ kind: "trash" })} title="Documenti eliminati: ripristina o elimina definitivamente">Cestino</button>
       <button class="navitem" class:active={filter.kind === "terminal"} onclick={() => { terminalOpened = true; setFilter({ kind: "terminal" }); }} title="Terminale integrato: usa claude code o altri strumenti a riga di comando sui tuoi PDF">Terminale</button>
-      <button class="navitem" onclick={openSettings} title="Impostazioni: abilita la ricerca online, email, chiave OpenAlex e token ADS">Impostazioni</button>
-      <button class="navitem" onclick={() => (helpModal = true)} title="Guida all'uso e scorciatoie da tastiera">Aiuto</button>
-      <button class="navitem" onclick={() => (aboutModal = true)} title="Informazioni su Scriptorium">Informazioni</button>
 
       <div class="sec">Cartella sorvegliata</div>
       <div class="watched">
@@ -1984,6 +1981,12 @@
         {:else}
           <button class="ghost small" onclick={pickWatchedFolder} title="Scegli una cartella: importa subito i PDF già presenti e poi quelli che aggiungerai automaticamente">Scegli cartella…</button>
         {/if}
+      </div>
+
+      <div class="appfoot">
+        <button class="navitem foot" onclick={openSettings} title="Impostazioni: abilita la ricerca online, email, chiave OpenAlex e token ADS">Impostazioni</button>
+        <button class="navitem foot" onclick={() => (helpModal = true)} title="Guida all'uso e scorciatoie da tastiera">Aiuto</button>
+        <button class="navitem foot" onclick={() => (aboutModal = true)} title="Informazioni su Scriptorium">Informazioni</button>
       </div>
     </aside>
 
@@ -3300,6 +3303,10 @@
     border-radius: 6px; padding: 6px 8px; font-size: 12px; outline: none;
   }
   .newcoll .smart { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
+  /* App-level chrome, separated from the working tools above. */
+  .appfoot { margin: 18px 0 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .navitem.foot { color: var(--dim); font-size: 12px; padding: 6px 9px; }
+  .navitem.foot:hover { color: var(--text); }
   .watched { display: flex; align-items: center; gap: 4px; margin: 6px; }
   .wpath {
     flex: 1; font-size: 12px; color: var(--dim); overflow: hidden;
