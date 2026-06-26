@@ -1,0 +1,528 @@
+// Typed wrappers around the Rust backend commands.
+import { invoke } from "@tauri-apps/api/core";
+
+export interface Tag {
+  id: number;
+  name: string;
+  color: string | null;
+}
+
+export interface Collection {
+  id: number;
+  name: string;
+  is_smart: boolean;
+  rule_json: string | null;
+}
+
+export interface DocumentItem {
+  id: number;
+  title: string | null;
+  year: number | null;
+  venue: string | null;
+  doi: string | null;
+  authors: string[];
+  tags: Tag[];
+  has_thumb: boolean;
+  added_at: string | null;
+  is_read: boolean;
+  favorite: boolean;
+  github_url: string | null;
+  pub_status: string | null;
+  paper_url: string | null;
+}
+
+export interface ImportSummary {
+  imported: number[];
+  duplicates: number[];
+  errors: string[];
+  warnings: string[];
+}
+
+/** Import PDFs by absolute path; returns what was imported / skipped / failed. */
+export const importFiles = (paths: string[]) =>
+  invoke<ImportSummary>("import_files", { paths });
+
+/** Most recently opened documents (for the "Continue reading" shelf). */
+export const recentDocuments = (limit: number) =>
+  invoke<DocumentItem[]>("recent_documents", { limit });
+/** All documents by a given author (exact, case-insensitive). */
+export const documentsByAuthor = (name: string) =>
+  invoke<DocumentItem[]>("documents_by_author", { name });
+
+/** Import a BibTeX (.bib) file as reference-only items. Returns add/skip/error counts. */
+export const importBibtex = (path: string) =>
+  invoke<{ added: number; skipped: number; errors: string[] }>("import_bibtex", { path });
+/** Try to attach an Open-Access PDF to a reference-only doc. "attached"|"already"|"not_found". */
+export const findPdf = (id: number) => invoke<string>("find_pdf", { id });
+
+export interface HfItem { id: string; likes: number; downloads: number; url: string }
+export interface HfResources {
+  arxiv_id: string | null;
+  paper_url: string | null;
+  models: HfItem[];
+  datasets: HfItem[];
+}
+/** Hugging Face models & datasets that cite this document's paper (by arXiv id). */
+export const hfResources = (id: number) => invoke<HfResources>("hf_resources", { id });
+
+export interface GhRepo {
+  owner: string;
+  repo: string;
+  full_name: string;
+  description: string | null;
+  stars: number;
+  language: string | null;
+  license: string | null;
+  url: string;
+  pushed_at: string | null;
+}
+/** GitHub repositories referenced in a document's text, with live metadata. */
+export const githubRepos = (id: number) => invoke<GhRepo[]>("github_repos", { id });
+/** A repo's README rendered to sanitized HTML. */
+export const githubReadme = (owner: string, repo: string) =>
+  invoke<string>("github_readme", { owner, repo });
+
+// ----- Table extraction from a selected PDF region -----
+/** Reconstruct a table grid from a normalized region of a page (1-based). */
+export const extractTable = (
+  id: number,
+  page: number,
+  rect: { x: number; y: number; w: number; h: number },
+) => invoke<string[][]>("extract_table", { id, page, x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+/** Write a grid to a file as "csv" | "md" | "xlsx". */
+export const exportTable = (grid: string[][], format: string, path: string) =>
+  invoke<void>("export_table", { grid, format, path });
+/** Refine a roughly-extracted grid with the local AI. */
+export const aiCleanTable = (grid: string[][]) => invoke<string[][]>("ai_clean_table", { grid });
+/** Extract the plain text of a normalized region of a page (1-based). */
+export const extractRegionText = (
+  id: number,
+  page: number,
+  rect: { x: number; y: number; w: number; h: number },
+) => invoke<string>("extract_region_text", { id, page, x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+/** Write arbitrary text to a file. */
+export const writeTextFile = (path: string, content: string) =>
+  invoke<void>("write_text_file", { path, content });
+
+/** List documents, newest first, optionally filtered by tag, collection or flag. */
+export const listDocuments = (filter?: {
+  tagId?: number;
+  collectionId?: number;
+  flag?: "favorite" | "unread" | "github" | "peerreviewed";
+}) =>
+  invoke<DocumentItem[]>("list_documents", {
+    tagId: filter?.tagId ?? null,
+    collectionId: filter?.collectionId ?? null,
+    flag: filter?.flag ?? null,
+  });
+
+// ----- Read / favorite / last page / backup -----
+export const setRead = (id: number, value: boolean) =>
+  invoke<void>("set_read", { id, value });
+export const setFavorite = (id: number, value: boolean) =>
+  invoke<void>("set_favorite", { id, value });
+export const setLastPage = (id: number, page: number) =>
+  invoke<void>("set_last_page", { id, page });
+export const getLastPage = (id: number) => invoke<number | null>("get_last_page", { id });
+/** Copy the whole library data folder into `dest`; returns the backup path. */
+export const backupLibrary = (dest: string) => invoke<string>("backup_library", { dest });
+
+// ----- Tags -----
+export const listTags = () => invoke<Tag[]>("list_tags");
+export const createTag = (name: string, color: string | null) =>
+  invoke<Tag>("create_tag", { name, color });
+export const deleteTag = (id: number) => invoke<void>("delete_tag", { id });
+export const setDocumentTags = (documentId: number, tagIds: number[]) =>
+  invoke<void>("set_document_tags", { documentId, tagIds });
+
+// ----- Collections -----
+export const listCollections = () => invoke<Collection[]>("list_collections");
+export const createCollection = (
+  name: string,
+  isSmart: boolean,
+  ruleJson: string | null,
+) => invoke<Collection>("create_collection", { name, isSmart, ruleJson });
+export const deleteCollection = (id: number) => invoke<void>("delete_collection", { id });
+export const addToCollection = (collectionId: number, documentId: number) =>
+  invoke<void>("add_to_collection", { collectionId, documentId });
+export const removeFromCollection = (collectionId: number, documentId: number) =>
+  invoke<void>("remove_from_collection", { collectionId, documentId });
+
+// ----- Editable metadata -----
+export interface EditableMeta {
+  title: string | null;
+  authors: string[];
+  year: number | null;
+  venue: string | null;
+  doi: string | null;
+  abstract_text: string | null;
+  notes: string | null;
+  summary: string | null;
+}
+export const getDocumentMeta = (id: number) =>
+  invoke<EditableMeta>("get_document_meta", { id });
+export const updateDocumentMetadata = (id: number, m: EditableMeta) =>
+  invoke<void>("update_document_metadata", {
+    id,
+    title: m.title,
+    authors: m.authors,
+    year: m.year,
+    venue: m.venue,
+    doi: m.doi,
+    abstractText: m.abstract_text,
+    notes: m.notes,
+  });
+
+// ----- Citation links (references + cited-by) -----
+export interface RefItem {
+  raw: string | null;
+  ref_doi: string | null;
+  in_library: number | null;
+  title: string | null;
+}
+export interface DocBrief {
+  id: number;
+  title: string | null;
+  year: number | null;
+}
+export interface CitationLinks {
+  references: RefItem[];
+  cited_by: DocBrief[];
+}
+export const citationLinks = (id: number) => invoke<CitationLinks>("citation_links", { id });
+
+// ----- Saved searches -----
+export interface SavedSearch {
+  id: number;
+  name: string;
+  source: string;
+  query: string;
+  author: string | null;
+  year_from: number | null;
+  year_to: number | null;
+  oa_only: boolean;
+  sort: string;
+  last_run_at: string | null;
+}
+export const listSavedSearches = () => invoke<SavedSearch[]>("list_saved_searches");
+export const deleteSavedSearch = (id: number) => invoke<void>("delete_saved_search", { id });
+export const createSavedSearch = (s: {
+  name: string;
+  source: string;
+  query: string;
+  author: string | null;
+  yearFrom: number | null;
+  yearTo: number | null;
+  oaOnly: boolean;
+  sort: string;
+  seenIds: string[];
+}) =>
+  invoke<SavedSearch>("create_saved_search", {
+    name: s.name,
+    source: s.source,
+    query: s.query,
+    author: s.author,
+    yearFrom: s.yearFrom,
+    yearTo: s.yearTo,
+    oaOnly: s.oaOnly,
+    sort: s.sort,
+    seenIds: s.seenIds,
+  });
+export const runSavedSearch = (id: number) =>
+  invoke<{ name: string; results: SearchResult[]; new_ids: string[] }>("run_saved_search", { id });
+
+// ----- Online discovery -----
+export interface SearchResult {
+  source: string;
+  external_id: string;
+  doi: string | null;
+  title: string | null;
+  authors: string[];
+  year: number | null;
+  venue: string | null;
+  abstract_text: string | null;
+  oa_pdf_url: string | null;
+  url: string | null;
+  is_oa: boolean;
+  citations: number;
+  in_library: boolean;
+  github_url: string | null;
+  pub_status: string | null;
+}
+export interface DiscoverySettings {
+  enabled: boolean;
+  email: string;
+  has_openalex_key: boolean;
+  has_ads_token: boolean;
+  has_s2_key: boolean;
+  has_core_key: boolean;
+  has_github_token: boolean;
+}
+export const getDiscoverySettings = () => invoke<DiscoverySettings>("get_discovery_settings");
+export const setDiscoverySettings = (enabled: boolean, email: string) =>
+  invoke<void>("set_discovery_settings", { enabled, email });
+/** Store (or, if empty, clear) one API key in the OS credential vault. */
+export const setApiKey = (name: string, value: string) =>
+  invoke<void>("set_api_key", { name, value });
+export const discoverSearch = (
+  query: string,
+  source: string,
+  opts: {
+    author: string | null;
+    yearFrom: number | null;
+    yearTo: number | null;
+    oaOnly: boolean;
+    sort: string;
+  },
+) =>
+  invoke<SearchResult[]>("discover_search", {
+    query,
+    source,
+    author: opts.author,
+    yearFrom: opts.yearFrom,
+    yearTo: opts.yearTo,
+    oaOnly: opts.oaOnly,
+    sort: opts.sort,
+  });
+export const discoverAdd = (result: SearchResult) =>
+  invoke<string>("discover_add", { result });
+
+// ----- AI (Ollama / LM Studio) — optional -----
+export type AiProvider = "ollama" | "lmstudio";
+export interface AiSettings {
+  enabled: boolean;
+  provider: AiProvider;
+  ollama_url: string;
+  lmstudio_url: string;
+  model: string;
+  embed_gpu: boolean;
+  embed_batch: number;
+}
+export const getAiSettings = () => invoke<AiSettings>("get_ai_settings");
+export const setAiSettings = (s: AiSettings) =>
+  invoke<void>("set_ai_settings", {
+    enabled: s.enabled,
+    provider: s.provider,
+    ollamaUrl: s.ollama_url,
+    lmstudioUrl: s.lmstudio_url,
+    model: s.model,
+    embedGpu: s.embed_gpu,
+    embedBatch: s.embed_batch,
+  });
+/** List the models a provider serves at the given URL (also a reachability check). */
+export const aiListModels = (provider: AiProvider, url: string) =>
+  invoke<string[]>("ai_list_models", { provider, url });
+
+export interface AiStatus {
+  enabled: boolean;
+  provider: AiProvider;
+  model: string;
+  reachable: boolean;
+  model_available: boolean;
+  detail: string;
+}
+/** Live status of the configured AI provider — drives the header AI indicator. */
+export const aiStatus = () => invoke<AiStatus>("ai_status");
+/** Start the local server for a provider (Ollama `serve` / LM Studio `lms server start`). */
+export const aiServerStart = (provider: AiProvider) =>
+  invoke<void>("ai_server_start", { provider });
+/** Stop the local server for a provider. */
+export const aiServerStop = (provider: AiProvider) =>
+  invoke<void>("ai_server_stop", { provider });
+/** Generate + cache an Italian summary for a document. */
+export const summarizeDocument = (id: number) => invoke<string>("summarize_document", { id });
+/** Suggest + assign 3-6 topical tags for a document. */
+export const autotagDocument = (id: number) => invoke<string[]>("autotag_document", { id });
+
+// ----- Add by identifier -----
+export interface AddSummary {
+  added: number;
+  skipped: number;
+  errors: string[];
+}
+/** Add reference-only items from pasted DOI/arXiv/ISBN/PMID identifiers. */
+export const addByIdentifiers = (identifiers: string[]) =>
+  invoke<AddSummary>("add_by_identifiers", { identifiers });
+
+// ----- Trash / hygiene -----
+export const deleteDocuments = (ids: number[]) => invoke<void>("delete_documents", { ids });
+export const restoreDocuments = (ids: number[]) => invoke<void>("restore_documents", { ids });
+export const purgeDocuments = (ids: number[]) => invoke<void>("purge_documents", { ids });
+export const listTrash = () => invoke<DocumentItem[]>("list_trash");
+export const addDocumentTag = (documentId: number, tagId: number) =>
+  invoke<void>("add_document_tag", { documentId, tagId });
+export const findDuplicates = () => invoke<number[][]>("find_duplicates");
+export const mergeDocuments = (masterId: number, otherIds: number[]) =>
+  invoke<void>("merge_documents", { masterId, otherIds });
+
+// ----- Watched folder -----
+export const getWatchedFolder = () => invoke<string | null>("get_watched_folder");
+export const setWatchedFolder = (path: string | null) =>
+  invoke<void>("set_watched_folder", { path });
+
+/** Fetch a document's thumbnail as a PNG data URL, or null. */
+export const getThumbnail = (id: number) =>
+  invoke<string | null>("get_thumbnail", { id });
+
+export interface EnrichSummary {
+  updated: number;
+  no_doi: number;
+  errors: string[];
+}
+
+/** Enrich all documents lacking a DOI via Crossref. */
+export const enrichAll = () => invoke<EnrichSummary>("enrich_all");
+
+export type SearchMode = "fulltext" | "semantic" | "hybrid";
+
+/** Search the library by full-text, semantic similarity, or both (RRF). */
+export const searchDocuments = (query: string, mode: SearchMode) =>
+  invoke<DocumentItem[]>("search", { query, mode });
+
+/** Documents semantically similar to the given one (by embedding). */
+export const relatedDocuments = (id: number) =>
+  invoke<DocumentItem[]>("related_documents", { id });
+
+// ----- Citations / export -----
+/** Citation text. format: bibtex | ris | csljson | apa | ieee | citekey | latex | pandoc. */
+export const citeText = (ids: number[], format: string) =>
+  invoke<string>("cite_text", { ids, format });
+/** Write citations for the given documents to a file. */
+export const exportCitations = (ids: number[], format: string, path: string) =>
+  invoke<void>("export_citations", { ids, format, path });
+
+// ----- Library health (maintenance scan) -----
+export interface HealthRow {
+  id: number;
+  title: string | null;
+  path: string;
+}
+export interface DupGroup {
+  file_hash: string;
+  ids: number[];
+  titles: string[];
+}
+export interface LibraryHealth {
+  total: number;
+  missing_file: HealthRow[];
+  no_text: HealthRow[];
+  no_metadata: HealthRow[];
+  no_embedding: HealthRow[];
+  no_thumbnail: HealthRow[];
+  duplicates: DupGroup[];
+}
+/** Read-only scan of the library for rot signals (missing files, no text, dups, …). */
+export const libraryHealth = () => invoke<LibraryHealth>("library_health");
+
+// ----- Citation gap-finder -----
+export interface GapItem {
+  doi: string;
+  count: number;
+  sample: string | null;
+}
+/** DOIs the library cites most but doesn't own, ranked by citation count (offline). */
+export const citationGaps = (limit?: number) =>
+  invoke<GapItem[]>("citation_gaps", { limit: limit ?? null });
+
+// ----- Obsidian / Markdown vault export -----
+export const getObsidianVault = () => invoke<string>("get_obsidian_vault");
+export const setObsidianVault = (path: string) =>
+  invoke<void>("set_obsidian_vault", { path });
+/** Export the given documents as Markdown notes into <vault>/Scriptorium/. Returns the count. */
+export const exportToObsidian = (ids: number[], vaultDir: string) =>
+  invoke<number>("export_obsidian", { ids, vaultDir });
+
+export interface EmbedStatus {
+  total: number;
+  embedded: number;
+}
+export interface EmbedSummary {
+  embedded: number;
+  errors: string[];
+}
+
+/** How many documents already have a semantic embedding. */
+export const embeddingStatus = () => invoke<EmbedStatus>("embedding_status");
+
+/** Build embeddings for documents missing them (downloads model on first run). */
+export const generateEmbeddings = () => invoke<EmbedSummary>("generate_embeddings");
+
+/** Request cancellation of an in-progress embedding job. */
+export const cancelEmbeddings = () => invoke<void>("cancel_embeddings");
+
+export interface EmbedProgress {
+  done: number;
+  total: number;
+  phase: "model" | "running" | "done" | "cancelled";
+}
+
+// ----- RAG engine ("Chiedi alla libreria") -----
+export interface RagStatus {
+  indexed_docs: number;
+  total_docs: number;
+  chunks: number;
+}
+export interface RagProgress {
+  done: number;
+  total: number;
+  phase: "running" | "done" | "cancelled";
+}
+export interface AskSource {
+  n: number;
+  document_id: number;
+  title: string;
+  ord: number;
+  page: number | null;
+  excerpt: string;
+  relation: string; // "match" | "citazione" | "simile"
+}
+export interface AskResult {
+  answer: string;
+  sources: AskSource[];
+}
+export const ragIndexStatus = () => invoke<RagStatus>("rag_index_status");
+export const buildRagIndex = () => invoke<number>("build_rag_index");
+export const cancelRagIndex = () => invoke<void>("cancel_rag_index");
+export const clearRagIndex = () => invoke<void>("clear_rag_index");
+export const askLibrary = (question: string, scopeKind?: string, scopeId?: number) =>
+  invoke<AskResult>("ask_library", { question, scopeKind: scopeKind ?? null, scopeId: scopeId ?? null });
+
+export type AnnotationKind = "highlight" | "underline" | "strikethrough" | "note";
+
+export interface Annotation {
+  id: number;
+  page: number;
+  kind: AnnotationKind;
+  color: string | null;
+  rects_json: string;
+  quote: string | null;
+  note: string | null;
+  created_at: string | null;
+}
+
+/** List a document's annotations. */
+export const listAnnotations = (documentId: number) =>
+  invoke<Annotation[]>("list_annotations", { documentId });
+
+/** Add an annotation (highlight by default); returns the new annotation id. */
+export const addAnnotation = (a: {
+  documentId: number;
+  page: number;
+  kind?: AnnotationKind;
+  color: string;
+  rectsJson: string;
+  quote: string | null;
+  note: string | null;
+}) => invoke<number>("add_annotation", a);
+
+/** Update an annotation's note. */
+export const updateAnnotationNote = (id: number, note: string | null) =>
+  invoke<void>("update_annotation_note", { id, note });
+
+/** Delete an annotation. */
+export const deleteAnnotation = (id: number) =>
+  invoke<void>("delete_annotation", { id });
+
+/** Save just a document's free-text notes (cheap autosave path from the reader). */
+export const setDocumentNotes = (id: number, notes: string) =>
+  invoke<void>("set_document_notes", { id, notes });
