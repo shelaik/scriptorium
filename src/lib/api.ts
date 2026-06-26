@@ -414,6 +414,17 @@ export interface LibraryHealth {
 /** Read-only scan of the library for rot signals (missing files, no text, dups, …). */
 export const libraryHealth = () => invoke<LibraryHealth>("library_health");
 
+// ----- Sidebar facet counts -----
+export interface LibraryFacets {
+  all: number;
+  favorite: number;
+  unread: number;
+  github: number;
+  peerreviewed: number;
+}
+/** Per-filter document counts over the whole library, for the sidebar badges. */
+export const libraryFacets = () => invoke<LibraryFacets>("library_facets");
+
 // ----- Citation gap-finder -----
 export interface GapItem {
   doi: string;

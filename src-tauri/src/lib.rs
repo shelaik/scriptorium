@@ -104,6 +104,7 @@ pub fn run() {
             commands::citation_links,
             commands::citation_gaps,
             commands::library_health,
+            commands::library_facets,
             commands::list_saved_searches,
             commands::create_saved_search,
             commands::delete_saved_search,

@@ -25,6 +25,8 @@
     type CitationLinks,
     libraryHealth,
     type LibraryHealth,
+    libraryFacets,
+    type LibraryFacets,
     citationGaps,
     type GapItem,
     listSavedSearches,
@@ -108,6 +110,8 @@
   ];
 
   let docs = $state<DocumentItem[]>([]);
+  // Whole-library counts behind the sidebar filters; refreshed by loadDocs().
+  let facets = $state<LibraryFacets>({ all: 0, favorite: 0, unread: 0, github: 0, peerreviewed: 0 });
   let recentDocs = $state<DocumentItem[]>([]); // "Continue reading" shelf
   let results = $state<DocumentItem[]>([]);
   let thumbs = $state<Record<number, string>>({});
@@ -491,6 +495,12 @@
       } catch {
         recentDocs = [];
       }
+    }
+    // Refresh the sidebar filter counts (whole-library, independent of filter).
+    try {
+      facets = await libraryFacets();
+    } catch {
+      /* counts are advisory; leave the previous values on error */
     }
   }
 
@@ -1875,19 +1885,19 @@
   <div class="body">
     <aside class="sidebar">
       <button class="navitem" class:active={filter.kind === "all"} onclick={() => setFilter({ kind: "all" })} title="Mostra tutti i documenti (rimuovi i filtri)">
-        Tutti
+        Tutti{#if facets.all}<span class="navcount">{facets.all}</span>{/if}
       </button>
       <button class="navitem" class:active={filter.kind === "favorite"} onclick={() => setFilter({ kind: "favorite" })} title="Solo i documenti contrassegnati come preferiti">
-        Preferiti
+        Preferiti{#if facets.favorite}<span class="navcount">{facets.favorite}</span>{/if}
       </button>
       <button class="navitem" class:active={filter.kind === "unread"} onclick={() => setFilter({ kind: "unread" })} title="Solo i documenti non ancora segnati come letti">
-        Da leggere
+        Da leggere{#if facets.unread}<span class="navcount">{facets.unread}</span>{/if}
       </button>
       <button class="navitem" class:active={filter.kind === "github"} onclick={() => setFilter({ kind: "github" })} title="Solo i documenti che citano un repository GitHub (codice disponibile)">
-        Con codice (GitHub)
+        Con codice (GitHub){#if facets.github}<span class="navcount">{facets.github}</span>{/if}
       </button>
       <button class="navitem" class:active={filter.kind === "peerreviewed"} onclick={() => setFilter({ kind: "peerreviewed" })} title="Solo gli articoli peer-reviewed (pubblicati), esclusi i preprint">
-        Peer-reviewed
+        Peer-reviewed{#if facets.peerreviewed}<span class="navcount">{facets.peerreviewed}</span>{/if}
       </button>
 
       <div class="sec tagsec">
@@ -3264,6 +3274,9 @@
   .navitem:hover { background: var(--hover); }
   .navitem.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
   .navcheck { margin-left: auto; color: var(--accent); font-size: 12px; }
+  /* Whole-library count on a sidebar filter, right-aligned and muted. */
+  .navcount { margin-left: auto; color: var(--faint); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .navitem.active .navcount { color: var(--accent); }
   .secaction { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 10px; text-transform: none; letter-spacing: 0; text-decoration: underline; }
   .tagsec { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
   .seclabel {

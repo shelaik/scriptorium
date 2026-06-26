@@ -3315,6 +3315,62 @@ pub fn citation_gaps(state: State<'_, AppState>, limit: Option<i64>) -> Result<V
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+pub struct LibraryFacets {
+    pub all: i64,
+    pub favorite: i64,
+    pub unread: i64,
+    pub github: i64,
+    pub peerreviewed: i64,
+}
+
+/// Counts behind the sidebar's library filters, computed over the whole library
+/// (independent of the active filter) so each entry can show how many documents
+/// it holds. `peerreviewed` mirrors `query_documents`: it's derived from
+/// `classify_pub_status`, not a stored column, so it's evaluated per document.
+#[tauri::command]
+pub fn library_facets(state: State<'_, AppState>) -> Result<LibraryFacets, String> {
+    let conn = state.db.lock();
+    let mut facets = LibraryFacets { all: 0, favorite: 0, unread: 0, github: 0, peerreviewed: 0 };
+    let mut stmt = conn
+        .prepare(
+            "SELECT favorite, is_read, github_url, doi, venue, path
+             FROM documents WHERE deleted_at IS NULL",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (favorite, is_read, github_url, doi, venue, path) = row.map_err(|e| e.to_string())?;
+        facets.all += 1;
+        if favorite != 0 {
+            facets.favorite += 1;
+        }
+        if is_read == 0 {
+            facets.unread += 1;
+        }
+        if github_url.is_some() {
+            facets.github += 1;
+        }
+        if discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref()).as_deref()
+            == Some("published")
+        {
+            facets.peerreviewed += 1;
+        }
+    }
+    Ok(facets)
+}
+
 // ===== Citation links (references + cited-by within the library) =====
 
 #[derive(serde::Serialize)]
