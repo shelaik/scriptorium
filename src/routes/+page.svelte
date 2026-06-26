@@ -124,6 +124,11 @@
       return tagSort === "desc" ? -c : c;
     }),
   );
+  // How many documents have no bibliographic metadata yet (bare author/year/venue).
+  // Drives the badge + tooltip on the "Metadati" button so it's clear that
+  // those fields — and the references/citations/gap features built on them —
+  // stay empty until metadata is fetched.
+  let needsMeta = $derived(docs.filter(isBare).length);
   let query = $state("");
   let mode = $state<SearchMode>("hybrid");
   let emb = $state<EmbedStatus>({ total: 0, embedded: 0 });
@@ -1663,6 +1668,12 @@
     if (d.authors.length <= 3) return d.authors.join(", ");
     return d.authors.slice(0, 3).join(", ") + " et al.";
   }
+  /** A document with no bibliographic metadata yet — author, year and venue are
+   *  all empty. These are exactly the cards that look bare until "Metadati"
+   *  (Crossref enrichment) fills them in, so we flag them in the UI. */
+  function isBare(d: DocumentItem): boolean {
+    return !d.authors.length && !d.year && !d.venue;
+  }
   /** The paper's original link for sharing (DOI, else arXiv/landing), if known. */
   function paperLink(d: DocumentItem | null | undefined): string | undefined {
     return d?.paper_url ?? (d?.doi ? `https://doi.org/${d.doi}` : undefined);
@@ -1771,11 +1782,12 @@
     </div>
     <button
       class="ghost"
+      class:attn={needsMeta > 0 && !enriching}
       onclick={enrichMeta}
       disabled={enriching || docs.length === 0}
-      title="Recupera titolo, autori, anno e rivista da Crossref, usando il DOI trovato nel testo dei PDF"
+      title={"Recupera da Crossref (tramite il DOI trovato nel PDF): titoli, autori, anno, rivista, abstract e l'elenco dei riferimenti.\nMolte funzioni si popolano solo dopo: «Riferimenti e citazioni», «Gap di citazioni» e i campi autore/anno/rivista delle schede." + (needsMeta > 0 ? `\n\n${needsMeta} ${needsMeta === 1 ? "documento è" : "documenti sono"} ancora senza metadati.` : "")}
     >
-      {enriching ? "…" : "Metadati"}
+      {enriching ? "…" : "Metadati"}{#if needsMeta > 0 && !enriching}<span class="metabadge">{needsMeta}</span>{/if}
     </button>
     <button class="ghost" class:menuopen={headerMenu?.kind === "export"} onclick={(e) => openHeaderMenu(e, "export")} disabled={displayed.length === 0} title="Esporta: citazioni (BibTeX/RIS/CSL) o note Markdown per Obsidian">
       Esporta ▾
@@ -2364,6 +2376,7 @@
                   <h3 title={d.title ?? ""}>{d.title ?? "Senza titolo"}</h3>
                   {#if authorLine(d)}<p class="authors"><button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button></p>{/if}
                   {#if d.year || d.venue}<p class="venue">{[d.venue, d.year].filter(Boolean).join(" · ")}</p>{/if}
+                  {#if isBare(d)}<p class="metamiss" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ metadati non recuperati</p>{/if}
                   {#if d.pub_status}<div class="badgerow">{@render pubBadge(d.pub_status, d.paper_url)}</div>{/if}
                   {#if d.github_url}
                     <button class="ghchip" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()} codice</button>
@@ -2413,7 +2426,7 @@
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
                   <tr onclick={() => (openDoc = d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selected.includes(d.id)}>
                     <td class="sel"><input type="checkbox" checked={selected.includes(d.id)} onclick={(e) => e.stopPropagation()} onchange={() => toggleSelect(d.id)} title="Seleziona" /></td>
-                    <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}</td>
+                    <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if isBare(d)}<span class="metamiss-inline" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ</span>{/if}</td>
                     <td class="dim" title={authorLine(d)}>{#if authorLine(d)}<button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button>{:else}—{/if}</td>
                     <td class="num dim">{d.year ?? "—"}</td>
                     <td class="dim" title={d.venue ?? ""}>{d.venue || "—"}{#if d.pub_status}<span class="badgeinline">{@render pubBadge(d.pub_status, d.paper_url)}</span>{/if}</td>
@@ -3172,6 +3185,13 @@
   button.ghost:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
   button.ghost:disabled { opacity: 0.5; cursor: default; }
   button.menuopen { border-color: var(--accent); background: var(--accent-soft); }
+  /* Count of documents still missing metadata, on the "Metadati" button. */
+  button.ghost.attn { border-color: var(--accent-soft2); background: var(--accent-soft); }
+  .metabadge {
+    display: inline-block; min-width: 16px; margin-left: 6px; padding: 0 5px;
+    border-radius: 9px; background: var(--accent); color: var(--on-accent);
+    font-size: 10.5px; font-weight: 700; line-height: 16px; text-align: center; vertical-align: 1px;
+  }
   .toolbar {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
     padding: 8px 22px; background: var(--panel); border-bottom: 1px solid var(--border);
@@ -3354,6 +3374,9 @@
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
   .authors { font-size: 12px; color: var(--dim); margin: 0 0 2px; }
+  /* Shown on bare cards/rows that have no author/year/venue until "Metadati" runs. */
+  .metamiss { font-size: 11px; color: var(--faint); margin: 2px 0 0; font-style: italic; cursor: help; }
+  .metamiss-inline { color: var(--faint); margin-left: 6px; cursor: help; font-size: 11px; }
   .authorlink {
     background: none; border: none; padding: 0; margin: 0; font: inherit; color: inherit;
     cursor: pointer; text-align: left; line-height: inherit;
