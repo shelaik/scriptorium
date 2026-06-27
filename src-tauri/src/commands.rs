@@ -1261,9 +1261,9 @@ fn rrf_merge(a: &[i64], b: &[i64], limit: usize) -> Vec<i64> {
 /// Fetch documents by id, preserving the order of `ids`.
 fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> anyhow::Result<Vec<Document>> {
     let sql = if include_deleted {
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey FROM documents WHERE id = ?1"
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count FROM documents WHERE id = ?1"
     } else {
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey FROM documents WHERE id = ?1 AND deleted_at IS NULL"
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count FROM documents WHERE id = ?1 AND deleted_at IS NULL"
     };
     let mut doc_stmt = conn.prepare(sql)?;
     let mut author_stmt = conn.prepare(
@@ -1288,10 +1288,12 @@ fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> any
                     r.get::<_, Option<String>>(9)?,
                     r.get::<_, Option<String>>(10)?,
                     r.get::<_, Option<String>>(11)?,
+                    r.get::<_, Option<i64>>(12)?,
+                    r.get::<_, Option<i64>>(13)?,
                 ))
             })
             .optional()?;
-        let Some((id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey)) = row else {
+        let Some((id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count)) = row else {
             continue;
         };
         let pub_status = discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref());
@@ -1327,6 +1329,8 @@ fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> any
             pub_status,
             paper_url,
             citekey,
+            last_page,
+            page_count,
         });
     }
     Ok(out)
@@ -1585,13 +1589,18 @@ pub fn set_favorite(state: State<'_, AppState>, id: i64, value: bool) -> Result<
     Ok(())
 }
 
-/// Remember the last viewed page (1-based) of a document.
+/// Remember the last viewed page (1-based) of a document, and its total page
+/// count (so older documents get a `page_count` the first time they're opened —
+/// it powers the reading-progress bar). `pages` is optional/best-effort.
 #[tauri::command]
-pub fn set_last_page(state: State<'_, AppState>, id: i64, page: i64) -> Result<(), String> {
+pub fn set_last_page(state: State<'_, AppState>, id: i64, page: i64, pages: Option<i64>) -> Result<(), String> {
     let conn = state.db.lock();
     conn.execute(
-        "UPDATE documents SET last_page = ?1, last_opened_at = datetime('now') WHERE id = ?2",
-        params![page, id],
+        "UPDATE documents
+         SET last_page = ?1, last_opened_at = datetime('now'),
+             page_count = COALESCE(?2, page_count)
+         WHERE id = ?3",
+        params![page, pages.filter(|p| *p > 0), id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -4040,14 +4049,14 @@ fn query_documents(
         _ => {}
     }
     let sql = format!(
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count
          FROM documents WHERE {} ORDER BY added_at DESC, id DESC",
         conds.join(" AND ")
     );
 
     let mut stmt = conn.prepare(&sql)?;
     #[allow(clippy::type_complexity)]
-    let base: Vec<(i64, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>, Option<String>)> =
+    let base: Vec<(i64, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>)> =
         stmt.query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -4062,6 +4071,8 @@ fn query_documents(
                 r.get(9)?,
                 r.get(10)?,
                 r.get(11)?,
+                r.get(12)?,
+                r.get(13)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -4073,7 +4084,7 @@ fn query_documents(
     )?;
 
     let mut docs = Vec::with_capacity(base.len());
-    for (id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey) in base {
+    for (id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count) in base {
         let pub_status = discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref());
         let paper_url = paper_link_for(doi.as_deref(), path.as_deref());
         let authors: Vec<String> = author_stmt
@@ -4108,6 +4119,8 @@ fn query_documents(
             pub_status,
             paper_url,
             citekey,
+            last_page,
+            page_count,
         });
     }
     // pub_status is computed, not a column — filter the peer-reviewed view here.

@@ -28,6 +28,8 @@ pub struct PreparedImport {
     pub text_failed: bool,
     /// First GitHub repo URL found in the text, if any.
     pub github_url: Option<String>,
+    /// Total page count (0 if it couldn't be read), for the reading-progress bar.
+    pub page_count: u16,
 }
 
 /// Strip control characters (except newlines/tabs) embedded by some PDFs.
@@ -64,9 +66,9 @@ pub fn prepare_import(pdfium: &Pdfium, thumb_dir: &Path, src: &Path) -> Result<P
     let bytes = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
     let hash = sha256_hex(&bytes);
 
-    let (mut fulltext, text_failed) = match pdf::extract_text(pdfium, src) {
-        Ok(e) => (sanitize(&e.text), false),
-        Err(_) => (String::new(), true),
+    let (mut fulltext, text_failed, page_count) = match pdf::extract_text(pdfium, src) {
+        Ok(e) => (sanitize(&e.text), false, e.page_count),
+        Err(_) => (String::new(), true, 0),
     };
     // Bound the stored/indexed text (huge PDFs can extract enormous strings).
     if fulltext.chars().count() > MAX_FULLTEXT_CHARS {
@@ -96,6 +98,7 @@ pub fn prepare_import(pdfium: &Pdfium, thumb_dir: &Path, src: &Path) -> Result<P
         thumb_path,
         text_failed,
         github_url,
+        page_count,
     })
 }
 
@@ -121,9 +124,12 @@ pub fn commit_import(conn: &Connection, p: &PreparedImport) -> Result<ImportOutc
         });
     }
     conn.execute(
-        "INSERT INTO documents (title, fulltext, path, file_hash, thumb_path, github_url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![p.title, p.fulltext, p.path, p.hash, p.thumb_path, p.github_url],
+        "INSERT INTO documents (title, fulltext, path, file_hash, thumb_path, github_url, page_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            p.title, p.fulltext, p.path, p.hash, p.thumb_path, p.github_url,
+            (p.page_count > 0).then_some(p.page_count),
+        ],
     )
     .context("inserting document row")?;
     // No citekey yet: a freshly-imported PDF has no authors until enrichment,

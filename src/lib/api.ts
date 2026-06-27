@@ -31,6 +31,9 @@ export interface DocumentItem {
   paper_url: string | null;
   /** Persistent, library-unique citation key (firstauthor+year+word). */
   citekey: string | null;
+  /** Last viewed page (1-based) and total pages, for the reading-progress bar. */
+  last_page: number | null;
+  page_count: number | null;
 }
 
 export interface ImportSummary {
@@ -123,8 +126,8 @@ export const setRead = (id: number, value: boolean) =>
   invoke<void>("set_read", { id, value });
 export const setFavorite = (id: number, value: boolean) =>
   invoke<void>("set_favorite", { id, value });
-export const setLastPage = (id: number, page: number) =>
-  invoke<void>("set_last_page", { id, page });
+export const setLastPage = (id: number, page: number, pages?: number) =>
+  invoke<void>("set_last_page", { id, page, pages: pages ?? null });
 export const getLastPage = (id: number) => invoke<number | null>("get_last_page", { id });
 /** Copy the whole library data folder into `dest`; returns the backup path. */
 export const backupLibrary = (dest: string) => invoke<string>("backup_library", { dest });

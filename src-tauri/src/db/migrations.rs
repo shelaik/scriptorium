@@ -225,6 +225,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "documents", "github_url", "TEXT")?;
     // Persistent, library-unique citation key (firstauthor+year+word, see db::citekey).
     add_column_if_missing(conn, "documents", "citekey", "TEXT")?;
+    // Total page count, for the reading-progress bar (set on import / first open).
+    add_column_if_missing(conn, "documents", "page_count", "INTEGER")?;
     // RAG: page number a passage was taken from (NULL for older chunks / non-PDF refs).
     add_column_if_missing(conn, "doc_chunks", "page", "INTEGER")?;
     backfill_github_urls(conn)?;

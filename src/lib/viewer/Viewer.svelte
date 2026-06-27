@@ -1095,7 +1095,7 @@
       clearTimeout(findTimer);
       clearTimeout(notesTimer);
       if (!notesSaved) flushNotes();
-      if (currentPage > 0) setLastPage(id, currentPage).catch(() => {});
+      if (currentPage > 0) setLastPage(id, currentPage, pdf?.numPages ?? undefined).catch(() => {});
     };
   });
 </script>

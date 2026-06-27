@@ -1695,6 +1695,13 @@
   function isBare(d: DocumentItem): boolean {
     return !d.authors.length && !d.year && !d.venue;
   }
+  /** Reading progress as a 0–100 percentage, or null when there's nothing to show
+   *  (document never opened and not marked read, or page count unknown). */
+  function readPct(d: DocumentItem): number | null {
+    if (d.is_read) return 100;
+    if (!d.page_count || !d.last_page || d.last_page <= 0) return null;
+    return Math.min(100, Math.round((d.last_page / d.page_count) * 100));
+  }
   /** The paper's original link for sharing (DOI, else arXiv/landing), if known. */
   function paperLink(d: DocumentItem | null | undefined): string | undefined {
     return d?.paper_url ?? (d?.doi ? `https://doi.org/${d.doi}` : undefined);
@@ -2395,6 +2402,12 @@
                 <button class="starbtn" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>
                 <div class="thumb">
                   {#if thumbs[d.id]}<img src={thumbs[d.id]} alt="" />{:else}<div class="thumb-placeholder">PDF</div>{/if}
+                  {#if readPct(d) !== null}
+                    {@const pct = readPct(d)}
+                    <div class="progress" class:done={d.is_read} title={d.is_read ? "Letto" : `Letto al ${pct}%${d.page_count ? ` (pag. ${d.last_page}/${d.page_count})` : ""}`}>
+                      <div class="pfill" style="width:{pct}%"></div>
+                    </div>
+                  {/if}
                 </div>
                 <div class="meta">
                   <h3 title={d.title ?? ""}>{d.title ?? "Senza titolo"}</h3>
@@ -3397,8 +3410,12 @@
   .card:hover .cardsel { opacity: 1; }
   .cardsel.on { opacity: 1; background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
   .card.selcard { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft2); }
-  .thumb { aspect-ratio: 3 / 4; background: var(--thumb-bg); display: flex; align-items: center; justify-content: center; overflow: hidden; border-bottom: 1px solid var(--border); }
+  .thumb { position: relative; aspect-ratio: 3 / 4; background: var(--thumb-bg); display: flex; align-items: center; justify-content: center; overflow: hidden; border-bottom: 1px solid var(--border); }
   .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  /* Reading-progress bar pinned to the bottom of the cover. */
+  .progress { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: color-mix(in srgb, var(--border) 70%, transparent); }
+  .progress .pfill { height: 100%; background: var(--accent); transition: width var(--ease); }
+  .progress.done .pfill { background: var(--ok, #3a9d5b); }
   .thumb-placeholder { color: var(--thumb-fg); font-size: 28px; font-weight: 700; font-family: var(--serif); }
   .meta { padding: 11px 13px 14px; }
   .meta h3 {

@@ -35,6 +35,9 @@ pub struct Document {
     pub paper_url: Option<String>,
     /// Persistent, library-unique citation key (see `db::citekey`).
     pub citekey: Option<String>,
+    /// Last viewed page (1-based) and total pages, for the reading-progress bar.
+    pub last_page: Option<i64>,
+    pub page_count: Option<i64>,
 }
 
 /// Full editable metadata for one document (used by the manual editor).
