@@ -1,6 +1,7 @@
 //! Database layer: connection setup, the statically-linked `sqlite-vec`
 //! registration, and schema migrations.
 
+pub mod citekey;
 pub mod migrations;
 
 use anyhow::{Context, Result};

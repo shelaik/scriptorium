@@ -1361,6 +1361,17 @@
     }
   }
 
+  /** Copy the stored citekey straight from the loaded document (no round-trip). */
+  async function copyCitekey(doc: DocumentItem) {
+    if (!doc.citekey) return;
+    try {
+      await navigator.clipboard.writeText(doc.citekey);
+      status = `Citekey copiata: ${doc.citekey}`;
+    } catch (e) {
+      status = "Errore copia: " + e;
+    }
+  }
+
   // ----- Library health (maintenance scan) -----
   let healthModal = $state(false);
   let health = $state<LibraryHealth | null>(null);
@@ -2389,6 +2400,7 @@
                   <h3 title={d.title ?? ""}>{d.title ?? "Senza titolo"}</h3>
                   {#if authorLine(d)}<p class="authors"><button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button></p>{/if}
                   {#if d.year || d.venue}<p class="venue">{[d.venue, d.year].filter(Boolean).join(" · ")}</p>{/if}
+                  {#if d.citekey && !isBare(d)}<button type="button" class="ckey" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}
                   {#if isBare(d)}<p class="metamiss" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ metadati non recuperati</p>{/if}
                   {#if d.pub_status}<div class="badgerow">{@render pubBadge(d.pub_status, d.paper_url)}</div>{/if}
                   {#if d.github_url}
@@ -2439,7 +2451,7 @@
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
                   <tr onclick={() => (openDoc = d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selected.includes(d.id)}>
                     <td class="sel"><input type="checkbox" checked={selected.includes(d.id)} onclick={(e) => e.stopPropagation()} onchange={() => toggleSelect(d.id)} title="Seleziona" /></td>
-                    <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if isBare(d)}<span class="metamiss-inline" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ</span>{/if}</td>
+                    <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if d.citekey && !isBare(d)}<button type="button" class="ckey-inline" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}{#if isBare(d)}<span class="metamiss-inline" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ</span>{/if}</td>
                     <td class="dim" title={authorLine(d)}>{#if authorLine(d)}<button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button>{:else}—{/if}</td>
                     <td class="num dim">{d.year ?? "—"}</td>
                     <td class="dim" title={d.venue ?? ""}>{d.venue || "—"}{#if d.pub_status}<span class="badgeinline">{@render pubBadge(d.pub_status, d.paper_url)}</span>{/if}</td>
@@ -3397,6 +3409,22 @@
   /* Shown on bare cards/rows that have no author/year/venue until "Metadati" runs. */
   .metamiss { font-size: 11px; color: var(--faint); margin: 2px 0 0; font-style: italic; cursor: help; }
   .metamiss-inline { color: var(--faint); margin-left: 6px; cursor: help; font-size: 11px; }
+  /* Persistent citekey: monospace chip on cards, inline badge in the list. Click to copy. */
+  .ckey {
+    display: inline-block; margin: 2px 0 0; padding: 1px 7px; border-radius: 9px; max-width: 100%;
+    background: var(--field); border: 1px solid var(--border); color: var(--dim);
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 10.5px;
+    cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle;
+  }
+  .ckey:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .ckey-inline {
+    display: inline-block; max-width: 22ch; margin-left: 8px; padding: 0 5px;
+    border: 1px solid var(--border); border-radius: 7px;
+    background: transparent; color: var(--faint); cursor: pointer;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 10.5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: -3px;
+  }
+  .ckey-inline:hover { border-color: var(--accent); color: var(--accent); }
   .authorlink {
     background: none; border: none; padding: 0; margin: 0; font: inherit; color: inherit;
     cursor: pointer; text-align: left; line-height: inherit;

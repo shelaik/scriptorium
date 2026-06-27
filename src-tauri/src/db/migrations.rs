@@ -223,9 +223,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "documents", "summary", "TEXT")?;
     // First GitHub repo URL found in the document's text (for the "has code" badge/filter).
     add_column_if_missing(conn, "documents", "github_url", "TEXT")?;
+    // Persistent, library-unique citation key (firstauthor+year+word, see db::citekey).
+    add_column_if_missing(conn, "documents", "citekey", "TEXT")?;
     // RAG: page number a passage was taken from (NULL for older chunks / non-PDF refs).
     add_column_if_missing(conn, "doc_chunks", "page", "INTEGER")?;
     backfill_github_urls(conn)?;
+    // Assign citekeys to any documents that don't have one yet (cheap no-op once full).
+    super::citekey::backfill(conn)?;
     Ok(())
 }
 

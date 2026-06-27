@@ -168,7 +168,11 @@ pub async fn enrich_all(app: AppHandle) -> Result<EnrichSummary, String> {
                 let state = app.state::<AppState>();
                 let mut conn = state.db.lock();
                 match metadata::apply_metadata(&mut conn, id, &doi, &meta) {
-                    Ok(()) => summary.updated += 1,
+                    Ok(()) => {
+                        // Refresh the stored citekey now that authors/year/title are known.
+                        let _ = crate::db::citekey::auto_citekey(&conn, id);
+                        summary.updated += 1;
+                    }
                     Err(e) => summary.errors.push(format!("{doi}: {e:#}")),
                 }
             }
@@ -1257,9 +1261,9 @@ fn rrf_merge(a: &[i64], b: &[i64], limit: usize) -> Vec<i64> {
 /// Fetch documents by id, preserving the order of `ids`.
 fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> anyhow::Result<Vec<Document>> {
     let sql = if include_deleted {
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path FROM documents WHERE id = ?1"
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey FROM documents WHERE id = ?1"
     } else {
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path FROM documents WHERE id = ?1 AND deleted_at IS NULL"
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey FROM documents WHERE id = ?1 AND deleted_at IS NULL"
     };
     let mut doc_stmt = conn.prepare(sql)?;
     let mut author_stmt = conn.prepare(
@@ -1283,10 +1287,11 @@ fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> any
                     r.get::<_, i64>(8)?,
                     r.get::<_, Option<String>>(9)?,
                     r.get::<_, Option<String>>(10)?,
+                    r.get::<_, Option<String>>(11)?,
                 ))
             })
             .optional()?;
-        let Some((id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path)) = row else {
+        let Some((id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey)) = row else {
             continue;
         };
         let pub_status = discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref());
@@ -1321,6 +1326,7 @@ fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> any
             github_url,
             pub_status,
             paper_url,
+            citekey,
         });
     }
     Ok(out)
@@ -1548,6 +1554,8 @@ pub fn update_document_metadata(
         .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
+    // Keep the stored citekey in sync with the edited author/year/title.
+    let _ = crate::db::citekey::auto_citekey(&conn, id);
     Ok(())
 }
 
@@ -1741,6 +1749,8 @@ fn create_reference(conn: &mut Connection, rref: &metadata::ResolvedRef) -> anyh
         )?;
     }
     tx.commit()?;
+    // Stored citekey from the reference's metadata (authors are now committed).
+    let _ = crate::db::citekey::auto_citekey(conn, id);
     Ok(Some(id))
 }
 
@@ -3214,7 +3224,7 @@ pub async fn autotag_document(app: AppHandle, id: i64) -> Result<Vec<String>, St
 
 fn load_cite_items(conn: &Connection, ids: &[i64]) -> anyhow::Result<Vec<citation::CiteItem>> {
     let mut doc_stmt =
-        conn.prepare("SELECT title, year, venue, doi FROM documents WHERE id = ?1")?;
+        conn.prepare("SELECT title, year, venue, doi, citekey FROM documents WHERE id = ?1")?;
     let mut auth_stmt = conn.prepare(
         "SELECT given, family FROM authors a
          JOIN document_authors da ON da.author_id = a.id
@@ -3229,10 +3239,11 @@ fn load_cite_items(conn: &Connection, ids: &[i64]) -> anyhow::Result<Vec<citatio
                     r.get::<_, Option<i64>>(1)?,
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
                 ))
             })
             .optional()?;
-        let Some((title, year, venue, doi)) = row else {
+        let Some((title, year, venue, doi, citekey)) = row else {
             continue;
         };
         let authors: Vec<(Option<String>, Option<String>)> = auth_stmt
@@ -3247,6 +3258,7 @@ fn load_cite_items(conn: &Connection, ids: &[i64]) -> anyhow::Result<Vec<citatio
             year,
             venue,
             doi,
+            citekey,
         });
     }
     Ok(out)
@@ -4028,14 +4040,14 @@ fn query_documents(
         _ => {}
     }
     let sql = format!(
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey
          FROM documents WHERE {} ORDER BY added_at DESC, id DESC",
         conds.join(" AND ")
     );
 
     let mut stmt = conn.prepare(&sql)?;
     #[allow(clippy::type_complexity)]
-    let base: Vec<(i64, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>)> =
+    let base: Vec<(i64, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>, Option<String>)> =
         stmt.query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -4049,6 +4061,7 @@ fn query_documents(
                 r.get(8)?,
                 r.get(9)?,
                 r.get(10)?,
+                r.get(11)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -4060,7 +4073,7 @@ fn query_documents(
     )?;
 
     let mut docs = Vec::with_capacity(base.len());
-    for (id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path) in base {
+    for (id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey) in base {
         let pub_status = discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref());
         let paper_url = paper_link_for(doi.as_deref(), path.as_deref());
         let authors: Vec<String> = author_stmt
@@ -4094,6 +4107,7 @@ fn query_documents(
             github_url,
             pub_status,
             paper_url,
+            citekey,
         });
     }
     // pub_status is computed, not a column — filter the peer-reviewed view here.

@@ -29,6 +29,8 @@ export interface DocumentItem {
   github_url: string | null;
   pub_status: string | null;
   paper_url: string | null;
+  /** Persistent, library-unique citation key (firstauthor+year+word). */
+  citekey: string | null;
 }
 
 export interface ImportSummary {

@@ -33,6 +33,8 @@ pub struct Document {
     pub pub_status: Option<String>,
     /// Best original link for sharing (DOI, else arXiv abstract page).
     pub paper_url: Option<String>,
+    /// Persistent, library-unique citation key (see `db::citekey`).
+    pub citekey: Option<String>,
 }
 
 /// Full editable metadata for one document (used by the manual editor).

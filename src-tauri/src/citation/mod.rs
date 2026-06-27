@@ -11,31 +11,50 @@ pub struct CiteItem {
     pub year: Option<i64>,
     pub venue: Option<String>,
     pub doi: Option<String>,
+    /// The persisted, library-unique citation key. When present it is emitted
+    /// verbatim (BibTeX entry key, CSL id, \cite{}, @pandoc); when absent we
+    /// fall back to the computed [`citekey`]. See `db::citekey`.
+    pub citekey: Option<String>,
 }
 
 fn alnum_lower(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
 }
 
-/// Stable-ish BibTeX citekey: firstauthorfamily + year + first title word.
-pub fn citekey(item: &CiteItem) -> String {
-    let fam = item
-        .authors
-        .first()
-        .and_then(|(_, f)| f.as_deref())
+/// Stable-ish BibTeX citekey from raw parts: firstauthorfamily + year + first
+/// title word (>3 chars). Shared with the DB layer that persists the key.
+pub fn citekey_from_parts(family: Option<&str>, year: Option<i64>, title: Option<&str>) -> String {
+    let fam = family
         .map(alnum_lower)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "anon".to_string());
-    let year = item.year.map(|y| y.to_string()).unwrap_or_default();
-    let word = item
-        .title
-        .as_deref()
+    let year = year.map(|y| y.to_string()).unwrap_or_default();
+    let word = title
         .unwrap_or("")
         .split_whitespace()
         .map(alnum_lower)
         .find(|w| w.len() > 3)
         .unwrap_or_default();
     format!("{fam}{year}{word}")
+}
+
+/// Computed citekey for an item (ignores any stored key).
+pub fn citekey(item: &CiteItem) -> String {
+    citekey_from_parts(
+        item.authors.first().and_then(|(_, f)| f.as_deref()),
+        item.year,
+        item.title.as_deref(),
+    )
+}
+
+/// The key to actually emit: the persisted citekey when present, else computed.
+fn key_of(item: &CiteItem) -> String {
+    item.citekey
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| citekey(item))
 }
 
 fn authors_bibtex(item: &CiteItem) -> String {
@@ -53,7 +72,7 @@ fn authors_bibtex(item: &CiteItem) -> String {
 }
 
 fn bibtex_entry(item: &CiteItem) -> String {
-    let mut lines = vec![format!("@article{{{},", citekey(item))];
+    let mut lines = vec![format!("@article{{{},", key_of(item))];
     if let Some(t) = &item.title {
         lines.push(format!("  title = {{{t}}},"));
     }
@@ -114,7 +133,7 @@ fn csl_json(items: &[CiteItem]) -> String {
         .iter()
         .map(|it| {
             json!({
-                "id": citekey(it),
+                "id": key_of(it),
                 "type": "article-journal",
                 "title": it.title,
                 "author": it.authors.iter().map(|(g, f)| json!({"given": g, "family": f})).collect::<Vec<_>>(),
@@ -196,9 +215,9 @@ pub fn build(items: &[CiteItem], format: &str) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         // Cite-while-write helpers (drop straight into a manuscript).
-        "citekey" => items.iter().map(citekey).collect::<Vec<_>>().join("\n"),
+        "citekey" => items.iter().map(key_of).collect::<Vec<_>>().join("\n"),
         "latex" => {
-            let keys = items.iter().map(citekey).collect::<Vec<_>>().join(",");
+            let keys = items.iter().map(key_of).collect::<Vec<_>>().join(",");
             if keys.is_empty() {
                 String::new()
             } else {
@@ -208,7 +227,7 @@ pub fn build(items: &[CiteItem], format: &str) -> String {
         "pandoc" => {
             let keys = items
                 .iter()
-                .map(|it| format!("@{}", citekey(it)))
+                .map(|it| format!("@{}", key_of(it)))
                 .collect::<Vec<_>>()
                 .join("; ");
             if keys.is_empty() {
@@ -235,6 +254,7 @@ mod tests {
             year: Some(2017),
             venue: Some("NeurIPS".to_string()),
             doi: Some("10.5555/3295222.3295349".to_string()),
+            citekey: None,
         }
     }
 
@@ -248,5 +268,22 @@ mod tests {
         assert!(build(&[sample()], "csljson").contains("\"family\""));
         assert!(build(&[sample()], "apa").contains("Vaswani, A."));
         assert!(build(&[sample()], "ieee").starts_with("[1]"));
+    }
+
+    #[test]
+    fn stored_citekey_overrides_computed() {
+        // Every key-emitting format uses the stored key verbatim.
+        let mut it = sample();
+        it.citekey = Some("vaswani2017attentionb".to_string());
+        assert!(build(std::slice::from_ref(&it), "bibtex").contains("@article{vaswani2017attentionb"));
+        assert!(build(std::slice::from_ref(&it), "csljson").contains("\"id\": \"vaswani2017attentionb\""));
+        assert_eq!(build(std::slice::from_ref(&it), "citekey"), "vaswani2017attentionb");
+        assert_eq!(build(std::slice::from_ref(&it), "latex"), "\\cite{vaswani2017attentionb}");
+        assert_eq!(build(&[it], "pandoc"), "[@vaswani2017attentionb]");
+        // ...but a blank/whitespace stored key falls back to the computed one.
+        let mut it = sample();
+        it.citekey = Some("   ".to_string());
+        assert_eq!(build(std::slice::from_ref(&it), "citekey"), "vaswani2017attention");
+        assert!(build(&[it], "csljson").contains("\"id\": \"vaswani2017attention\""));
     }
 }

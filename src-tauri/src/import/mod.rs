@@ -126,6 +126,8 @@ pub fn commit_import(conn: &Connection, p: &PreparedImport) -> Result<ImportOutc
         params![p.title, p.fulltext, p.path, p.hash, p.thumb_path, p.github_url],
     )
     .context("inserting document row")?;
+    // No citekey yet: a freshly-imported PDF has no authors until enrichment,
+    // and we don't persist authorless "anon…" keys (see db::citekey).
     Ok(ImportOutcome {
         document_id: conn.last_insert_rowid(),
         imported: true,
