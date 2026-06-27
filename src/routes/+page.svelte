@@ -25,6 +25,7 @@
     type CitationLinks,
     libraryHealth,
     type LibraryHealth,
+    ocrDocument,
     libraryFacets,
     type LibraryFacets,
     citationGaps,
@@ -1427,6 +1428,7 @@
   let health = $state<LibraryHealth | null>(null);
   let healthLoading = $state(false);
   async function openHealth() {
+    if (healthLoading) return; // re-entry guard: don't run two scans at once
     healthModal = true;
     healthLoading = true;
     health = null;
@@ -1442,6 +1444,25 @@
   function openHealthRow(id: number) {
     healthModal = false;
     openById(id);
+  }
+  // OCR a scanned PDF (Windows OCR engine), then refresh the health scan so the
+  // now-searchable document drops out of "PDF senza testo".
+  let ocrBusy = $state<number | null>(null);
+  async function runOcr(id: number) {
+    ocrBusy = id;
+    status = "OCR in corso… (può richiedere qualche secondo per documenti lunghi)";
+    try {
+      const res = await ocrDocument(id);
+      status = res.truncated
+        ? `OCR: ${res.chars.toLocaleString()} caratteri dalle prime ${res.pages} di ${res.total_pages} pagine (limite) ✓`
+        : `OCR completato: ${res.chars.toLocaleString()} caratteri da ${res.pages} pagine ✓`;
+      await loadDocs();
+      if (healthModal) await openHealth();
+    } catch (e) {
+      status = "Errore OCR: " + e;
+    } finally {
+      ocrBusy = null;
+    }
   }
 
   // ----- Citation gap-finder -----
@@ -2770,11 +2791,11 @@
           <p class="dimtext">Analisi in corso…</p>
         {:else if health}
           {@const cats = [
-            { label: "File mancanti sul disco", rows: health.missing_file, hint: "Il PDF non è più al percorso salvato." },
-            { label: "PDF senza testo estratto", rows: health.no_text, hint: "Probabili scansioni (immagine): non cercabili né indicizzabili." },
-            { label: "Metadati incompleti", rows: health.no_metadata, hint: "Manca titolo, anno o autori." },
-            { label: "Senza incorporamento semantico", rows: health.no_embedding, hint: "Esclusi dalla ricerca semantica e da «Correlati»." },
-            { label: "Senza copertina", rows: health.no_thumbnail, hint: "Nessuna anteprima generata." },
+            { label: "File mancanti sul disco", rows: health.missing_file, hint: "Il PDF non è più al percorso salvato.", ocr: false },
+            { label: "PDF senza testo estratto", rows: health.no_text, hint: "Probabili scansioni (immagine): non cercabili né indicizzabili. «OCR» riconosce il testo con il motore di Windows.", ocr: true },
+            { label: "Metadati incompleti", rows: health.no_metadata, hint: "Manca titolo, anno o autori.", ocr: false },
+            { label: "Senza incorporamento semantico", rows: health.no_embedding, hint: "Esclusi dalla ricerca semantica e da «Correlati».", ocr: false },
+            { label: "Senza copertina", rows: health.no_thumbnail, hint: "Nessuna anteprima generata.", ocr: false },
           ]}
           <p class="dimtext">{health.total} documenti analizzati.</p>
           {#each cats as cat (cat.label)}
@@ -2784,7 +2805,10 @@
                 <p class="dimtext">{cat.hint}</p>
                 <ul class="hflist">
                   {#each cat.rows.slice(0, 50) as r (r.id)}
-                    <li><button class="hflink" onclick={() => openHealthRow(r.id)} title={r.path}>{r.title ?? r.path.split(/[\\/]/).pop()}</button></li>
+                    <li class="refrow">
+                      <button class="hflink" onclick={() => openHealthRow(r.id)} title={r.path}>{r.title ?? r.path.split(/[\\/]/).pop()}</button>
+                      {#if cat.ocr}<button class="hflink small" disabled={ocrBusy === r.id} onclick={() => runOcr(r.id)} title="Riconosci il testo della scansione (motore OCR di Windows) e rendilo cercabile">{ocrBusy === r.id ? "OCR…" : "OCR"}</button>{/if}
+                    </li>
                   {/each}
                 </ul>
                 {#if cat.rows.length > 50}<p class="dimtext">…e altri {cat.rows.length - 50}.</p>{/if}

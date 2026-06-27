@@ -67,3 +67,16 @@ notify = "8"
 # --- Embedded terminal (PTY for the in-app terminal tab) ---
 portable-pty = "0.8"
 
+# --- OCR fallback for scanned PDFs: the built-in Windows.Media.Ocr engine
+#     (no bundled engine/models; uses the OS OCR language packs). ---
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Foundation",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Security_Cryptography",
+    "Storage_Streams",
+    "Win32_System_Com",
+] }
+

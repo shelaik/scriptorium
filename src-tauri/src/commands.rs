@@ -1606,6 +1606,71 @@ pub fn set_last_page(state: State<'_, AppState>, id: i64, page: i64, pages: Opti
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+pub struct OcrSummary {
+    /// Pages of the PDF that were OCR'd (<= total_pages; capped for huge files).
+    pub pages: usize,
+    pub total_pages: usize,
+    pub chars: usize,
+    /// True when the PDF had more pages than the OCR cap, so some were skipped.
+    pub truncated: bool,
+}
+
+/// OCR a scanned PDF that has no text layer: rasterize its pages with pdfium and
+/// run the built-in Windows OCR engine, then store the recognised text as the
+/// document's `fulltext` (the FTS triggers re-index it). Runs off the UI thread.
+/// Refuses to overwrite a document that already has extracted text.
+#[tauri::command]
+pub async fn ocr_document(app: AppHandle, id: i64) -> Result<OcrSummary, String> {
+    const MAX_OCR_PAGES: usize = 40;
+    tauri::async_runtime::spawn_blocking(move || -> Result<OcrSummary, String> {
+        let state = app.state::<AppState>();
+        let path = {
+            let conn = state.db.lock();
+            // Guard: never clobber a document that already has real text.
+            let existing: Option<String> = conn
+                .query_row("SELECT fulltext FROM documents WHERE id = ?1", params![id], |r| r.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?
+                .flatten();
+            if existing.map(|t| !t.trim().is_empty()).unwrap_or(false) {
+                return Err("Il documento ha già del testo estratto; OCR annullato per non sovrascriverlo".to_string());
+            }
+            resolve_existing_path(&conn, id)?
+                .ok_or_else(|| "Nessun file PDF su disco per questo documento".to_string())?
+        };
+        let out = crate::ocr::ocr_pdf(&state.pdfium, std::path::Path::new(&path), MAX_OCR_PAGES)
+            .map_err(|e| format!("{e:#}"))?;
+        let trimmed = out.text.trim();
+        if trimmed.is_empty() {
+            return Err("OCR non ha riconosciuto testo in questo PDF".to_string());
+        }
+        let chars = trimmed.chars().count();
+        {
+            // Re-check the guard inside the same lock to avoid a TOCTOU overwrite.
+            let conn = state.db.lock();
+            let n = conn
+                .execute(
+                    "UPDATE documents SET fulltext = ?1
+                     WHERE id = ?2 AND (fulltext IS NULL OR TRIM(fulltext) = '')",
+                    params![trimmed, id],
+                )
+                .map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("Il documento ha già del testo estratto; OCR annullato".to_string());
+            }
+        }
+        Ok(OcrSummary {
+            pages: out.pages_ocred,
+            total_pages: out.total_pages,
+            chars,
+            truncated: out.total_pages > out.pages_ocred,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The most recently opened documents (for the "Continue reading" shelf).
 #[tauri::command]
 pub fn recent_documents(state: State<'_, AppState>, limit: i64) -> Result<Vec<Document>, String> {
@@ -2706,8 +2771,8 @@ pub async fn discover_search(
     for r in &mut results {
         let exists: Option<i64> = conn
             .query_row(
-                "SELECT 1 FROM documents WHERE deleted_at IS NULL AND ((doi IS NOT NULL AND doi = ?1) OR path LIKE ?2) LIMIT 1",
-                params![r.doi, format!("%{}%", r.external_id)],
+                "SELECT 1 FROM documents WHERE deleted_at IS NULL AND ((doi IS NOT NULL AND doi = ?1) OR (?2 <> '' AND path LIKE ?3)) LIMIT 1",
+                params![r.doi, r.external_id, format!("%{}%", r.external_id)],
                 |row| row.get(0),
             )
             .optional()
@@ -2755,8 +2820,8 @@ pub async fn explore_citations(app: AppHandle, doi: String) -> Result<discovery:
     for r in nb.references.iter_mut().chain(nb.citations.iter_mut()) {
         let exists: Option<i64> = conn
             .query_row(
-                "SELECT 1 FROM documents WHERE deleted_at IS NULL AND ((doi IS NOT NULL AND doi = ?1) OR path LIKE ?2) LIMIT 1",
-                params![r.doi, format!("%{}%", r.external_id)],
+                "SELECT 1 FROM documents WHERE deleted_at IS NULL AND ((doi IS NOT NULL AND doi = ?1) OR (?2 <> '' AND path LIKE ?3)) LIMIT 1",
+                params![r.doi, r.external_id, format!("%{}%", r.external_id)],
                 |row| row.get(0),
             )
             .optional()
@@ -2785,8 +2850,8 @@ pub async fn discover_add(app: AppHandle, result: discovery::SearchResult) -> Re
         let conn = state.db.lock();
         let dup: Option<i64> = conn
             .query_row(
-                "SELECT id FROM documents WHERE deleted_at IS NULL AND ((doi IS NOT NULL AND doi = ?1) OR path LIKE ?2) LIMIT 1",
-                params![result.doi, format!("%{}%", result.external_id)],
+                "SELECT id FROM documents WHERE deleted_at IS NULL AND ((doi IS NOT NULL AND doi = ?1) OR (?2 <> '' AND path LIKE ?3)) LIMIT 1",
+                params![result.doi, result.external_id, format!("%{}%", result.external_id)],
                 |r| r.get(0),
             )
             .optional()

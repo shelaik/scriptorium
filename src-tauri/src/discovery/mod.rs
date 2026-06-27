@@ -349,6 +349,21 @@ fn openalex_work_id(full: &str) -> &str {
     full.rsplit('/').next().unwrap_or(full)
 }
 
+/// GET an OpenAlex works URL and map the `results` array to [`SearchResult`]s,
+/// propagating HTTP/parse errors (so rate limits / auth issues surface instead
+/// of silently returning an empty list).
+async fn fetch_works(client: &reqwest::Client, url: &str) -> Result<Vec<SearchResult>> {
+    let resp = client.get(url).send().await.context("OpenAlex works request")?;
+    if resp.status().as_u16() == 403 || resp.status().as_u16() == 401 {
+        anyhow::bail!("OpenAlex richiede una chiave API valida (HTTP {})", resp.status());
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("OpenAlex HTTP {}", resp.status());
+    }
+    let body: Value = resp.json().await.context("OpenAlex works JSON")?;
+    Ok(body["results"].as_array().map(|a| a.iter().map(openalex_to_result).collect()).unwrap_or_default())
+}
+
 /// "Snowball" neighbours of a paper identified by `doi`: the works it references
 /// (backward) and the works that cite it (forward, ranked by citation count).
 /// Both come from OpenAlex. `max` caps each list. Network-gated by the caller.
@@ -364,7 +379,9 @@ pub async fn openalex_neighbors(
     } else {
         format!("&api_key={}", enc(api_key.trim()))
     };
-    let max = max.clamp(1, 100);
+    // OpenAlex caps an OR filter (filter=openalex:a|b|…) at 50 ids, so never
+    // batch more than that for the backward request.
+    let max = max.clamp(1, 50);
 
     // 1. Resolve the seed work by DOI to get its id + referenced_works. Use the
     //    `filter=doi:` query form (not a path lookup): DOIs contain slashes that
@@ -408,13 +425,7 @@ pub async fn openalex_neighbors(
             select,
             key_part
         );
-        if let Ok(r) = client.get(&url).send().await {
-            if r.status().is_success() {
-                if let Ok(body) = r.json::<Value>().await {
-                    references = body["results"].as_array().map(|a| a.iter().map(openalex_to_result).collect()).unwrap_or_default();
-                }
-            }
-        }
+        references = fetch_works(client, &url).await.context("OpenAlex references")?;
         references.sort_by(|a, b| b.citations.cmp(&a.citations));
     }
 
@@ -423,14 +434,12 @@ pub async fn openalex_neighbors(
         "https://api.openalex.org/works?filter=cites:{}&sort=cited_by_count:desc&per-page={}&select={}{}",
         work_id, max, select, key_part
     );
-    let mut citations = Vec::new();
-    if let Ok(r) = client.get(&cites_url).send().await {
-        if r.status().is_success() {
-            if let Ok(body) = r.json::<Value>().await {
-                citations = body["results"].as_array().map(|a| a.iter().map(openalex_to_result).collect()).unwrap_or_default();
-            }
-        }
-    }
+    let mut citations = fetch_works(client, &cites_url).await.context("OpenAlex citations")?;
+
+    // Drop any malformed works without an id: an empty external_id would break
+    // UI keying and make a `path LIKE '%%'` in-library check match everything.
+    references.retain(|r| !r.external_id.is_empty());
+    citations.retain(|r| !r.external_id.is_empty());
 
     Ok(CitationNeighbors { references, citations, seed_unresolved: false })
 }

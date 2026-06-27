@@ -10,6 +10,7 @@ mod import;
 mod metadata;
 mod model;
 mod obsidian;
+mod ocr;
 mod rag;
 mod secret;
 mod table;
@@ -144,6 +145,7 @@ pub fn run() {
             commands::add_document_tag,
             commands::find_duplicates,
             commands::merge_documents,
+            commands::ocr_document,
             commands::add_by_identifiers,
             commands::import_bibtex,
             commands::find_pdf,

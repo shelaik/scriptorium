@@ -429,6 +429,16 @@ export interface LibraryHealth {
 /** Read-only scan of the library for rot signals (missing files, no text, dups, …). */
 export const libraryHealth = () => invoke<LibraryHealth>("library_health");
 
+// ----- OCR fallback for scanned PDFs (Windows OCR engine) -----
+export interface OcrSummary {
+  pages: number;
+  total_pages: number;
+  chars: number;
+  truncated: boolean;
+}
+/** OCR a scanned PDF and store the recognised text as its fulltext. */
+export const ocrDocument = (id: number) => invoke<OcrSummary>("ocr_document", { id });
+
 // ----- Sidebar facet counts -----
 export interface LibraryFacets {
   all: number;
