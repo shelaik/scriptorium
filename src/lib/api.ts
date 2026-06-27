@@ -292,6 +292,16 @@ export const discoverSearch = (
 export const discoverAdd = (result: SearchResult) =>
   invoke<string>("discover_add", { result });
 
+// ----- Snowball / citation explorer -----
+export interface CitationNeighbors {
+  references: SearchResult[];
+  citations: SearchResult[];
+  seed_unresolved: boolean;
+}
+/** OpenAlex references (cited by this paper) + citing papers, for a DOI. */
+export const exploreCitations = (doi: string) =>
+  invoke<CitationNeighbors>("explore_citations", { doi });
+
 // ----- AI (Ollama / LM Studio) — optional -----
 export type AiProvider = "ollama" | "lmstudio";
 export interface AiSettings {

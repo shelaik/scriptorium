@@ -284,48 +284,155 @@ pub async fn search_openalex(
         anyhow::bail!("OpenAlex HTTP {status}");
     }
     let body: Value = resp.json().await.context("OpenAlex JSON")?;
-    let mut results = Vec::new();
-    for w in body["results"].as_array().cloned().unwrap_or_default() {
-        let authors = w["authorships"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x["author"]["display_name"].as_str())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let oa_pdf_url = w["best_oa_location"]["pdf_url"]
-            .as_str()
-            .or_else(|| w["open_access"]["oa_url"].as_str())
-            .map(str::to_string);
-        let full_id = w["id"].as_str().unwrap_or("");
-        let id = full_id.rsplit('/').next().unwrap_or("").to_string();
-        let doi = w["doi"].as_str().and_then(clean_doi);
-        // Prefer the DOI landing page; fall back to the OpenAlex work page.
-        let url = doi
-            .as_ref()
-            .map(|d| format!("https://doi.org/{d}"))
-            .or_else(|| (!full_id.is_empty()).then(|| full_id.to_string()));
-        results.push(SearchResult {
-            source: "openalex".to_string(),
-            external_id: id,
-            doi,
-            title: w["title"].as_str().map(str::to_string),
-            authors,
-            year: w["publication_year"].as_i64(),
-            venue: w["primary_location"]["source"]["display_name"].as_str().map(str::to_string),
-            abstract_text: decode_inverted_abstract(&w["abstract_inverted_index"]),
-            url,
-            is_oa: w["open_access"]["is_oa"].as_bool().unwrap_or(false),
-            oa_pdf_url,
-            citations: w["cited_by_count"].as_i64().unwrap_or(0),
-            in_library: false,
-            github_url: None,
-            pub_status: None,
-        });
-    }
+    let results = body["results"]
+        .as_array()
+        .map(|arr| arr.iter().map(openalex_to_result).collect())
+        .unwrap_or_default();
     Ok(results)
+}
+
+/// Map one OpenAlex `work` JSON object into a normalized [`SearchResult`].
+/// Shared by full-text search and the citation-neighbours explorer.
+fn openalex_to_result(w: &Value) -> SearchResult {
+    let authors = w["authorships"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x["author"]["display_name"].as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let oa_pdf_url = w["best_oa_location"]["pdf_url"]
+        .as_str()
+        .or_else(|| w["open_access"]["oa_url"].as_str())
+        .map(str::to_string);
+    let full_id = w["id"].as_str().unwrap_or("");
+    let id = full_id.rsplit('/').next().unwrap_or("").to_string();
+    let doi = w["doi"].as_str().and_then(clean_doi);
+    // Prefer the DOI landing page; fall back to the OpenAlex work page.
+    let url = doi
+        .as_ref()
+        .map(|d| format!("https://doi.org/{d}"))
+        .or_else(|| (!full_id.is_empty()).then(|| full_id.to_string()));
+    SearchResult {
+        source: "openalex".to_string(),
+        external_id: id,
+        doi,
+        title: w["title"].as_str().map(str::to_string),
+        authors,
+        year: w["publication_year"].as_i64(),
+        venue: w["primary_location"]["source"]["display_name"].as_str().map(str::to_string),
+        abstract_text: decode_inverted_abstract(&w["abstract_inverted_index"]),
+        url,
+        is_oa: w["open_access"]["is_oa"].as_bool().unwrap_or(false),
+        oa_pdf_url,
+        citations: w["cited_by_count"].as_i64().unwrap_or(0),
+        in_library: false,
+        github_url: None,
+        pub_status: None,
+    }
+}
+
+/// References (works this paper cites) and citations (works that cite it),
+/// fetched from OpenAlex for the citation-graph explorer.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CitationNeighbors {
+    pub references: Vec<SearchResult>,
+    pub citations: Vec<SearchResult>,
+    /// True when the seed paper could not be resolved on OpenAlex.
+    pub seed_unresolved: bool,
+}
+
+/// Extract the bare OpenAlex work id (e.g. `W123`) from a full work URL/id.
+fn openalex_work_id(full: &str) -> &str {
+    full.rsplit('/').next().unwrap_or(full)
+}
+
+/// "Snowball" neighbours of a paper identified by `doi`: the works it references
+/// (backward) and the works that cite it (forward, ranked by citation count).
+/// Both come from OpenAlex. `max` caps each list. Network-gated by the caller.
+pub async fn openalex_neighbors(
+    client: &reqwest::Client,
+    doi: &str,
+    api_key: &str,
+    max: usize,
+) -> Result<CitationNeighbors> {
+    let select = "id,doi,title,publication_year,authorships,primary_location,open_access,best_oa_location,cited_by_count,abstract_inverted_index";
+    let key_part = if api_key.trim().is_empty() {
+        String::new()
+    } else {
+        format!("&api_key={}", enc(api_key.trim()))
+    };
+    let max = max.clamp(1, 100);
+
+    // 1. Resolve the seed work by DOI to get its id + referenced_works. Use the
+    //    `filter=doi:` query form (not a path lookup): DOIs contain slashes that
+    //    break percent-encoded path routing, but encode cleanly as a query value.
+    let doi_clean = doi
+        .trim()
+        .trim_start_matches("https://doi.org/")
+        .trim_start_matches("http://doi.org/")
+        .trim_start_matches("doi:");
+    let seed_url = format!(
+        "https://api.openalex.org/works?filter=doi:{}&per-page=1&select=id,referenced_works{}",
+        enc(doi_clean),
+        key_part
+    );
+    let resp = client.get(&seed_url).send().await.context("OpenAlex seed request")?;
+    if resp.status().as_u16() == 403 || resp.status().as_u16() == 401 {
+        anyhow::bail!("OpenAlex richiede una chiave API valida (HTTP {})", resp.status());
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("OpenAlex HTTP {}", resp.status());
+    }
+    let body: Value = resp.json().await.context("OpenAlex seed JSON")?;
+    let seed = body["results"].get(0).cloned().unwrap_or(Value::Null);
+    let work_id = openalex_work_id(seed["id"].as_str().unwrap_or("")).to_string();
+    if work_id.is_empty() {
+        return Ok(CitationNeighbors { references: Vec::new(), citations: Vec::new(), seed_unresolved: true });
+    }
+    let referenced: Vec<String> = seed["referenced_works"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| openalex_work_id(s).to_string()).collect())
+        .unwrap_or_default();
+
+    // 2. Backward — metadata for (up to `max`) referenced works, via an OR filter.
+    let mut references = Vec::new();
+    let ids: Vec<String> = referenced.into_iter().take(max).collect();
+    if !ids.is_empty() {
+        let url = format!(
+            "https://api.openalex.org/works?filter=openalex:{}&per-page={}&select={}{}",
+            ids.join("|"),
+            max,
+            select,
+            key_part
+        );
+        if let Ok(r) = client.get(&url).send().await {
+            if r.status().is_success() {
+                if let Ok(body) = r.json::<Value>().await {
+                    references = body["results"].as_array().map(|a| a.iter().map(openalex_to_result).collect()).unwrap_or_default();
+                }
+            }
+        }
+        references.sort_by(|a, b| b.citations.cmp(&a.citations));
+    }
+
+    // 3. Forward — top works that cite the seed, ranked by citation count.
+    let cites_url = format!(
+        "https://api.openalex.org/works?filter=cites:{}&sort=cited_by_count:desc&per-page={}&select={}{}",
+        work_id, max, select, key_part
+    );
+    let mut citations = Vec::new();
+    if let Ok(r) = client.get(&cites_url).send().await {
+        if r.status().is_success() {
+            if let Ok(body) = r.json::<Value>().await {
+                citations = body["results"].as_array().map(|a| a.iter().map(openalex_to_result).collect()).unwrap_or_default();
+            }
+        }
+    }
+
+    Ok(CitationNeighbors { references, citations, seed_unresolved: false })
 }
 
 /// First element of a JSON string-array (ADS returns title/doi as arrays).

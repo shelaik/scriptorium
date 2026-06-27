@@ -160,6 +160,7 @@ pub fn run() {
             commands::set_api_key,
             commands::discover_search,
             commands::discover_add,
+            commands::explore_citations,
             commands::get_ai_settings,
             commands::set_ai_settings,
             commands::ai_list_models,

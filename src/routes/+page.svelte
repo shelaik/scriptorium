@@ -78,6 +78,8 @@
     setApiKey,
     discoverSearch,
     discoverAdd,
+    exploreCitations,
+    type CitationNeighbors,
     getObsidianVault,
     setObsidianVault,
     exportToObsidian,
@@ -830,6 +832,54 @@
   let citLoading = $state(false);
   let citData = $state<CitationLinks | null>(null);
   let citTitle = $state("");
+
+  // Snowball / online citation explorer (OpenAlex).
+  let exploreModal = $state(false);
+  let exploreLoading = $state(false);
+  let exploreData = $state<CitationNeighbors | null>(null);
+  let exploreTitle = $state("");
+  /** Re-seed the explorer from a paper's DOI (the seed document or any neighbour). */
+  async function runExplore(doi: string, title: string) {
+    exploreLoading = true;
+    exploreData = null;
+    exploreTitle = title;
+    try {
+      exploreData = await exploreCitations(doi);
+    } catch (e) {
+      status = "Errore esplora citazioni: " + e;
+      exploreModal = false;
+    } finally {
+      exploreLoading = false;
+    }
+  }
+  async function openExplore(d: DocumentItem) {
+    cardMenu = null;
+    if (!d.doi) {
+      status = "Serve un DOI per esplorare le citazioni — recupera prima i Metadati";
+      return;
+    }
+    exploreModal = true;
+    await runExplore(d.doi, d.title ?? "documento");
+  }
+  /** Add one neighbour to the library (reuses discover_add) and mark it in place. */
+  async function addNeighbor(r: SearchResult) {
+    addingExt = r.external_id;
+    try {
+      const res = await discoverAdd(r);
+      const mark = (list: SearchResult[]) =>
+        list.map((x) => (x.external_id === r.external_id ? { ...x, in_library: true } : x));
+      if (exploreData)
+        exploreData = { ...exploreData, references: mark(exploreData.references), citations: mark(exploreData.citations) };
+      status =
+        res === "added_pdf" ? "Aggiunto con PDF ✓" : res === "added_ref" ? "Aggiunto (solo metadati) ✓" : "Già presente";
+      await loadDocs();
+      await loadSidebar();
+    } catch (e) {
+      status = "Errore: " + e;
+    } finally {
+      addingExt = null;
+    }
+  }
   async function openCitations(d: DocumentItem) {
     cardMenu = null;
     citModal = true;
@@ -2528,6 +2578,7 @@
       <button class="medit" title="Mostra i documenti più simili per significato (richiede l'indice semantico)" onclick={() => { setFilter({ kind: "related", id: cardMenu!.doc.id, label: cardMenu!.doc.title ?? "documento" }); cardMenu = null; }}>Correlati</button>
       <button class="medit" title="Repository GitHub citati dal paper + modelli/dataset su Hugging Face" onclick={() => openHf(cardMenu!.doc)}>Codice & repository (GitHub + HF)</button>
       <button class="medit" title="Bibliografia del paper e documenti della tua libreria che lo citano" onclick={() => openCitations(cardMenu!.doc)}>Riferimenti e citazioni</button>
+      {#if cardMenu.doc.doi}<button class="medit" title="Esplora online i riferimenti e i paper che lo citano (OpenAlex), e aggiungili alla libreria" onclick={() => openExplore(cardMenu!.doc)}>Esplora citazioni (online)</button>{/if}
       <button class="medit" title="Fai una domanda solo su questo documento (AI locale)" onclick={() => askAboutDoc(cardMenu!.doc)}>Chiedi su questo documento</button>
       <button class="medit" onclick={() => copyCite(cardMenu!.doc, "apa")} title="Copia la citazione formattata (APA) negli appunti">Copia citazione (APA)</button>
       <button class="medit" onclick={() => copyCite(cardMenu!.doc, "bibtex")} title="Copia la voce BibTeX negli appunti">Copia BibTeX</button>
@@ -2655,6 +2706,57 @@
           </div>
         {/if}
         <div class="modactions"><button class="ghost" onclick={() => (citModal = false)}>Chiudi</button></div>
+      </div>
+    </div>
+  {/if}
+
+  {#snippet neighborRow(r: SearchResult)}
+    <li class="exrow">
+      <div class="exmain">
+        <span class="extitle" title={r.title ?? ""}>{r.title ?? "Senza titolo"}</span>
+        <span class="exmeta">{[r.authors?.[0], r.year, r.venue].filter(Boolean).join(" · ")}{r.citations ? ` · ${r.citations} cit.` : ""}</span>
+      </div>
+      <div class="exacts">
+        {#if r.in_library}
+          <span class="badge2 inlibref">in libreria</span>
+        {:else}
+          <button class="hflink small" disabled={addingExt === r.external_id} onclick={() => addNeighbor(r)} title="Aggiungi alla libreria (scarica il PDF se Open Access, altrimenti come riferimento)">{addingExt === r.external_id ? "…" : "+ Aggiungi"}</button>
+        {/if}
+        {#if r.doi}<button class="hflink small" onclick={() => runExplore(r.doi!, r.title ?? "documento")} title="Esplora le citazioni di questo paper">Esplora ↗</button>{/if}
+        {#if r.url}<button class="hflink small" onclick={() => openInBrowser(r.url!)} title="Apri la pagina del paper">↗</button>{/if}
+      </div>
+    </li>
+  {/snippet}
+
+  {#if exploreModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) exploreModal = false; }} role="presentation">
+      <div class="idmodal hfwide exwide" role="dialog" tabindex="-1">
+        <h2>Esplora citazioni</h2>
+        <p class="dimtext" title={exploreTitle}>{exploreTitle} — da OpenAlex; «Esplora ↗» per spostarti di nodo in nodo (snowball)</p>
+        {#if exploreLoading}
+          <p class="dimtext">Carico la rete di citazioni…</p>
+        {:else if exploreData}
+          {#if exploreData.seed_unresolved}
+            <p class="dimtext">OpenAlex non conosce questo paper (DOI non trovato). Prova con un documento che ha un DOI valido.</p>
+          {:else}
+            <div class="exgrid">
+              <div class="hfsec">
+                <h3>Riferimenti — cita ({exploreData.references.length})</h3>
+                {#if exploreData.references.length}
+                  <ul class="hflist exlist">{#each exploreData.references as r (r.external_id)}{@render neighborRow(r)}{/each}</ul>
+                {:else}<p class="dimtext">Nessun riferimento noto a OpenAlex per questo paper.</p>{/if}
+              </div>
+              <div class="hfsec ghsec">
+                <h3>Citato da ({exploreData.citations.length})</h3>
+                {#if exploreData.citations.length}
+                  <ul class="hflist exlist">{#each exploreData.citations as r (r.external_id)}{@render neighborRow(r)}{/each}</ul>
+                {:else}<p class="dimtext">Nessun paper che cita questo (ancora) su OpenAlex.</p>{/if}
+              </div>
+            </div>
+          {/if}
+        {/if}
+        <div class="modactions"><button class="ghost" onclick={() => (exploreModal = false)}>Chiudi</button></div>
       </div>
     </div>
   {/if}
@@ -3664,6 +3766,18 @@
   .reftext { font-size: 12px; color: var(--dim); line-height: 1.45; flex: 1; }
   .badge2.inlibref { color: var(--accent); border-color: var(--accent-soft2); background: var(--accent-soft); flex-shrink: 0; }
   .reflist .hflink { white-space: normal; }
+  /* Citation explorer (snowball): two columns of neighbour papers. */
+  .exwide { width: min(880px, 94vw); }
+  .exgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .exgrid .hfsec { margin-top: 12px; }
+  .exgrid .ghsec { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+  .exlist { max-height: 50vh; }
+  .exrow { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-soft); }
+  .exmain { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .extitle { font-size: 12.5px; color: var(--text); line-height: 1.35; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
+  .exmeta { font-size: 11px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .exacts { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  @media (max-width: 720px) { .exgrid { grid-template-columns: 1fr; } }
   /* GitHub section + rendered README */
   .hfwide { width: 640px; max-height: 85vh; overflow-y: auto; }
   .ghsec { border-top: none; padding-top: 0; margin-top: 8px; }

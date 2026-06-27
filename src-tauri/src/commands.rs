@@ -2723,6 +2723,50 @@ pub async fn discover_search(
     Ok(results)
 }
 
+/// "Snowball" citation explorer: for a paper's DOI, fetch from OpenAlex the works
+/// it references (backward) and the works that cite it (forward), marking which
+/// are already in the library. Each neighbour is a `SearchResult`, so the UI can
+/// add it with the existing `discover_add`. Network-gated like `discover_search`.
+#[tauri::command]
+pub async fn explore_citations(app: AppHandle, doi: String) -> Result<discovery::CitationNeighbors, String> {
+    let doi = doi.trim().to_string();
+    if doi.is_empty() {
+        return Err("Serve un DOI per esplorare le citazioni di questo documento".into());
+    }
+    let (enabled, key, email) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        (
+            setting(&conn, "discovery_enabled").as_deref() == Some("1"),
+            secret::get("openalex_key").unwrap_or_default(),
+            setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty()),
+        )
+    };
+    if !enabled {
+        return Err("La ricerca online è disattivata (abilitala nelle impostazioni)".into());
+    }
+    let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
+    let mut nb = discovery::openalex_neighbors(&client, &doi, &key, 40)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let state = app.state::<AppState>();
+    let conn = state.db.lock();
+    for r in nb.references.iter_mut().chain(nb.citations.iter_mut()) {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM documents WHERE deleted_at IS NULL AND ((doi IS NOT NULL AND doi = ?1) OR path LIKE ?2) LIMIT 1",
+                params![r.doi, format!("%{}%", r.external_id)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        r.in_library = exists.is_some();
+        r.pub_status = discovery::classify_pub_status(r.doi.as_deref(), r.venue.as_deref(), Some("openalex"));
+    }
+    Ok(nb)
+}
+
 /// Add a search result: download the OA PDF if available, else a metadata-only
 /// reference. Returns "added_pdf" | "added_ref" | "duplicate".
 #[tauri::command]
