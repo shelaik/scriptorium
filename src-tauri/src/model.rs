@@ -8,6 +8,8 @@ pub struct Tag {
     pub id: i64,
     pub name: String,
     pub color: Option<String>,
+    /// How many (non-deleted) documents currently carry this tag.
+    pub count: i64,
 }
 
 /// A library entry as shown in the UI. Metadata fields are filled at import

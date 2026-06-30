@@ -1393,7 +1393,14 @@ fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> any
 pub fn list_tags(state: State<'_, AppState>) -> Result<Vec<Tag>, String> {
     let conn = state.db.lock();
     let mut stmt = conn
-        .prepare("SELECT id, name, color FROM tags ORDER BY name")
+        .prepare(
+            "SELECT t.id, t.name, t.color, COUNT(d.id) AS cnt \
+             FROM tags t \
+             LEFT JOIN document_tags dt ON dt.tag_id = t.id \
+             LEFT JOIN documents d ON d.id = dt.document_id AND d.deleted_at IS NULL \
+             GROUP BY t.id, t.name, t.color \
+             ORDER BY t.name",
+        )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
@@ -1401,6 +1408,7 @@ pub fn list_tags(state: State<'_, AppState>) -> Result<Vec<Tag>, String> {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 color: r.get(2)?,
+                count: r.get(3)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1418,13 +1426,17 @@ pub fn create_tag(state: State<'_, AppState>, name: String, color: Option<String
     )
     .map_err(|e| e.to_string())?;
     conn.query_row(
-        "SELECT id, name, color FROM tags WHERE name = ?1",
+        "SELECT t.id, t.name, t.color, \
+            (SELECT COUNT(*) FROM document_tags dt JOIN documents d \
+             ON d.id = dt.document_id AND d.deleted_at IS NULL WHERE dt.tag_id = t.id) AS cnt \
+         FROM tags t WHERE t.name = ?1",
         params![name],
         |r| {
             Ok(Tag {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 color: r.get(2)?,
+                count: r.get(3)?,
             })
         },
     )
@@ -4100,6 +4112,7 @@ fn load_tags(conn: &Connection, document_id: i64) -> anyhow::Result<Vec<Tag>> {
             id: r.get(0)?,
             name: r.get(1)?,
             color: r.get(2)?,
+            count: 0, // per-document tag list; the library-wide count isn't needed here
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)

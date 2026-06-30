@@ -2144,8 +2144,9 @@
         <div class="taglist">
           {#each displayedTags as t (t.id)}
             <div class="navrow">
-              <button class="navitem" class:active={tagFilter.includes(t.id)} onclick={() => toggleTagFilter(t.id)} title={`Filtra per il tag "${t.name}" — puoi selezionarne più di uno`}>
+              <button class="navitem" class:active={tagFilter.includes(t.id)} onclick={() => toggleTagFilter(t.id)} title={`Filtra per il tag "${t.name}" (${t.count} paper) — puoi selezionarne più di uno`}>
                 <span class="dot" style="background:{t.color ?? '#888'}"></span>{t.name}
+                <span class="navcount">{t.count}</span>
                 {#if tagFilter.includes(t.id)}<span class="navcheck">✓</span>{/if}
               </button>
               <button class="x" title="Elimina questo tag (lo rimuove da tutti i documenti)" onclick={() => removeTag(t)}>×</button>
@@ -2630,7 +2631,7 @@
                   {/if}
                   {#if d.tags.length}
                     <div class="chips">
-                      {#each d.tags as t (t.id)}<span class="chip" style="background:{(t.color ?? '#888')}33; border-color:{t.color ?? '#888'}">{t.name}</span>{/each}
+                      {#each d.tags as t (t.id)}<span role="button" tabindex="0" class="chip chipsel" class:on={tagFilter.includes(t.id)} style="background:{(t.color ?? '#888')}33; border-color:{t.color ?? '#888'}" title={`Filtra: mostra solo i paper col tag «${t.name}» (clicca altri tag per restringere; ri-clic per togliere)`} onclick={(e) => { e.stopPropagation(); toggleTagFilter(t.id); }} onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); toggleTagFilter(t.id); } }}>{#if tagFilter.includes(t.id)}✓ {/if}{t.name}</span>{/each}
                     </div>
                   {/if}
                 </div>
@@ -2678,7 +2679,7 @@
                     <td class="dim" title={d.venue ?? ""}>{d.venue || "—"}{#if d.pub_status}<span class="badgeinline">{@render pubBadge(d.pub_status, d.paper_url)}</span>{/if}</td>
                     <td>
                       <div class="tagcell">
-                        {#each d.tags.slice(0, 2) as t (t.id)}<span class="chip" style="background:{(t.color ?? '#888')}33; border-color:{t.color ?? '#888'}">{t.name}</span>{/each}
+                        {#each d.tags.slice(0, 2) as t (t.id)}<span role="button" tabindex="0" class="chip chipsel" class:on={tagFilter.includes(t.id)} style="background:{(t.color ?? '#888')}33; border-color:{t.color ?? '#888'}" title={`Filtra: mostra solo i paper col tag «${t.name}» (clicca altri tag per restringere; ri-clic per togliere)`} onclick={(e) => { e.stopPropagation(); toggleTagFilter(t.id); }} onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); toggleTagFilter(t.id); } }}>{#if tagFilter.includes(t.id)}✓ {/if}{t.name}</span>{/each}
                         {#if d.tags.length > 2}<span class="more">+{d.tags.length - 2}</span>{/if}
                       </div>
                     </td>
@@ -3584,7 +3585,7 @@
   }
   .navitem:hover { background: var(--hover); }
   .navitem.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-  .navcheck { margin-left: auto; color: var(--accent); font-size: 12px; }
+  .navcheck { margin-left: 5px; color: var(--accent); font-size: 12px; }
   /* Whole-library count on a sidebar filter, right-aligned and muted. */
   .navcount { margin-left: auto; color: var(--faint); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .navitem.active .navcount { color: var(--accent); }
@@ -3797,6 +3798,10 @@
   .venue { font-size: 11.5px; color: var(--faint); margin: 0; }
   .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
   .chip { font-size: 10.5px; padding: 1px 7px; border-radius: 10px; border: 1px solid; color: var(--text); }
+  /* Clickable tag chip: click selects every paper with that tag (AND-refine with more). */
+  .chipsel { cursor: pointer; font-family: inherit; margin: 0; line-height: 1.45; }
+  .chipsel:hover { filter: brightness(1.1); }
+  .chipsel.on { box-shadow: 0 0 0 2px var(--accent); font-weight: 600; }
   /* favorite star — grid overlay (mirrors .dots) */
   .starbtn {
     position: absolute; top: 6px; left: 6px; z-index: 2;

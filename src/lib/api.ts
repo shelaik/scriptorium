@@ -5,6 +5,8 @@ export interface Tag {
   id: number;
   name: string;
   color: string | null;
+  /** How many (non-deleted) documents carry this tag (0 for per-document tag lists). */
+  count: number;
 }
 
 export interface Collection {
