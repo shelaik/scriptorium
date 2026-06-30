@@ -114,6 +114,57 @@ pub fn get_thumbnail(state: State<'_, AppState>, id: i64) -> Result<Option<Strin
     }
 }
 
+/// Re-render every PDF document's cover thumbnail at the current resolution
+/// ([`pdf::THUMB_WIDTH`]), overwriting the cached PNGs. Lets an existing library —
+/// whose covers were rendered at the old lower width — look crisp when the grid is
+/// zoomed in. Heavy (one pdfium render per document), so it runs off the async
+/// runtime; returns how many covers were regenerated.
+#[tauri::command]
+pub async fn rebuild_thumbnails(app: AppHandle) -> Result<usize, String> {
+    let dir = thumb_dir(&app);
+    tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        std::fs::create_dir_all(&dir).ok();
+        let state = app.state::<AppState>();
+        // Snapshot the work list, then render WITHOUT holding the DB lock.
+        let rows: Vec<(i64, String, Option<String>, Option<String>)> = {
+            let conn = state.db.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, path, file_hash, thumb_path FROM documents \
+                     WHERE deleted_at IS NULL AND path NOT LIKE 'ref:%'",
+                )
+                .map_err(|e| e.to_string())?;
+            let it = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .map_err(|e| e.to_string())?;
+            it.filter_map(Result::ok).collect()
+        };
+        let mut done = 0usize;
+        for (id, path, hash, thumb_path) in rows {
+            let src = std::path::Path::new(&path);
+            if !src.is_file() {
+                continue;
+            }
+            // Overwrite the existing cover file, else key a fresh one by file hash.
+            let out = match thumb_path.filter(|t| !t.trim().is_empty()) {
+                Some(t) => std::path::PathBuf::from(t),
+                None => dir.join(format!("{}.png", hash.unwrap_or_else(|| id.to_string()))),
+            };
+            if pdf::render_thumbnail(&state.pdfium, src, &out, pdf::THUMB_WIDTH).is_ok() {
+                let conn = state.db.lock();
+                let _ = conn.execute(
+                    "UPDATE documents SET thumb_path = ?1 WHERE id = ?2",
+                    params![out.to_string_lossy().to_string(), id],
+                );
+                done += 1;
+            }
+        }
+        Ok(done)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Result of a metadata-enrichment batch.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EnrichSummary {

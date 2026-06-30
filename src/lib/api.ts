@@ -379,6 +379,10 @@ export const setWatchedFolder = (path: string | null) =>
 export const getThumbnail = (id: number) =>
   invoke<string | null>("get_thumbnail", { id });
 
+/** Re-render all cover thumbnails at the current (high) resolution. Returns the count. */
+export const rebuildThumbnails = () =>
+  invoke<number>("rebuild_thumbnails");
+
 export interface EnrichSummary {
   updated: number;
   no_doi: number;

@@ -7,6 +7,7 @@
     importFiles,
     listDocuments,
     getThumbnail,
+    rebuildThumbnails,
     enrichAll,
     searchDocuments,
     relatedDocuments,
@@ -80,6 +81,7 @@
     discoverSearch,
     discoverAdd,
     exploreCitations,
+    writeTextFile,
     type CitationNeighbors,
     getObsidianVault,
     setObsidianVault,
@@ -118,6 +120,7 @@
   let recentDocs = $state<DocumentItem[]>([]); // "Continue reading" shelf
   let results = $state<DocumentItem[]>([]);
   let thumbs = $state<Record<number, string>>({});
+  let rebuildingThumbs = $state(false);
   let tags = $state<Tag[]>([]);
   let collections = $state<Collection[]>([]);
   let filter = $state<Filter>({ kind: "all" });
@@ -196,15 +199,16 @@
     }
   });
   let editingId = $state<number | null>(null);
-  type SortKey = "favorite" | "author" | "title" | "year" | "added";
+  type SortKey = "favorite" | "author" | "title" | "year" | "venue" | "added";
   // Multi-criteria sort: criteria apply in the order the user activated them.
   let sortChain = $state<{ key: SortKey; dir: "asc" | "desc" }[]>([]);
-  const SORT_KEYS: SortKey[] = ["favorite", "author", "title", "year", "added"];
+  const SORT_KEYS: SortKey[] = ["favorite", "author", "title", "year", "venue", "added"];
   const SORT_LABELS: Record<SortKey, string> = {
     favorite: "Preferiti",
     author: "Primo autore",
     title: "Titolo",
     year: "Anno",
+    venue: "Rivista",
     added: "Aggiunto",
   };
   // Direction applied on first activation (the most natural for each field).
@@ -213,6 +217,7 @@
     author: "asc",
     title: "asc",
     year: "desc", // newest first
+    venue: "asc",
     added: "desc", // most recent first
   };
   let selected = $state<number[]>([]);
@@ -377,6 +382,8 @@
         return (a.title ?? "").toLowerCase().localeCompare((b.title ?? "").toLowerCase());
       case "year":
         return (a.year ?? 0) - (b.year ?? 0);
+      case "venue":
+        return (a.venue ?? "").toLowerCase().localeCompare((b.venue ?? "").toLowerCase());
       case "added": {
         const av = a.added_at ?? "";
         const bv = b.added_at ?? "";
@@ -464,6 +471,24 @@
           })
           .catch(() => {});
       }
+    }
+  }
+
+  /** Re-render every cover at high resolution so zoomed-in grid thumbnails are crisp. */
+  async function rebuildThumbs() {
+    if (rebuildingThumbs) return;
+    rebuildingThumbs = true;
+    status = "Rigenerazione anteprime in corso…";
+    try {
+      const n = await rebuildThumbnails();
+      // Drop the cached data URLs so the freshly-rendered, higher-res covers reload.
+      thumbs = {};
+      ensureThumbs(displayed);
+      status = `✓ ${n} anteprime rigenerate ad alta risoluzione`;
+    } catch (e) {
+      status = `Errore nella rigenerazione delle anteprime: ${e}`;
+    } finally {
+      rebuildingThumbs = false;
     }
   }
 
@@ -839,11 +864,22 @@
   let exploreLoading = $state(false);
   let exploreData = $state<CitationNeighbors | null>(null);
   let exploreTitle = $state("");
+  let exploreSeedDoi = $state(""); // DOI of the paper currently centred in the explorer
+  // Breadcrumb of papers visited via «Esplora ↗», so snowballing is non-destructive.
+  let exploreStack = $state<{ doi: string; title: string }[]>([]);
+  // «+ PDF»: which neighbour's paste-the-PDF-URL field is open, and its value.
+  let pdfInputFor = $state<string | null>(null);
+  let pdfUrlInput = $state("");
+  /** Focus the PDF-URL field as soon as it appears (so the user can paste right away). */
+  function pdfFocus(node: HTMLInputElement) {
+    node.focus();
+  }
   /** Re-seed the explorer from a paper's DOI (the seed document or any neighbour). */
   async function runExplore(doi: string, title: string) {
     exploreLoading = true;
     exploreData = null;
     exploreTitle = title;
+    exploreSeedDoi = doi;
     try {
       exploreData = await exploreCitations(doi);
     } catch (e) {
@@ -853,12 +889,68 @@
       exploreLoading = false;
     }
   }
+  /** Snowball to a neighbour, remembering the current node so «← Indietro» can return. */
+  async function navExplore(doi: string, title: string) {
+    if (exploreSeedDoi) exploreStack = [...exploreStack, { doi: exploreSeedDoi, title: exploreTitle }];
+    await runExplore(doi, title);
+  }
+  /** Go back to the previously explored paper. */
+  async function backExplore() {
+    const prev = exploreStack[exploreStack.length - 1];
+    if (!prev) return;
+    exploreStack = exploreStack.slice(0, -1);
+    await runExplore(prev.doi, prev.title);
+  }
+  /** Save one neighbour list (references or citations) as a Markdown file with paper links. */
+  async function saveNeighborList(kind: "references" | "citations") {
+    if (!exploreData) return;
+    const list = kind === "references" ? exploreData.references : exploreData.citations;
+    if (!list.length) {
+      status = "La lista è vuota — niente da salvare";
+      return;
+    }
+    const heading = kind === "references" ? "Riferimenti (questo paper cita)" : "Citato da";
+    const lines = [`# ${heading}`, "", `Paper: ${exploreTitle}`, `Fonte: OpenAlex · ${list.length} paper`, ""];
+    for (const r of list) {
+      const link = r.url ?? (r.doi ? `https://doi.org/${r.doi}` : "");
+      const meta = [r.authors?.[0], r.year, r.venue].filter(Boolean).join(", ");
+      lines.push(
+        `- **${r.title ?? "Senza titolo"}**${meta ? ` — ${meta}` : ""}${r.citations ? ` · ${r.citations} cit.` : ""}${link ? `\n  <${link}>` : ""}`,
+      );
+    }
+    try {
+      const base = kind === "references" ? "riferimenti" : "citato-da";
+      // Suggest a filename that also carries the paper's title, sanitized for the
+      // filesystem (strip Windows-illegal chars, collapse spaces, cap length).
+      const safeTitle = (exploreTitle || "")
+        .replace(/[\\/:*?"<>|]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 70)
+        .replace(/[.\s]+$/, "")
+        .trim();
+      const fname = safeTitle ? `${safeTitle} — ${base}.md` : `${base}.md`;
+      const path = await save({
+        defaultPath: fname,
+        filters: [
+          { name: "Markdown", extensions: ["md"] },
+          { name: "Testo", extensions: ["txt"] },
+        ],
+      });
+      if (!path) return;
+      await writeTextFile(path, lines.join("\n") + "\n");
+      status = `Lista salvata in ${path}`;
+    } catch (e) {
+      status = "Errore nel salvataggio della lista: " + e;
+    }
+  }
   async function openExplore(d: DocumentItem) {
     cardMenu = null;
     if (!d.doi) {
       status = "Serve un DOI per esplorare le citazioni — recupera prima i Metadati";
       return;
     }
+    exploreStack = [];
     exploreModal = true;
     await runExplore(d.doi, d.title ?? "documento");
   }
@@ -879,6 +971,51 @@
       status = "Errore: " + e;
     } finally {
       addingExt = null;
+    }
+  }
+  /** Add a neighbour using a PDF URL the user pasted (e.g. one they opened in the browser).
+   *  Reuses discover_add: the pasted link is passed as oa_pdf_url, so it goes through the
+   *  same SSRF-guarded, size-capped download as any Open-Access PDF. */
+  async function addNeighborWithPdf(r: SearchResult) {
+    const url = pdfUrlInput.trim();
+    if (!url) return;
+    if (!/^https:\/\//i.test(url)) {
+      status = "Serve un link diretto al PDF che inizia con https://";
+      return;
+    }
+    addingExt = r.external_id;
+    try {
+      const res = await discoverAdd({ ...r, oa_pdf_url: url });
+      const mark = (list: SearchResult[]) =>
+        list.map((x) => (x.external_id === r.external_id ? { ...x, in_library: true } : x));
+      if (exploreData)
+        exploreData = { ...exploreData, references: mark(exploreData.references), citations: mark(exploreData.citations) };
+      status =
+        res === "added_pdf"
+          ? "Aggiunto col PDF ✓"
+          : res === "added_ref"
+            ? "Il link non era un PDF diretto: salvato come riferimento (controlla l'URL)"
+            : "Già presente";
+      if (res !== "added_ref") {
+        pdfInputFor = null;
+        pdfUrlInput = "";
+      }
+      await loadDocs();
+      await loadSidebar();
+    } catch (e) {
+      status = "Errore: " + e;
+    } finally {
+      addingExt = null;
+    }
+  }
+  /** Best-effort: fill the PDF-URL field from the clipboard (falls back to manual paste). */
+  async function pastePdfUrlFromClipboard() {
+    try {
+      const t = await navigator.clipboard.readText();
+      if (t && t.trim()) pdfUrlInput = t.trim();
+      else status = "Appunti vuoti — copia prima il link del PDF";
+    } catch {
+      status = "Non riesco a leggere gli appunti: incolla con Ctrl+V";
     }
   }
   async function openCitations(d: DocumentItem) {
@@ -1908,6 +2045,7 @@
           <button class="zbtn" onclick={() => (gridSize = Math.max(120, gridSize - 30))} aria-label="Copertine più piccole" title="Più piccole">−</button>
           <input class="zrange" type="range" min="120" max="360" step="10" bind:value={gridSize} aria-label="Dimensione copertine" />
           <button class="zbtn" onclick={() => (gridSize = Math.min(360, gridSize + 30))} aria-label="Copertine più grandi" title="Più grandi">+</button>
+          <button class="zbtn refresh" onclick={rebuildThumbs} disabled={rebuildingThumbs} aria-label="Rigenera anteprime ad alta risoluzione" title="Rigenera le anteprime ad alta risoluzione, così restano nitide anche ingrandite. Su librerie grandi può richiedere qualche minuto.">{rebuildingThumbs ? "…" : "⟳"}</button>
         </div>
       {/if}
     </div>
@@ -2511,7 +2649,6 @@
                 <col class="c-tags" />
                 <col class="c-doi" />
                 <col class="c-date" />
-                <col class="c-act" />
               </colgroup>
               <thead>
                 <tr>
@@ -2522,12 +2659,12 @@
                   <th class="sortable" onclick={() => cycleSort("author")} title="Ordina per primo autore (clicca di nuovo per invertire, ancora per togliere)">Autori<span class="ar">{sortArrow("author")}</span>{#if sortChain.length > 1 && sortRank("author")}<span class="ar rnk">{sortRank("author")}</span>{/if}</th>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
                   <th class="sortable num" onclick={() => cycleSort("year")} title="Ordina per anno (clicca di nuovo per invertire, ancora per togliere)">Anno<span class="ar">{sortArrow("year")}</span>{#if sortChain.length > 1 && sortRank("year")}<span class="ar rnk">{sortRank("year")}</span>{/if}</th>
-                  <th>Rivista</th>
+                  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
+                  <th class="sortable" onclick={() => cycleSort("venue")} title="Ordina per rivista (clicca di nuovo per invertire, ancora per togliere)">Rivista<span class="ar">{sortArrow("venue")}</span>{#if sortChain.length > 1 && sortRank("venue")}<span class="ar rnk">{sortRank("venue")}</span>{/if}</th>
                   <th>Tag</th>
                   <th>DOI</th>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
                   <th class="sortable" onclick={() => cycleSort("added")} title="Ordina per data di aggiunta (clicca di nuovo per invertire, ancora per togliere)">Aggiunto<span class="ar">{sortArrow("added")}</span>{#if sortChain.length > 1 && sortRank("added")}<span class="ar rnk">{sortRank("added")}</span>{/if}</th>
-                  <th aria-label="azioni"></th>
                 </tr>
               </thead>
               <tbody>
@@ -2547,10 +2684,6 @@
                     </td>
                     <td class="doi dim" title={d.doi ?? ""}>{d.doi || "—"}</td>
                     <td class="num dim">{(d.added_at ?? "").slice(0, 10)}</td>
-                    <td class="rowact">
-                      <button class="rowbtn" title="Modifica metadati" onclick={(e) => { e.stopPropagation(); editingId = d.id; }}>Modifica</button>
-                      <button class="rowbtn" title="Tag, collezioni, cita, elimina" onclick={(e) => openCardMenu(e, d)}>⋯</button>
-                    </td>
                   </tr>
                 {/each}
               </tbody>
@@ -2742,18 +2875,40 @@
           <span class="badge2 inlibref">in libreria</span>
         {:else}
           <button class="hflink small" disabled={addingExt === r.external_id} onclick={() => addNeighbor(r)} title="Aggiungi alla libreria (scarica il PDF se Open Access, altrimenti come riferimento)">{addingExt === r.external_id ? "…" : "+ Aggiungi"}</button>
+          <button class="hflink small" class:on={pdfInputFor === r.external_id} onclick={() => { pdfInputFor = pdfInputFor === r.external_id ? null : r.external_id; pdfUrlInput = ""; }} title="Aggiungi questo paper col PDF che stai guardando nel browser: apri il PDF (↗), copia il suo link e incollalo qui">+ PDF</button>
         {/if}
-        {#if r.doi}<button class="hflink small" onclick={() => runExplore(r.doi!, r.title ?? "documento")} title="Esplora le citazioni di questo paper">Esplora ↗</button>{/if}
+        {#if r.doi}<button class="hflink small" onclick={() => navExplore(r.doi!, r.title ?? "documento")} title="Esplora le citazioni di questo paper">Esplora ↗</button>{/if}
         {#if r.url}<button class="hflink small" onclick={() => openInBrowser(r.url!)} title="Apri la pagina del paper">↗</button>{/if}
       </div>
     </li>
+    {#if pdfInputFor === r.external_id}
+      <li class="expdfrow">
+        <input
+          class="expdfinput"
+          type="url"
+          placeholder="incolla il link diretto al PDF (https://…)"
+          bind:value={pdfUrlInput}
+          use:pdfFocus
+          onkeydown={(e) => { if (e.key === "Enter") addNeighborWithPdf(r); if (e.key === "Escape") { pdfInputFor = null; pdfUrlInput = ""; } }}
+        />
+        <button class="hflink small" onclick={pastePdfUrlFromClipboard} title="Incolla dagli appunti">📋</button>
+        <button class="hflink small" disabled={addingExt === r.external_id || !pdfUrlInput.trim()} onclick={() => addNeighborWithPdf(r)} title="Scarica e aggiungi col PDF">{addingExt === r.external_id ? "…" : "OK"}</button>
+        <button class="hflink small" onclick={() => { pdfInputFor = null; pdfUrlInput = ""; }} title="Annulla" aria-label="Annulla">✕</button>
+      </li>
+    {/if}
   {/snippet}
 
   {#if exploreModal}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) exploreModal = false; }} role="presentation">
-      <div class="idmodal hfwide exwide" role="dialog" tabindex="-1">
-        <h2>Esplora citazioni</h2>
+    <!-- Stays open on outside click (lots of info to read); close only with the ✕. -->
+    <div class="modalback" role="presentation">
+      <div class="idmodal exwide exdialog" role="dialog" tabindex="-1">
+        <button class="modal-x" onclick={() => (exploreModal = false)} aria-label="Chiudi" title="Chiudi">✕</button>
+        <div class="exhead">
+          <h2>Esplora citazioni</h2>
+          {#if exploreStack.length}
+            <button class="hflink small exback" onclick={backExplore} title="Torna al paper precedente">← Indietro</button>
+          {/if}
+        </div>
         <p class="dimtext" title={exploreTitle}>{exploreTitle} — da OpenAlex; «Esplora ↗» per spostarti di nodo in nodo (snowball)</p>
         {#if exploreLoading}
           <p class="dimtext">Carico la rete di citazioni…</p>
@@ -2763,13 +2918,19 @@
           {:else}
             <div class="exgrid">
               <div class="hfsec">
-                <h3>Riferimenti — cita ({exploreData.references.length})</h3>
+                <div class="exsechead">
+                  <h3>Riferimenti — cita ({exploreData.references.length})</h3>
+                  {#if exploreData.references.length}<button class="hflink small" onclick={() => saveNeighborList("references")} title="Salva questa lista (con i link ai paper) in un file Markdown">⬇ Salva</button>{/if}
+                </div>
                 {#if exploreData.references.length}
                   <ul class="hflist exlist">{#each exploreData.references as r (r.external_id)}{@render neighborRow(r)}{/each}</ul>
                 {:else}<p class="dimtext">Nessun riferimento noto a OpenAlex per questo paper.</p>{/if}
               </div>
               <div class="hfsec ghsec">
-                <h3>Citato da ({exploreData.citations.length})</h3>
+                <div class="exsechead">
+                  <h3>Citato da ({exploreData.citations.length})</h3>
+                  {#if exploreData.citations.length}<button class="hflink small" onclick={() => saveNeighborList("citations")} title="Salva questa lista (con i link ai paper) in un file Markdown">⬇ Salva</button>{/if}
+                </div>
                 {#if exploreData.citations.length}
                   <ul class="hflist exlist">{#each exploreData.citations as r (r.external_id)}{@render neighborRow(r)}{/each}</ul>
                 {:else}<p class="dimtext">Nessun paper che cita questo (ancora) su OpenAlex.</p>{/if}
@@ -2777,7 +2938,6 @@
             </div>
           {/if}
         {/if}
-        <div class="modactions"><button class="ghost" onclick={() => (exploreModal = false)}>Chiudi</button></div>
       </div>
     </div>
   {/if}
@@ -3668,7 +3828,6 @@
   }
   col.c-year { width: 64px; }
   col.c-date { width: 96px; }
-  col.c-act { width: 78px; }
   col.c-auth { width: 18%; }
   col.c-venue { width: 16%; }
   col.c-tags { width: 13%; }
@@ -3801,7 +3960,55 @@
   .extitle { font-size: 12.5px; color: var(--text); line-height: 1.35; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
   .exmeta { font-size: 11px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .exacts { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  /* «+ PDF»: inline field to paste the direct PDF link found in the browser. */
+  .hflink.on { font-weight: 600; text-decoration: underline; }
+  .expdfrow { display: flex; align-items: center; gap: 6px; padding: 0 0 8px; }
+  .expdfinput {
+    flex: 1; min-width: 0; background: var(--field); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; padding: 4px 8px; font-size: 11.5px; outline: none;
+  }
+  .expdfinput:focus { border-color: var(--accent); }
   @media (max-width: 720px) { .exgrid { grid-template-columns: 1fr; } }
+  /* Citation explorer dialog: fixed-height flex column so ONLY the two lists
+     scroll (no nested dialog scrollbar); wider for two comfortable columns;
+     closeable only via the ✕ (top-right), never by an outside click. */
+  .exdialog {
+    width: min(980px, 95vw);
+    height: min(86vh, 800px);
+    max-height: 86vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+  .exhead { display: flex; align-items: center; gap: 12px; flex-shrink: 0; padding-right: 30px; }
+  .exhead h2 { margin: 0; }
+  .exback { flex-shrink: 0; }
+  .exdialog > .dimtext { flex-shrink: 0; }
+  .exdialog .exgrid { flex: 1; min-height: 0; align-items: stretch; }
+  .exdialog .exgrid .hfsec { display: flex; flex-direction: column; min-height: 0; }
+  .exsechead { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .exsechead h3 { margin: 0 0 8px; }
+  /* The list fills its column and scrolls; discreet, hover-revealed scrollbar. */
+  .exlist {
+    flex: 1; min-height: 0; max-height: none; overflow-y: auto; padding-right: 5px;
+    scrollbar-width: thin; scrollbar-color: transparent transparent;
+  }
+  .exlist:hover { scrollbar-color: var(--border) transparent; }
+  .exlist::-webkit-scrollbar { width: 8px; }
+  .exlist::-webkit-scrollbar-track { background: transparent; }
+  .exlist::-webkit-scrollbar-thumb { background: transparent; border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+  .exlist:hover::-webkit-scrollbar-thumb { background: var(--border); background-clip: padding-box; }
+  .exlist::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: padding-box; }
+  /* ✕ close button for dialogs that drop the bottom “Chiudi” button. */
+  .modal-x {
+    position: absolute; top: 10px; right: 12px; z-index: 2;
+    width: 28px; height: 28px; border-radius: 7px;
+    background: none; border: 1px solid transparent; color: var(--dim);
+    font-size: 15px; line-height: 1; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal-x:hover { background: var(--field); border-color: var(--border); color: var(--text); }
   /* GitHub section + rendered README */
   .hfwide { width: 640px; max-height: 85vh; overflow-y: auto; }
   .ghsec { border-top: none; padding-top: 0; margin-top: 8px; }

@@ -88,6 +88,7 @@ pub fn run() {
             commands::import_files,
             commands::list_documents,
             commands::get_thumbnail,
+            commands::rebuild_thumbnails,
             commands::read_pdf,
             commands::enrich_all,
             commands::embedding_status,

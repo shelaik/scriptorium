@@ -187,6 +187,11 @@ pub fn extract_region_words(
     Ok(words)
 }
 
+/// Width (px) cover thumbnails are rendered at. Sized so grid covers stay crisp
+/// even with the grid-zoom slider maxed (tiles up to ~360 CSS px) on HiDPI screens,
+/// where the tile is drawn at 2× physical pixels.
+pub const THUMB_WIDTH: u16 = 640;
+
 /// Render the first page of `path` to a PNG at `out`, fitting within `width`px.
 pub fn render_thumbnail(pdfium: &Pdfium, path: &Path, out: &Path, width: u16) -> Result<()> {
     let doc = pdfium

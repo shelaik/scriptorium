@@ -82,7 +82,7 @@ pub fn prepare_import(pdfium: &Pdfium, thumb_dir: &Path, src: &Path) -> Result<P
 
     std::fs::create_dir_all(thumb_dir).ok();
     let thumb = thumb_dir.join(format!("{hash}.png"));
-    let thumb_path = if pdf::render_thumbnail(pdfium, src, &thumb, 240).is_ok() {
+    let thumb_path = if pdf::render_thumbnail(pdfium, src, &thumb, pdf::THUMB_WIDTH).is_ok() {
         Some(thumb.to_string_lossy().to_string())
     } else {
         None
