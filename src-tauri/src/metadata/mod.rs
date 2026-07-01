@@ -55,6 +55,112 @@ pub fn extract_doi(text: &str) -> Option<String> {
     Some(doi.to_string())
 }
 
+/// Function words plus a few ultra-generic domain terms that co-occur across
+/// unrelated papers — excluded so the title-match gate keys on *distinctive*
+/// words rather than boilerplate like "large language models".
+static TITLE_STOP: Lazy<std::collections::HashSet<&'static str>> = Lazy::new(|| {
+    [
+        "the", "and", "for", "with", "from", "into", "using", "via", "toward", "towards", "are",
+        "our", "this", "that", "these", "those", "its", "their", "can", "does", "how", "why",
+        "what", "when", "over", "under", "between", "about", "based", "such", "than", "then",
+        // generic ML/academic vocabulary
+        "large", "language", "model", "models", "learning", "deep", "neural", "network",
+        "networks", "data", "training", "train", "approach", "method", "methods", "study",
+        "analysis", "framework", "system", "systems", "task", "tasks", "paper", "novel",
+        "towards", "evaluation", "understanding",
+    ]
+    .into_iter()
+    .collect()
+});
+
+/// Distinctive (≥4-letter, non-stopword) lowercase words of a title, de-duplicated.
+fn sig_title_words(title: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in title.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+        if w.len() >= 4 && !TITLE_STOP.contains(w) && !out.iter().any(|x| x == w) {
+            out.push(w.to_string());
+        }
+    }
+    out
+}
+
+/// True if `title` plausibly belongs to a document whose extracted text begins
+/// with `head`: at least half of the title's distinctive words appear near the
+/// top of the PDF, where the real title is printed. This is the gate that stops
+/// enrichment from latching onto a DOI that actually belongs to a *cited* work
+/// (the cause of cards showing a different paper than the file).
+pub fn title_matches_doc(title: &str, head: &str) -> bool {
+    let head_l = head.to_lowercase();
+    let words = sig_title_words(title);
+    if words.is_empty() {
+        // No distinctive words (very short/generic title): require the trimmed
+        // title itself to appear near the top.
+        let t = title.trim().to_lowercase();
+        return t.len() >= 4 && head_l.contains(&t);
+    }
+    let hits = words.iter().filter(|w| head_l.contains(w.as_str())).count();
+    hits * 2 >= words.len() // ≥ 50% of distinctive title words present
+}
+
+/// Recover an arXiv id from a *filename* (not body text, which is full of cited
+/// ids). Handles `2406.09406v2.pdf`, `arxiv_2606_00995.pdf`, `2512.16301.pdf`.
+/// Returns `None` when the name carries no plausible id.
+pub fn arxiv_id_from_filename(name: &str) -> Option<String> {
+    static ARXIV_FILE_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)(\d{4})[._ -](\d{4,5})(v\d+)?").expect("valid arxiv file regex"));
+    // Drop a trailing file extension so "…995.pdf" doesn't confuse the match.
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    let c = ARXIV_FILE_RE.captures(stem)?;
+    let yymm = c.get(1)?.as_str();
+    let num = c.get(2)?.as_str();
+    // Plausibility: the new-scheme id starts with YYMM, month 01–12.
+    let mm: u32 = yymm.get(2..4)?.parse().ok()?;
+    if !(1..=12).contains(&mm) {
+        return None;
+    }
+    let ver = c.get(3).map_or("", |m| m.as_str());
+    Some(format!("{yymm}.{num}{ver}"))
+}
+
+/// Best-effort title from the start of the extracted PDF text: the first
+/// non-empty line, plus the next one when the first looks like a wrapped title
+/// (short, or ends with a colon). Used to recover a sensible title for a
+/// mis-enriched document that has no arXiv id in its filename.
+pub fn first_line_title(fulltext: &str) -> Option<String> {
+    let mut lines = fulltext
+        .split(|c: char| c == '\n' || c == '\r')
+        .map(str::trim)
+        .filter(|l| !l.is_empty());
+    let first = lines.next()?;
+    let mut title = first.to_string();
+    // Append the next line when the first looks like a wrapped title (does not end
+    // with sentence punctuation) and the next line is a title continuation — NOT
+    // the author/affiliation line, which carries superscript markers or digits.
+    let l1_complete = first.ends_with('.') || first.ends_with('?') || first.ends_with('!');
+    if !l1_complete {
+        if let Some(second) = lines.next() {
+            let low = second.to_lowercase();
+            let looks_meta = low.starts_with("abstract")
+                || low.starts_with("introduction")
+                || second.chars().any(|c| matches!(c, '∗' | '†' | '‡' | '§') || c.is_ascii_digit());
+            if !looks_meta {
+                title.push(' ');
+                title.push_str(second);
+            }
+        }
+    }
+    // Cut anything from the first author/affiliation marker onward.
+    if let Some(i) = title.find(|c| matches!(c, '∗' | '†' | '‡' | '§')) {
+        title.truncate(i);
+    }
+    let title = title
+        .trim()
+        .trim_end_matches(|c: char| matches!(c, ':' | ' ' | ',' | '-'))
+        .trim()
+        .to_string();
+    (title.chars().count() >= 4).then_some(title)
+}
+
 /// Strip JATS/XML tags from a Crossref abstract and tidy whitespace.
 fn strip_markup(s: &str) -> String {
     static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]+>").expect("valid tag regex"));
@@ -152,6 +258,24 @@ fn author_id(conn: &Connection, a: &Author) -> Result<i64> {
         |r| r.get(0),
     )?;
     Ok(id)
+}
+
+/// Replace a document's author list with `authors` (order preserved). Shared by
+/// the enrichment and repair paths. Accepts anything that derefs to a
+/// `Connection` (a `&Connection` or a `&Transaction`).
+pub fn set_authors(conn: &Connection, id: i64, authors: &[Author]) -> Result<()> {
+    conn.execute("DELETE FROM document_authors WHERE document_id = ?1", params![id])?;
+    for (pos, a) in authors.iter().enumerate() {
+        if a.family.is_none() && a.given.is_none() {
+            continue;
+        }
+        let aid = author_id(conn, a)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO document_authors (document_id, author_id, position) VALUES (?1, ?2, ?3)",
+            params![id, aid, pos as i64],
+        )?;
+    }
+    Ok(())
 }
 
 /// Write fetched metadata into the database for document `id`.
@@ -510,6 +634,65 @@ mod tests {
         assert_eq!(
             strip_markup("<jats:p>Hello   <jats:italic>world</jats:italic></jats:p>"),
             "Hello world"
+        );
+    }
+
+    #[test]
+    fn title_gate_accepts_real_match_rejects_cited_work() {
+        // The document IS the SAD paper: its title is printed at the top.
+        let head = "Me, Myself, and AI: The Situational Awareness Dataset (SAD) for LLMs \
+                    Rudolf Laine Bilal Chughtai";
+        assert!(title_matches_doc(
+            "Me, Myself, and AI: The Situational Awareness Dataset (SAD) for LLMs",
+            head
+        ));
+        // A *cited* paper's title must NOT be accepted for this document.
+        assert!(!title_matches_doc(
+            "Introspective Capabilities in Large Language Models",
+            head
+        ));
+        // Generic-word-only overlap must not pass (all distinctive words missing).
+        assert!(!title_matches_doc(
+            "Rescaling Egocentric Vision: Challenges for EPIC-KITCHENS-100",
+            head
+        ));
+    }
+
+    #[test]
+    fn arxiv_id_from_filename_variants() {
+        assert_eq!(arxiv_id_from_filename("2406.09406v2.pdf").as_deref(), Some("2406.09406v2"));
+        assert_eq!(arxiv_id_from_filename("arxiv_2606_00995.pdf").as_deref(), Some("2606.00995"));
+        assert_eq!(arxiv_id_from_filename("2512.16301.pdf").as_deref(), Some("2512.16301"));
+        // No id present.
+        assert_eq!(arxiv_id_from_filename("v-jepa2.pdf"), None);
+        assert_eq!(arxiv_id_from_filename("doc_83.pdf"), None);
+        assert_eq!(arxiv_id_from_filename("614775426.pdf"), None);
+        // Implausible month (19) is rejected.
+        assert_eq!(arxiv_id_from_filename("1234.5678.pdf"), None);
+    }
+
+    #[test]
+    fn first_line_title_joins_wrapped_title() {
+        let txt = "Me, Myself, and AI:\r The Situational Awareness Dataset (SAD) for LLMs\r Rudolf Laine\r Independent";
+        assert_eq!(
+            first_line_title(txt).as_deref(),
+            Some("Me, Myself, and AI: The Situational Awareness Dataset (SAD) for LLMs")
+        );
+    }
+
+    #[test]
+    fn first_line_title_does_not_swallow_authors() {
+        // A complete title line must not pull in the following author line.
+        let txt = "xLSTM: Extended Long Short-Term Memory\rMaximilian Beck∗ 1,2,3\rKorbinian Pöppel";
+        assert_eq!(
+            first_line_title(txt).as_deref(),
+            Some("xLSTM: Extended Long Short-Term Memory")
+        );
+        // Author markers glued onto the same line are trimmed off.
+        let txt2 = "Titans: Learning to Memorize at Test Time Ali Behrouz†, Peilin Zhong";
+        assert_eq!(
+            first_line_title(txt2).as_deref(),
+            Some("Titans: Learning to Memorize at Test Time Ali Behrouz")
         );
     }
 }

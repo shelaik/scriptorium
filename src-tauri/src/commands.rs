@@ -3,6 +3,7 @@
 use crate::ai;
 use crate::bibtex;
 use crate::citation;
+use crate::connector;
 use crate::discovery;
 use crate::embed;
 use crate::github;
@@ -43,8 +44,13 @@ pub async fn import_files(app: AppHandle, paths: Vec<String>) -> Result<ImportSu
             warnings: Vec::new(),
         };
         for p in paths {
-            // Slow work (read, hash, pdfium extract/render) WITHOUT the DB lock.
-            let prepared = match import::prepare_import(&state.pdfium, &dir, Path::new(&p)) {
+            // Slow work (read, hash, pdfium extract/render) WITHOUT the DB lock, but
+            // serialized against other pdfium document operations (startup scan etc.).
+            let prepared = {
+                let _pdf_guard = state.pdfium_lock.lock();
+                import::prepare_import(&state.pdfium, &dir, Path::new(&p))
+            };
+            let prepared = match prepared {
                 Ok(pr) => pr,
                 Err(e) => {
                     summary.errors.push(format!("{p}: {e:#}"));
@@ -170,6 +176,9 @@ pub async fn rebuild_thumbnails(app: AppHandle) -> Result<usize, String> {
 pub struct EnrichSummary {
     pub updated: usize,
     pub no_doi: usize,
+    /// DOIs whose Crossref title did not match the PDF (a cited work, not this
+    /// document) — skipped instead of overwriting with the wrong paper.
+    pub skipped_mismatch: usize,
     pub errors: Vec<String>,
 }
 
@@ -205,6 +214,7 @@ pub async fn enrich_all(app: AppHandle) -> Result<EnrichSummary, String> {
     let mut summary = EnrichSummary {
         updated: 0,
         no_doi: 0,
+        skipped_mismatch: 0,
         errors: Vec::new(),
     };
 
@@ -216,15 +226,28 @@ pub async fn enrich_all(app: AppHandle) -> Result<EnrichSummary, String> {
         };
         match metadata::fetch_crossref(&client, &doi, email.as_deref()).await {
             Ok(Some(meta)) => {
-                let state = app.state::<AppState>();
-                let mut conn = state.db.lock();
-                match metadata::apply_metadata(&mut conn, id, &doi, &meta) {
-                    Ok(()) => {
-                        // Refresh the stored citekey now that authors/year/title are known.
-                        let _ = crate::db::citekey::auto_citekey(&conn, id);
-                        summary.updated += 1;
+                // The first DOI in a PDF is often a *cited* work's, not this
+                // document's. Only apply the metadata when its title actually
+                // matches the start of the PDF text; otherwise leave the doc
+                // un-enriched rather than mislabel it with the wrong paper.
+                let head: String = fulltext.chars().take(1200).collect();
+                let title_ok = meta
+                    .title
+                    .as_deref()
+                    .is_some_and(|t| metadata::title_matches_doc(t, &head));
+                if !title_ok {
+                    summary.skipped_mismatch += 1;
+                } else {
+                    let state = app.state::<AppState>();
+                    let mut conn = state.db.lock();
+                    match metadata::apply_metadata(&mut conn, id, &doi, &meta) {
+                        Ok(()) => {
+                            // Refresh the stored citekey now that authors/year/title are known.
+                            let _ = crate::db::citekey::auto_citekey(&conn, id);
+                            summary.updated += 1;
+                        }
+                        Err(e) => summary.errors.push(format!("{doi}: {e:#}")),
                     }
-                    Err(e) => summary.errors.push(format!("{doi}: {e:#}")),
                 }
             }
             Ok(None) => summary.no_doi += 1,
@@ -235,6 +258,156 @@ pub async fn enrich_all(app: AppHandle) -> Result<EnrichSummary, String> {
     }
 
     Ok(summary)
+}
+
+/// Result of a one-shot metadata repair pass.
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct RepairSummary {
+    /// Documents whose stored title did not match their PDF (mis-enriched).
+    pub checked: usize,
+    /// Correct metadata recovered from arXiv via the id in the filename.
+    pub repaired_arxiv: usize,
+    /// Title recovered from the PDF's first line (no arXiv id available).
+    pub retitled: usize,
+    /// Wrong metadata blanked because no title could be recovered.
+    pub cleared: usize,
+    pub details: Vec<String>,
+}
+
+/// Overwrite a mis-enriched document's bibliographic fields and clear its wrong
+/// DOI and reference list. `meta.authors` replaces the author list (empty list
+/// = authors cleared). The FTS triggers re-index the new title automatically.
+fn write_repaired(conn: &mut Connection, id: i64, meta: &metadata::CrossrefMeta) -> anyhow::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE documents SET title = ?1, year = ?2, venue = ?3, abstract = ?4, doi = NULL WHERE id = ?5",
+        params![meta.title, meta.year, meta.venue, meta.abstract_text, id],
+    )?;
+    metadata::set_authors(&tx, id, &meta.authors)?;
+    tx.execute("DELETE FROM document_references WHERE document_id = ?1", params![id])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Re-verify documents and fix any whose stored title does not match the PDF —
+/// the result of enrichment latching onto a *cited* work's DOI (or a previous
+/// imperfect recovery). A document is left untouched only when it has a real DOI
+/// AND its title matches the start of the PDF (a confidently-correct record).
+/// Everything else is re-derived: arXiv papers from the arXiv record (id taken
+/// from the FILENAME, never the body text), others from the PDF's first line.
+/// Every recovery must pass the title gate before it is saved, and each network
+/// call is bounded by a hard timeout so the pass can never hang. Idempotent.
+#[tauri::command]
+pub async fn repair_metadata(app: AppHandle) -> Result<RepairSummary, String> {
+    // (id, doi, title, path, head) for every on-disk document — gathered off-lock.
+    let candidates: Vec<(i64, Option<String>, Option<String>, String, String)> = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, doi, title, path, substr(COALESCE(fulltext,''),1,1500) \
+                 FROM documents \
+                 WHERE deleted_at IS NULL AND path NOT LIKE 'ref:%'",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+
+    let email = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty())
+    };
+    let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
+    let mut sum = RepairSummary::default();
+
+    for (id, doi, title, path, head) in candidates {
+        let title_s = title.unwrap_or_default();
+        // A confidently-correct record: real DOI + title matching the PDF. Leave it.
+        let protected =
+            doi.is_some() && !title_s.trim().is_empty() && metadata::title_matches_doc(&title_s, &head);
+        if protected {
+            continue;
+        }
+        let fname = std::path::Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let stem = std::path::Path::new(&fname)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let is_filename_title = !stem.is_empty() && title_s.trim().eq_ignore_ascii_case(stem.trim());
+
+        // (a) arXiv is authoritative for arXiv papers — recover from the id in the
+        //     filename, bounded by a hard timeout so a slow request can't hang.
+        if let Some(aid) = metadata::arxiv_id_from_filename(&fname) {
+            let fetched =
+                tokio::time::timeout(std::time::Duration::from_secs(20), metadata::fetch_arxiv(&client, &aid)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await; // be gentle to arXiv
+            if let Ok(Ok(Some(meta))) = fetched {
+                if meta.title.as_deref().is_some_and(|t| metadata::title_matches_doc(t, &head)) {
+                    let changed = doi.is_some() || meta.title.as_deref() != Some(title_s.as_str());
+                    let state = app.state::<AppState>();
+                    let mut conn = state.db.lock();
+                    match write_repaired(&mut conn, id, &meta) {
+                        Ok(()) => {
+                            let _ = crate::db::citekey::auto_citekey(&conn, id);
+                            if changed {
+                                sum.repaired_arxiv += 1;
+                                sum.checked += 1;
+                                sum.details
+                                    .push(format!("id {id}: arXiv {aid} → {}", meta.title.as_deref().unwrap_or("")));
+                            }
+                        }
+                        Err(e) => sum.details.push(format!("id {id}: errore scrittura: {e:#}")),
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // (b) No arXiv recovery. Never-enriched docs (title == filename) are left
+        //     alone — there's nothing wrong to fix and a first-line guess could be
+        //     junk. A doc with a *wrong* real title gets a title from the PDF.
+        if is_filename_title {
+            continue;
+        }
+        let Some(guess) = metadata::first_line_title(&head) else {
+            continue;
+        };
+        if guess == title_s && doi.is_none() {
+            continue; // already recovered on a previous pass
+        }
+        let meta = metadata::CrossrefMeta {
+            title: Some(guess.clone()),
+            ..Default::default()
+        };
+        let state = app.state::<AppState>();
+        let mut conn = state.db.lock();
+        match write_repaired(&mut conn, id, &meta) {
+            Ok(()) => {
+                let _ = crate::db::citekey::auto_citekey(&conn, id);
+                sum.retitled += 1;
+                sum.checked += 1;
+                sum.details.push(format!("id {id}: titolo dal PDF → {guess}"));
+            }
+            Err(e) => sum.details.push(format!("id {id}: errore scrittura: {e:#}")),
+        }
+    }
+
+    Ok(sum)
 }
 
 /// Read a document's raw PDF bytes for the in-app viewer (efficient binary IPC).
@@ -755,6 +928,179 @@ pub fn related_documents(state: State<'_, AppState>, id: i64) -> Result<Vec<Docu
         v
     };
     fetch_documents(&conn, &ids, false).map_err(|e| e.to_string())
+}
+
+// ===== Similarity graph (embedding KNN over the whole library) =====
+
+#[derive(serde::Serialize)]
+pub struct GraphNode {
+    pub id: i64,
+    pub title: Option<String>,
+    pub year: Option<i64>,
+    /// Color of the document's most-used tag (null if untagged / colorless).
+    pub color: Option<String>,
+    /// Number of edges incident to this node (0 = isolated).
+    pub degree: i64,
+    pub unread: bool,
+    pub favorite: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct GraphEdge {
+    pub a: i64,
+    pub b: i64,
+    /// Cosine similarity of the pair (min_sim..1).
+    pub w: f64,
+}
+
+#[derive(serde::Serialize)]
+pub struct SimilarityGraphData {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub embedded: i64,
+    pub total: i64,
+}
+
+/// K-nearest-neighbour similarity graph over all embedded, non-deleted
+/// documents. Every embedded document becomes a node (isolated ones included);
+/// an edge links two documents when one is among the other's `k` nearest
+/// neighbours with cosine similarity >= `min_sim`. Read-only; bounded to the
+/// 3000 most recent embedded documents to keep the N×KNN pass fast.
+#[tauri::command]
+pub async fn similarity_graph(
+    state: tauri::State<'_, AppState>,
+    k: Option<usize>,
+    min_sim: Option<f64>,
+) -> Result<SimilarityGraphData, String> {
+    let k = k.unwrap_or(4).clamp(1, 8);
+    let min_sim = min_sim.unwrap_or(0.55).clamp(0.0, 0.95);
+
+    // Docs processed per DB lock acquisition: the O(n×KNN) pass is sliced so
+    // concurrent commands can interleave instead of stalling for seconds.
+    const CHUNK: usize = 64;
+
+    // Counts + node payloads under one short-lived guard, then release.
+    let (total, embedded, docs) = {
+        let conn = state.db.lock();
+        // Same counts as embedding_status, so the UI can show "N of M embedded".
+        let total: i64 = conn
+            .query_row("SELECT count(*) FROM documents WHERE deleted_at IS NULL", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let embedded: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM doc_vec WHERE document_id IN (SELECT id FROM documents WHERE deleted_at IS NULL)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        // Every embedded, non-deleted document (most recent first, capped).
+        let docs: Vec<(i64, Option<String>, Option<i64>, bool, bool, Vec<u8>)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT d.id, d.title, d.year, d.is_read, d.favorite, v.embedding
+                     FROM documents d JOIN doc_vec v ON v.document_id = d.id
+                     WHERE d.deleted_at IS NULL
+                     ORDER BY d.id DESC LIMIT 3000",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, i64>(3)? != 0,
+                        r.get::<_, i64>(4)? != 0,
+                        r.get::<_, Vec<u8>>(5)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+        };
+        (total, embedded, docs)
+    };
+    let node_ids: std::collections::HashSet<i64> = docs.iter().map(|d| d.0).collect();
+
+    // KNN per document (k+1 to skip self); edges deduplicated on the unordered
+    // pair, keeping the strongest weight. vec0 with distance_metric=cosine
+    // returns distance = 1 - cosine similarity. The lock is re-acquired per
+    // chunk so other commands aren't starved during the pass.
+    let mut edge_map: std::collections::HashMap<(i64, i64), f64> = std::collections::HashMap::new();
+    for chunk in docs.chunks(CHUNK) {
+        let conn = state.db.lock();
+        let mut knn = conn
+            .prepare_cached(
+                "SELECT document_id, distance FROM doc_vec WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance",
+            )
+            .map_err(|e| e.to_string())?;
+        for (id, _, _, _, _, emb) in chunk {
+            let neighbours: Vec<(i64, f64)> = knn
+                .query_map(params![emb, (k + 1) as i64], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok)
+                .collect();
+            for (nid, dist) in neighbours {
+                // Skip self and neighbours outside the node set (deleted docs
+                // keep their vector until purged; capped-out docs too).
+                if nid == *id || !node_ids.contains(&nid) {
+                    continue;
+                }
+                let sim = 1.0 - dist;
+                if sim < min_sim {
+                    continue;
+                }
+                let key = if *id < nid { (*id, nid) } else { (nid, *id) };
+                let w = edge_map.entry(key).or_insert(sim);
+                if sim > *w {
+                    *w = sim;
+                }
+            }
+        }
+    }
+
+    let mut degree: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let mut edges: Vec<GraphEdge> = Vec::with_capacity(edge_map.len());
+    for (&(a, b), &w) in &edge_map {
+        *degree.entry(a).or_default() += 1;
+        *degree.entry(b).or_default() += 1;
+        edges.push(GraphEdge { a, b, w });
+    }
+    edges.sort_by(|x, y| (x.a, x.b).cmp(&(y.a, y.b))); // deterministic output
+
+    // Node color = color of the document's most-used tag (chunked like above).
+    let mut nodes: Vec<GraphNode> = Vec::with_capacity(docs.len());
+    for chunk in docs.chunks(CHUNK) {
+        let conn = state.db.lock();
+        let mut color_stmt = conn
+            .prepare_cached(
+                "SELECT t.color FROM tags t JOIN document_tags dt ON dt.tag_id = t.id
+                 WHERE dt.document_id = ?1
+                 ORDER BY (SELECT COUNT(*) FROM document_tags dt2 WHERE dt2.tag_id = t.id) DESC
+                 LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+        for (id, title, year, is_read, favorite, _) in chunk {
+            let color: Option<String> = color_stmt
+                .query_row(params![id], |r| r.get::<_, Option<String>>(0))
+                .optional()
+                .map_err(|e| e.to_string())?
+                .flatten();
+            nodes.push(GraphNode {
+                id: *id,
+                title: title.clone(),
+                year: *year,
+                color,
+                degree: degree.get(id).copied().unwrap_or(0),
+                unread: !is_read,
+                favorite: *favorite,
+            });
+        }
+    }
+
+    Ok(SimilarityGraphData { nodes, edges, embedded, total })
 }
 
 // ===== RAG engine: "ask your library" (passage index + graph-augmented Q&A) =====
@@ -2045,14 +2391,19 @@ pub async fn find_pdf(app: AppHandle, id: i64) -> Result<String, String> {
         return Ok("not_found".into());
     };
 
-    let Some(saved) = download_pdf(&app, &url, &format!("doc_{id}")).await? else {
+    let Some(saved) = download_pdf(&app, &url).await? else {
         return Ok("not_found".into());
     };
 
-    // Extract text + thumbnail (no lock), then attach to the existing row.
+    // Extract text + thumbnail (no DB lock), serialized against other pdfium
+    // document work, then attach to the existing row.
     let state = app.state::<AppState>();
     let dir = thumb_dir(&app);
-    let prepared = import::prepare_import(&state.pdfium, &dir, &saved).map_err(|e| e.to_string())?;
+    let prepared = {
+        let _pdf_guard = state.pdfium_lock.lock();
+        import::prepare_import(&state.pdfium, &dir, &saved)
+    }
+    .map_err(|e| e.to_string())?;
     let conn = state.db.lock();
     // If these exact bytes are already in the library (file_hash isn't UNIQUE),
     // don't create a duplicate; drop the just-downloaded file instead.
@@ -2065,7 +2416,8 @@ pub async fn find_pdf(app: AppHandle, id: i64) -> Result<String, String> {
         .optional()
         .map_err(|e| e.to_string())?;
     if dup.is_some() {
-        std::fs::remove_file(&saved).ok();
+        // Content-addressed storage means `saved` may be the very file the
+        // existing duplicate already references — so never delete it here.
         return Ok("duplicate".into());
     }
     conn.execute(
@@ -2683,11 +3035,10 @@ impl reqwest::dns::Resolve for PublicOnlyResolver {
     }
 }
 
-async fn download_pdf(
-    app: &AppHandle,
-    url: &str,
-    stem: &str,
-) -> Result<Option<PathBuf>, String> {
+/// Per-process counter for unique temp download filenames.
+static DL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+async fn download_pdf(app: &AppHandle, url: &str) -> Result<Option<PathBuf>, String> {
     // SSRF guard: refuse non-https, a non-default port, or an internal IP-literal host.
     if !is_safe_fetch_url(url) {
         return Ok(None);
@@ -2750,20 +3101,41 @@ async fn download_pdf(
     if !ct.contains("pdf") && !bytes.starts_with(b"%PDF") {
         return Ok(None);
     }
+    // Store PDFs content-addressed (papers/{sha256}.pdf), written via a unique
+    // temp + atomic rename. This makes storage collision-free: distinct content
+    // never overwrites another document's file, and identical content maps to one
+    // shared file — so callers can dedupe by hash and NEVER delete a file that
+    // another document row still references.
     let dir = app
         .path()
         .app_data_dir()
         .map(|d| d.join("papers"))
         .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).ok();
-    // Sanitize the caller's stem to a single filename token (no separators / no `..`).
-    let path = dir.join(format!("{}.pdf", safe_component(stem)));
+    let hash = import::sha256_hex(&bytes);
+    let path = dir.join(format!("{hash}.pdf"));
     // Defense-in-depth: never write outside the papers directory.
     if path.parent() != Some(dir.as_path()) {
         return Err("percorso di salvataggio non valido".into());
     }
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-    Ok(Some(path))
+    if path.exists() {
+        return Ok(Some(path)); // identical content already stored — reuse it
+    }
+    let seq = DL_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".dl-{}-{}.part", std::process::id(), seq));
+    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    match std::fs::rename(&tmp, &path) {
+        Ok(()) => Ok(Some(path)),
+        Err(_) => {
+            // A concurrent download may have just created it; fall back to it.
+            let _ = std::fs::remove_file(&tmp);
+            if path.exists() {
+                Ok(Some(path))
+            } else {
+                Err("impossibile salvare il PDF".into())
+            }
+        }
+    }
 }
 
 /// Search arXiv or OpenAlex (requires discovery enabled in settings).
@@ -2926,11 +3298,14 @@ pub async fn discover_add(app: AppHandle, result: discovery::SearchResult) -> Re
 
     // Try the OA PDF.
     if let Some(url) = result.oa_pdf_url.clone() {
-        let stem = format!("{}_{}", safe_component(&result.source), safe_component(&result.external_id));
-        if let Ok(Some(saved)) = download_pdf(&app, &url, &stem).await {
+        if let Ok(Some(saved)) = download_pdf(&app, &url).await {
             let state = app.state::<AppState>();
             let dir = thumb_dir(&app);
-            if let Ok(prepared) = import::prepare_import(&state.pdfium, &dir, &saved) {
+            let prepared = {
+                let _pdf_guard = state.pdfium_lock.lock();
+                import::prepare_import(&state.pdfium, &dir, &saved)
+            };
+            if let Ok(prepared) = prepared {
                 let mut conn = state.db.lock();
                 match import::commit_import(&conn, &prepared) {
                     Ok(o) if o.imported => {
@@ -2953,6 +3328,305 @@ pub async fn discover_add(app: AppHandle, result: discovery::SearchResult) -> Re
     let id = conn.last_insert_rowid();
     write_result_meta(&mut conn, id, &result).map_err(|e| e.to_string())?;
     Ok("added_ref".into())
+}
+
+// ===== "Aggancia da URL" + browser connector =====
+
+/// Best-effort single-document enrichment: extract a DOI from the stored
+/// fulltext, look it up on Crossref, and apply the metadata only when its title
+/// matches the PDF (so we never latch onto a *cited* work's DOI). Never fatal.
+async fn enrich_one(app: &AppHandle, id: i64) -> Result<(), String> {
+    let (fulltext, email): (String, Option<String>) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let ft: String = conn
+            .query_row(
+                "SELECT COALESCE(fulltext,'') FROM documents WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let email = setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty());
+        (ft, email)
+    };
+    let Some(doi) = metadata::extract_doi(&fulltext) else {
+        return Ok(());
+    };
+    let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
+    if let Ok(Some(meta)) = metadata::fetch_crossref(&client, &doi, email.as_deref()).await {
+        let head: String = fulltext.chars().take(1200).collect();
+        let title_ok = meta
+            .title
+            .as_deref()
+            .is_some_and(|t| metadata::title_matches_doc(t, &head));
+        if title_ok {
+            let state = app.state::<AppState>();
+            let mut conn = state.db.lock();
+            if metadata::apply_metadata(&mut conn, id, &doi, &meta).is_ok() {
+                let _ = crate::db::citekey::auto_citekey(&conn, id);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A readable fallback title derived from a URL's last path segment. Content-
+/// addressed storage means the on-disk filename is a hash, so `prepare_import`'s
+/// filename-based title would otherwise be that hash — this keeps it human.
+fn title_from_url(url: &str) -> Option<String> {
+    let u = reqwest::Url::parse(url).ok()?;
+    let seg = u
+        .path_segments()
+        .and_then(|s| s.filter(|x| !x.is_empty()).last().map(|x| x.to_string()));
+    let raw = seg.or_else(|| u.host_str().map(|h| h.to_string()))?;
+    let base = raw.trim_end_matches(".pdf").trim_end_matches(".PDF").trim();
+    if base.is_empty() {
+        return None;
+    }
+    let t: String = base.replace(['_', '-'], " ").split_whitespace().collect::<Vec<_>>().join(" ");
+    let t: String = t.chars().take(200).collect();
+    (!t.is_empty()).then_some(t)
+}
+
+/// The arXiv id embedded in an arxiv.org PDF/abstract URL, if any.
+fn arxiv_id_from_url(url: &str) -> Option<String> {
+    let u = reqwest::Url::parse(url).ok()?;
+    if !u.host_str()?.to_ascii_lowercase().contains("arxiv.org") {
+        return None;
+    }
+    let last = u.path_segments()?.filter(|s| !s.is_empty()).last()?;
+    // `arxiv_id_from_filename` strips a trailing extension via `rsplit_once('.')`,
+    // which would eat the id's own dot on a bare id ("1706.03762" → "1706"). Give
+    // it a real ".pdf" tail so only that is stripped and the id stays intact.
+    let stem = last.trim_end_matches(".pdf").trim_end_matches(".PDF");
+    metadata::arxiv_id_from_filename(&format!("{stem}.pdf"))
+}
+
+/// Best-effort: overwrite a freshly-grabbed arXiv document's metadata from the
+/// authoritative arXiv record. The id came from the user-chosen URL, so (unlike
+/// enrichment off body text) no title gate is needed. Never fatal.
+async fn enrich_from_arxiv(app: &AppHandle, id: i64, aid: &str) -> Result<(), String> {
+    let email = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty())
+    };
+    let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
+    let fetched = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        metadata::fetch_arxiv(&client, aid),
+    )
+    .await;
+    if let Ok(Ok(Some(meta))) = fetched {
+        if meta.title.as_deref().map(|t| !t.trim().is_empty()).unwrap_or(false) {
+            let state = app.state::<AppState>();
+            let mut conn = state.db.lock();
+            if write_repaired(&mut conn, id, &meta).is_ok() {
+                let _ = crate::db::citekey::auto_citekey(&conn, id);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run pdfium extraction/render on a dedicated LARGE-stack thread. pdfium can
+/// recurse deeply parsing complex PDFs and overflow a default (~2 MB) worker or
+/// connector thread stack, which surfaces on Windows as a native crash
+/// (0xc0000409, stack-cookie failure). A generous stack makes it safe no matter
+/// which thread the caller runs on.
+fn prepare_import_big_stack(
+    pdfium: &pdfium_render::prelude::Pdfium,
+    dir: &Path,
+    saved: &Path,
+) -> Result<import::PreparedImport, String> {
+    std::thread::scope(|s| {
+        let handle = std::thread::Builder::new()
+            .name("scriptorium-pdf-extract".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn_scoped(s, || import::prepare_import(pdfium, dir, saved))
+            .map_err(|e| e.to_string())?;
+        handle
+            .join()
+            .map_err(|_| "estrazione PDF interrotta".to_string())?
+            .map_err(|e| format!("{e:#}"))
+    })
+}
+
+/// Shared engine for "aggancia da URL": SSRF-guarded download → import pipeline →
+/// best-effort metadata enrichment. Returns `"added"` | `"duplicate"` |
+/// `"not_pdf"`. Emits `library-changed` when a new document lands. Used by the
+/// [`add_from_url`] command and by the browser connector's loopback server.
+pub(crate) async fn import_from_url(app: &AppHandle, url: &str) -> Result<&'static str, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("URL vuoto".into());
+    }
+    // The SSRF guard returns Ok(None) for non-https / internal / non-PDF / oversize.
+    // Storage is content-addressed, so `saved` is shared by identical content and
+    // must never be deleted here (an existing document row may reference it).
+    let saved = match download_pdf(app, url).await? {
+        Some(p) => p,
+        None => return Ok("not_pdf"),
+    };
+    let dir = thumb_dir(app);
+    let prepared = {
+        let state = app.state::<AppState>();
+        // Serialize whole-document pdfium work vs. the startup scan / other imports.
+        let _pdf_guard = state.pdfium_lock.lock();
+        prepare_import_big_stack(&state.pdfium, &dir, &saved)?
+    };
+    let outcome = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        import::commit_import(&conn, &prepared)
+    }
+    .map_err(|e| e.to_string())?;
+    if !outcome.imported {
+        return Ok("duplicate");
+    }
+    let id = outcome.document_id;
+    // Never leave the raw content-hash filename as the title: seed a readable one
+    // from the URL, then improve it from authoritative metadata (arXiv by id from
+    // the grabbed URL, else a DOI found in the text → Crossref). All best-effort.
+    if let Some(t) = title_from_url(url) {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let _ = conn.execute("UPDATE documents SET title = ?1 WHERE id = ?2", params![t, id]);
+    }
+    if let Some(aid) = arxiv_id_from_url(url) {
+        let _ = enrich_from_arxiv(app, id, &aid).await;
+    } else {
+        let _ = enrich_one(app, id).await;
+    }
+    let _ = app.emit("library-changed", ());
+    Ok("added")
+}
+
+/// Download a PDF from a URL and import it into the library (the in-app path;
+/// the bookmarklet uses the connector, which calls the same engine). Returns
+/// `"added"` | `"duplicate"` | `"not_pdf"`.
+#[tauri::command]
+pub async fn add_from_url(app: AppHandle, url: String) -> Result<String, String> {
+    import_from_url(&app, &url).await.map(|s| s.to_string())
+}
+
+/// Read (or lazily create + persist) the connector's secret token — a 128-bit
+/// random hex string embedded only in the user's bookmarklet, so a random web
+/// page can't drive imports against the loopback server.
+fn connector_token(conn: &Connection) -> String {
+    if let Some(t) = setting(conn, "connector_token").filter(|t| t.len() >= 16) {
+        return t;
+    }
+    let tok: String = conn
+        .query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))
+        .unwrap_or_else(|_| "scriptorium".to_string());
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('connector_token', ?1)",
+        params![tok],
+    );
+    tok
+}
+
+/// Read the saved (or default) connector port from settings.
+fn connector_pref_port(conn: &Connection) -> u16 {
+    setting(conn, "connector_port")
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .unwrap_or(connector::DEFAULT_PORT)
+}
+
+/// (Re)start the loopback connector if enabled and not already running,
+/// persisting the actually-bound port so the bookmarklet stays in sync.
+pub(crate) fn start_connector(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.connector.lock().is_some() {
+        return; // already running
+    }
+    let (enabled, token, pref) = {
+        let conn = state.db.lock();
+        (
+            // Opt-in: off unless the user explicitly enabled it (keeps a fresh
+            // install 100% offline until they set up the bookmarklet).
+            setting(&conn, "connector_enabled").as_deref() == Some("1"),
+            connector_token(&conn),
+            connector_pref_port(&conn),
+        )
+    };
+    if !enabled {
+        return;
+    }
+    if let Some(handle) = connector::start(app.clone(), pref, token) {
+        let bound = handle.port;
+        {
+            let conn = state.db.lock();
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('connector_port', ?1)",
+                params![bound.to_string()],
+            );
+        }
+        state.connector.lock().replace(handle);
+    }
+}
+
+/// Stop the loopback connector if running (frees the socket).
+pub(crate) fn stop_connector(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let handle = state.connector.lock().take(); // drop the guard before stopping
+    if let Some(h) = handle {
+        h.stop();
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct ConnectorInfo {
+    /// Whether the connector is allowed to run (persisted preference).
+    pub enabled: bool,
+    /// Whether the loopback server is actually bound right now.
+    pub running: bool,
+    pub port: u16,
+    /// The secret token the bookmarklet must present.
+    pub token: String,
+}
+
+/// Current connector state + the port/token the frontend needs to build the
+/// bookmarklet.
+#[tauri::command]
+pub fn get_connector_info(state: State<'_, AppState>) -> Result<ConnectorInfo, String> {
+    let (enabled, token, saved_port) = {
+        let conn = state.db.lock();
+        (
+            setting(&conn, "connector_enabled").as_deref() == Some("1"),
+            connector_token(&conn),
+            connector_pref_port(&conn),
+        )
+    };
+    let (running, port) = {
+        let g = state.connector.lock();
+        match g.as_ref() {
+            Some(h) => (true, h.port),
+            None => (false, saved_port),
+        }
+    };
+    Ok(ConnectorInfo { enabled, running, port, token })
+}
+
+/// Enable/disable the connector and start/stop it live. Returns the new state.
+#[tauri::command]
+pub fn set_connector_enabled(app: AppHandle, enabled: bool) -> Result<ConnectorInfo, String> {
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('connector_enabled', ?1)",
+            params![if enabled { "1" } else { "0" }],
+        );
+    }
+    stop_connector(&app);
+    if enabled {
+        start_connector(&app);
+    }
+    get_connector_info(app.state::<AppState>())
 }
 
 // ===== Saved searches ("monitor a topic") =====
@@ -3342,6 +4016,79 @@ pub async fn summarize_document(app: AppHandle, id: i64) -> Result<String, Strin
             .map_err(|e| e.to_string())?;
     }
     Ok(summary)
+}
+
+/// Explain / translate / answer a question about a user-selected passage with
+/// the local LLM. Streams tokens as `explain-token` events with payload
+/// {"token": t, "req": req} — `req` is the caller's correlation id, echoed
+/// verbatim (null if absent) so the UI can drop tokens from stale requests.
+/// Returns the full text.
+#[tauri::command]
+pub async fn ai_explain(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    text: String,
+    task: String,
+    question: Option<String>,
+    doc_id: Option<i64>,
+    req: Option<String>,
+) -> Result<String, String> {
+    let (enabled, provider, url, model, doc_title) = {
+        let conn = state.db.lock();
+        let c = ai_config(&conn);
+        // Optional context: the title of the document the passage comes from.
+        let doc_title: Option<String> = match doc_id {
+            Some(id) => conn
+                .query_row("SELECT title FROM documents WHERE id = ?1", params![id], |r| {
+                    r.get::<_, Option<String>>(0)
+                })
+                .optional()
+                .map_err(|e| e.to_string())?
+                .flatten(),
+            None => None,
+        };
+        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), doc_title)
+    };
+    if !enabled {
+        return Err("Le funzioni AI sono disattivate (abilitale nelle Impostazioni)".into());
+    }
+    let text = ai::truncate(&text, 6000);
+    if text.trim().is_empty() {
+        return Err("Nessun testo selezionato".into());
+    }
+    let context = doc_title
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| format!("Dal documento: {t}\n\n"))
+        .unwrap_or_default();
+    let prompt = match task.as_str() {
+        "explain" => format!(
+            "{context}Spiega in italiano, in modo chiaro e conciso (massimo 150 parole circa), il seguente passaggio, definendo brevemente i termini tecnici. Rispondi solo con la spiegazione, senza preamboli.\n\nPassaggio:\n{text}"
+        ),
+        "translate" => format!(
+            "{context}Traduci in italiano il seguente passaggio, mantenendo la terminologia tecnica in lingua originale dove appropriato. Rispondi SOLO con la traduzione, senza spiegazioni né preamboli.\n\nPassaggio:\n{text}"
+        ),
+        "ask" => {
+            let q = question.as_deref().map(str::trim).unwrap_or_default();
+            if q.is_empty() {
+                return Err("Domanda mancante".into());
+            }
+            format!(
+                "{context}Rispondi in italiano alla DOMANDA basandoti sul passaggio qui sotto, in modo chiaro e conciso. Se il passaggio non contiene la risposta, dillo onestamente senza inventare.\n\nDOMANDA: {q}\n\nPassaggio:\n{text}"
+            )
+        }
+        other => return Err(format!("Operazione non supportata: {other}")),
+    };
+    let client = ai::client().map_err(|e| e.to_string())?;
+    let app2 = app.clone();
+    let answer = ai::generate_stream(&client, &provider, &url, &model, &prompt, 700, |t| {
+        let _ = app2.emit("explain-token", serde_json::json!({ "token": t, "req": req }));
+    })
+    .await
+    .map_err(|e| format!("{e:#}"))?;
+    if answer.trim().is_empty() {
+        return Err("Il modello non ha prodotto una risposta".into());
+    }
+    Ok(answer)
 }
 
 /// Suggest and assign 3-6 topical tags for a document (manual, opt-in).

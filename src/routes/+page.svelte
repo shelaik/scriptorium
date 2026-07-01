@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { listen } from "@tauri-apps/api/event";
   import { open, save } from "@tauri-apps/plugin-dialog";
@@ -9,6 +9,7 @@
     getThumbnail,
     rebuildThumbnails,
     enrichAll,
+    repairMetadata,
     searchDocuments,
     relatedDocuments,
     ragIndexStatus,
@@ -55,6 +56,10 @@
     findDuplicates,
     mergeDocuments,
     addByIdentifiers,
+    addFromUrl,
+    getConnectorInfo,
+    setConnectorEnabled,
+    type ConnectorInfo,
     importBibtex,
     findPdf,
     hfResources,
@@ -96,12 +101,24 @@
     type Tag,
     type Collection,
   } from "$lib/api";
+  import {
+    similarityGraph,
+    documentPath,
+    removeFromCollection,
+    getDocumentMeta,
+    type SimilarityGraph,
+  } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
   import MetaEditor from "$lib/MetaEditor.svelte";
   import { printDocument, printDocuments } from "$lib/print";
   import ShareMenu from "$lib/ShareMenu.svelte";
-  import { revealDocument, openInBrowser } from "$lib/share";
+  import { revealDocument, openInBrowser, shareTo, type ShareTarget } from "$lib/share";
   import Terminal from "$lib/Terminal.svelte";
+  import RadialMenu from "$lib/RadialMenu.svelte";
+  import type { RadialItem } from "$lib/radial";
+  import CommandPalette from "$lib/CommandPalette.svelte";
+  import type { PaletteEntry } from "$lib/palette";
+  import Constellation from "$lib/Constellation.svelte";
 
   type Filter = {
     kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask";
@@ -151,10 +168,42 @@
   let dragOver = $state(false);
   let status = $state("");
   let openDoc = $state<DocumentItem | null>(null);
-  let cardMenu = $state<{ doc: DocumentItem; x: number; y: number } | null>(null);
   let headerMenu = $state<{ kind: "import" | "export"; x: number; y: number } | null>(null);
   let watchedFolder = $state<string | null>(null);
-  let view = $state<"grid" | "list">("grid");
+  let view = $state<"grid" | "list" | "map">("grid");
+  // ----- Orbita layer: radial menu, command palette, popovers, map, spotlight -----
+  let radial = $state<{
+    x: number;
+    y: number;
+    items: RadialItem[];
+    title: string;
+    subtitle?: string;
+    thumb?: string | null;
+  } | null>(null);
+  let paletteOpen = $state(false);
+  let sortPop = $state(false); // "Ordina" popover in the strip
+  let indexPop = $state(false); // semantic-index popover in the header
+  let sidebarHidden = $state(
+    typeof localStorage !== "undefined" && localStorage.getItem("scriptorium-sidebar") === "hidden",
+  );
+  $effect(() => {
+    try {
+      localStorage.setItem("scriptorium-sidebar", sidebarHidden ? "hidden" : "shown");
+    } catch {
+      /* ignore */
+    }
+  });
+  // Anchored flyout panels opened from the radial menu (tag / collection pickers).
+  let tagPanel = $state<{ doc: DocumentItem; x: number; y: number } | null>(null);
+  let collPanel = $state<{ doc: DocumentItem; x: number; y: number } | null>(null);
+  // Semantic constellation (map view) data, loaded lazily and invalidated on library changes.
+  let graph = $state<SimilarityGraph | null>(null);
+  let graphLoading = $state(false);
+  // "Riscopri" spotlight: a serendipitous pick from the library.
+  let spotlight = $state<{ doc: DocumentItem; blurb: string } | null>(null);
+  // Page requested for the viewer by "ask" source chips (deep link into the PDF).
+  let openDocPage = $state<number | null>(null);
+  let searchEl = $state<HTMLInputElement | undefined>();
   // Grid thumbnail size (min column width in px): user-resizable via a slider,
   // persisted so the chosen density survives restarts.
   let gridSize = $state(
@@ -226,6 +275,11 @@
   let idModal = $state(false);
   let idText = $state("");
   let addingIds = $state(false);
+  // "Aggancia da URL" + browser connector
+  let urlModal = $state(false);
+  let urlInput = $state("");
+  let urlBusy = $state(false);
+  let connectorInfo = $state<ConnectorInfo | null>(null);
   // Online discovery
   let discoverQuery = $state("");
   let discoverAuthor = $state("");
@@ -320,9 +374,9 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.1.0";
+  const APP_VERSION = "0.2.0";
   const APP_YEAR = "2026";
-  let settingsTab = $state<"online" | "ai" | "obsidian" | "backup">("online");
+  let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
   let exportingObsidian = $state(false);
   let discEnabled = $state(false);
@@ -587,7 +641,6 @@
 
   async function toggleRead(doc: DocumentItem) {
     await setRead(doc.id, !doc.is_read);
-    cardMenu = null;
     await loadDocs();
   }
   async function toggleFavorite(doc: DocumentItem) {
@@ -604,7 +657,6 @@
     } catch (e) {
       status = "Errore preferiti: " + e;
     } finally {
-      cardMenu = null;
     }
   }
   async function doBackup() {
@@ -625,7 +677,6 @@
     const n = ids.length;
     if (!(await confirmAsk(`Spostare ${n} ${n > 1 ? "documenti" : "documento"} nel cestino?`, "Sposta nel cestino", false))) return;
     await deleteDocuments(ids);
-    cardMenu = null;
     await loadDocs();
     await loadSidebar();
   }
@@ -662,7 +713,6 @@
     }
   }
   async function printOne(doc: DocumentItem) {
-    cardMenu = null;
     printing = true;
     status = "Preparazione stampa…";
     try {
@@ -728,6 +778,7 @@
       const res = await enrichAll();
       const parts = [`${res.updated} aggiornati`];
       if (res.no_doi) parts.push(`${res.no_doi} senza DOI`);
+      if (res.skipped_mismatch) parts.push(`${res.skipped_mismatch} saltati (DOI di un lavoro citato)`);
       if (res.errors.length) parts.push(`${res.errors.length} errori`);
       status = parts.join(" · ");
       await loadDocs();
@@ -738,7 +789,41 @@
     }
   }
 
+  let repairing = $state(false);
+  let repairMsg = $state("");
+  async function repairMeta() {
+    if (!(await confirmAsk(
+      "Verifico ogni documento e correggo quelli il cui titolo non corrisponde al PDF " +
+      "(di solito causati da un DOI di un lavoro citato). I paper arXiv recuperano i metadati " +
+      "corretti da arXiv; per gli altri ricavo il titolo dalla prima riga del PDF. " +
+      "I documenti già corretti non vengono toccati. Può richiedere fino a un minuto. Procedo?",
+      "Ripara", false
+    ))) return;
+    repairing = true;
+    repairMsg = "Verifica e riparazione in corso… (può richiedere fino a un minuto)";
+    status = repairMsg;
+    try {
+      const res = await repairMetadata();
+      if (res.checked === 0) {
+        repairMsg = "Nessun metadato errato trovato — tutto a posto ✓";
+      } else {
+        const parts = [`${res.checked} corretti`];
+        if (res.repaired_arxiv) parts.push(`${res.repaired_arxiv} da arXiv`);
+        if (res.retitled) parts.push(`${res.retitled} dal testo del PDF`);
+        repairMsg = "Riparazione completata: " + parts.join(" · ");
+      }
+      status = repairMsg;
+      await loadDocs();
+    } catch (e) {
+      repairMsg = "Errore riparazione: " + e;
+      status = repairMsg;
+    } finally {
+      repairing = false;
+    }
+  }
+
   async function generateIndex() {
+    if (generating) return; // callable from radial/palette/map too: no concurrent jobs
     generating = true;
     status = "Generazione indice semantico… (al primo uso scarica il modello bge-m3 ~2.3GB)";
     try {
@@ -811,7 +896,6 @@
   let ghReadmeError = $state("");
   let ghReadmeLoading = $state(false);
   async function openHf(d: DocumentItem) {
-    cardMenu = null;
     hfModal = true;
     hfLoading = true;
     hfData = null;
@@ -945,7 +1029,6 @@
     }
   }
   async function openExplore(d: DocumentItem) {
-    cardMenu = null;
     if (!d.doi) {
       status = "Serve un DOI per esplorare le citazioni — recupera prima i Metadati";
       return;
@@ -1018,8 +1101,98 @@
       status = "Non riesco a leggere gli appunti: incolla con Ctrl+V";
     }
   }
+
+  // ---- "Aggancia da URL" + browser connector (bookmarklet) ----
+  async function loadConnector() {
+    try {
+      connectorInfo = await getConnectorInfo();
+    } catch {
+      /* connector optional; ignore */
+    }
+  }
+  function openUrlModal() {
+    urlModal = true;
+    urlInput = "";
+    loadConnector();
+  }
+  async function pasteUrlFromClipboard() {
+    try {
+      const t = await navigator.clipboard.readText();
+      if (t && t.trim()) urlInput = t.trim();
+      else status = "Appunti vuoti — copia prima il link del PDF";
+    } catch {
+      status = "Non riesco a leggere gli appunti: incolla con Ctrl+V";
+    }
+  }
+  async function doAddFromUrl() {
+    const u = urlInput.trim();
+    if (!u) return;
+    urlBusy = true;
+    try {
+      const r = await addFromUrl(u);
+      status =
+        r === "added"
+          ? "PDF agganciato alla libreria ✓"
+          : r === "duplicate"
+            ? "Già presente in libreria"
+            : "Non sembra un PDF diretto — usa il link che termina in .pdf";
+      if (r === "added") {
+        urlInput = "";
+        urlModal = false;
+        await loadDocs();
+        await loadStatus();
+        await loadSidebar();
+      }
+    } catch (e) {
+      status = "Errore: " + e;
+    } finally {
+      urlBusy = false;
+    }
+  }
+  async function toggleConnector(enabled: boolean) {
+    try {
+      connectorInfo = await setConnectorEnabled(enabled);
+    } catch (e) {
+      status = "Errore connettore: " + e;
+    }
+  }
+  /** Build the one-line `javascript:` bookmarklet (ASCII-only) for the current port+token. */
+  function buildBookmarklet(port: number, token: string): string {
+    const js =
+      "(function(){" +
+      "var u=location.href;" +
+      "var m=document.querySelector('meta[name=\"citation_pdf_url\"]');" +
+      "var a=document.querySelector('a[href$=\".pdf\"]');" +
+      "var p=/\\.pdf(\\?|#|$)/i.test(u)?u:(m&&m.content)||(a&&a.href)||u;" +
+      "var t=document.createElement('div');t.textContent='Scriptorium: invio...';" +
+      "t.style.cssText='position:fixed;z-index:2147483647;right:16px;bottom:16px;padding:10px 14px;background:#2b4a78;color:#fff;font:14px sans-serif;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.3)';" +
+      "document.body.appendChild(t);" +
+      "var L={added:'aggiunto \\u2713',duplicate:'gi\\u00e0 in libreria',not_pdf:'non \\u00e8 un PDF diretto',error:'errore'};" +
+      "fetch('http://127.0.0.1:" +
+      port +
+      "/add?url='+encodeURIComponent(p),{headers:{'X-Scriptorium-Token':'" +
+      token +
+      "'}})" +
+      ".then(function(r){return r.json()})" +
+      ".then(function(j){t.textContent='Scriptorium: '+(L[j.status]||j.status)})" +
+      ".catch(function(){t.textContent='Scriptorium non risponde \\u2014 apri l\\'app'})" +
+      ".finally(function(){setTimeout(function(){t.remove()},4000)});" +
+      "})();";
+    return "javascript:" + js;
+  }
+  const bookmarklet = $derived(
+    connectorInfo ? buildBookmarklet(connectorInfo.port, connectorInfo.token) : "",
+  );
+  async function copyBookmarklet() {
+    if (!bookmarklet) return;
+    try {
+      await navigator.clipboard.writeText(bookmarklet);
+      status = "Bookmarklet copiato — crea un preferito e incolla questo come indirizzo";
+    } catch {
+      status = "Copia non riuscita";
+    }
+  }
   async function openCitations(d: DocumentItem) {
-    cardMenu = null;
     citModal = true;
     citLoading = true;
     citData = null;
@@ -1033,12 +1206,12 @@
       citLoading = false;
     }
   }
-  /** Open a library document by id (used by citation links). */
-  async function openById(id: number) {
+  /** Open a library document by id (used by citation links), optionally at a page. */
+  async function openById(id: number, page: number | null = null) {
     const found = docs.find((d) => d.id === id) ?? recentDocs.find((d) => d.id === id);
     if (found) {
       citModal = false;
-      openDoc = found;
+      openDocument(found, page);
       return;
     }
     // Not in the current view: fetch the full list and locate it.
@@ -1047,7 +1220,7 @@
       const d = all.find((x) => x.id === id);
       if (d) {
         citModal = false;
-        openDoc = d;
+        openDocument(d, page);
       }
     } catch {
       /* ignore */
@@ -1055,7 +1228,6 @@
   }
 
   async function doFindPdf(d: DocumentItem) {
-    cardMenu = null;
     status = `Cerco un PDF per «${d.title ?? "documento"}»…`;
     try {
       const res = await findPdf(d.id);
@@ -1272,7 +1444,6 @@
     }
   }
   async function summarizeDoc(doc: DocumentItem) {
-    cardMenu = null;
     aiBusy = doc.id;
     status = "Riassunto in corso… (può richiedere un momento)";
     try {
@@ -1285,7 +1456,6 @@
     }
   }
   async function autotagDoc(doc: DocumentItem) {
-    cardMenu = null;
     aiBusy = doc.id;
     status = "Tag automatici in corso…";
     try {
@@ -1489,7 +1659,6 @@
   }
   /** Open the "ask" view scoped to a single document (from the ⋯ menu). */
   function askAboutDoc(d: DocumentItem) {
-    cardMenu = null;
     askScope = { kind: "doc", id: d.id, label: d.title ?? "documento" };
     askAnswer = "";
     askSources = [];
@@ -1512,7 +1681,7 @@
   }
   function openSourceN(n: number) {
     const s = askSources.find((x) => x.n === n);
-    if (s) openById(s.document_id);
+    if (s) openById(s.document_id, s.page ?? null);
   }
 
   async function addResult(r: SearchResult) {
@@ -1542,7 +1711,6 @@
     try {
       const text = await citeText([doc.id], format);
       await navigator.clipboard.writeText(text);
-      cardMenu = null;
       status = format === "bibtex" ? "BibTeX copiato negli appunti" : "Citazione copiata negli appunti";
     } catch (e) {
       status = "Errore copia: " + e;
@@ -1634,8 +1802,8 @@
     }
   }
 
-  async function exportLibrary() {
-    const ids = displayed.map((d) => d.id);
+  async function exportLibrary(onlyIds?: number[]) {
+    const ids = onlyIds?.length ? onlyIds : displayed.map((d) => d.id);
     if (!ids.length) return;
     const path = await save({
       defaultPath: "references.bib",
@@ -1728,9 +1896,10 @@
   async function refreshAfterTagChange(docId: number) {
     await loadDocs();
     await loadSidebar();
-    if (cardMenu) {
+    // Keep the tag flyout in sync with the reloaded document.
+    if (tagPanel) {
       const d = docs.find((x) => x.id === docId);
-      cardMenu = d ? { ...cardMenu, doc: d } : null;
+      tagPanel = d ? { ...tagPanel, doc: d } : null;
     }
   }
 
@@ -1744,7 +1913,6 @@
 
   async function addDocToCollection(doc: DocumentItem, coll: Collection) {
     await addToCollection(coll.id, doc.id);
-    cardMenu = null;
     status = `Aggiunto a "${coll.name}"`;
   }
 
@@ -1776,16 +1944,13 @@
   }
 
   function openCardMenu(e: MouseEvent, doc: DocumentItem) {
-    e.stopPropagation();
-    cardMenu = { doc, x: e.clientX, y: e.clientY };
+    openRadialDoc(e, doc);
   }
-  /** Right-click: open the actions menu at the cursor (suppress the native menu). */
+  /** Right-click: open the radial menu at the cursor (suppress the native menu). */
   function onContext(e: MouseEvent, doc: DocumentItem) {
-    e.preventDefault();
-    openCardMenu(e, doc);
+    openRadialDoc(e, doc);
   }
   async function revealDoc(doc: DocumentItem) {
-    cardMenu = null;
     try {
       await revealDocument(doc.id);
     } catch {
@@ -1825,11 +1990,13 @@
   let watchP: Promise<() => void> | undefined;
   let ragP: Promise<() => void> | undefined;
   let askP: Promise<() => void> | undefined;
+  let connP: Promise<() => void> | undefined;
   let clearTimer: ReturnType<typeof setTimeout> | undefined;
   onMount(() => {
     loadDocs();
     loadStatus();
     loadSidebar();
+    loadConnector();
     getWatchedFolder()
       .then((w) => (watchedFolder = w))
       .catch(() => {});
@@ -1861,6 +2028,10 @@
       embedProgress = e.payload;
       if (e.payload.phase === "done" || e.payload.phase === "cancelled") {
         loadStatus();
+        // New embeddings change the constellation: rebuild it (or drop the cache).
+        graph = null;
+        graphError = false;
+        if (view === "map") loadGraph(true);
         clearTimeout(clearTimer);
         clearTimer = setTimeout(() => (embedProgress = null), 1800);
       }
@@ -1868,6 +2039,21 @@
     watchP = listen("library-changed", () => {
       loadDocs();
       loadStatus();
+      graph = null; // imported/removed docs invalidate the semantic map
+      graphError = false;
+      if (view === "map") loadGraph(true);
+    });
+    // A PDF grabbed from the browser via the bookmarklet connector.
+    connP = listen<string>("connector-added", (e) => {
+      const s = e.payload;
+      status =
+        s === "added"
+          ? "PDF agganciato dal browser ✓"
+          : s === "duplicate"
+            ? "Dal browser: già presente in libreria"
+            : s === "not_pdf"
+              ? "Dal browser: il link non è un PDF diretto"
+              : "Dal browser: errore nel download";
     });
     ragP = listen<{ done: number; total: number; phase: string }>("rag-progress", (e) => {
       ragProg = { done: e.payload.done, total: e.payload.total };
@@ -1886,6 +2072,7 @@
       watchP?.then((f) => f());
       ragP?.then((f) => f());
       askP?.then((f) => f());
+      connP?.then((f) => f());
       clearTimeout(searchTimer);
       clearTimeout(clearTimer);
       clearInterval(aiStatusTimer);
@@ -1919,6 +2106,444 @@
     if (name && name.trim()) setFilter({ kind: "author", label: name.trim() });
   }
 
+  // ===================== Orbita: radial menu + command palette =====================
+  // A single action layer feeds both surfaces, so every feature stays reachable
+  // even though the chrome shows almost no buttons.
+
+  /** Stroke-icon paths (24×24, feather-style) for radial petals. */
+  const I = {
+    open: "M2 4h6a4 4 0 0 1 4 4v12a3 3 0 0 0-3-3H2zM22 4h-6a4 4 0 0 0-4 4v12a3 3 0 0 1 3-3h7z",
+    star: "M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z",
+    check: "M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4L12 14.01l-3-3",
+    quote: "M10 11H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v8a4 4 0 0 1-4 4M20 11h-4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v8a4 4 0 0 1-4 4",
+    ai: "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z",
+    folder: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z",
+    share: "M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6l-4-4-4 4M12 2v13",
+    trash: "M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M10 11v6M14 11v6",
+    code: "M16 18l6-6-6-6M8 6l-6 6 6 6",
+    edit: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z",
+    imp: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
+    exp: "M15 3h6v6M10 14L21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5",
+    grid: "M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z",
+    list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+    map: "M12 4a2 2 0 1 0 .01 0M5 16a2 2 0 1 0 .01 0M19 16a2 2 0 1 0 .01 0M10.8 9.6L6.6 14.6M13.2 9.6l4.2 5M7 18h10",
+    search: "M11 3a8 8 0 1 0 .01 0M21 21l-4.35-4.35",
+    eye: "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8zM12 9a3 3 0 1 0 .01 0",
+    theme: "M12 2a10 10 0 0 0 0 20 2 2 0 0 0 2-2v-1a2 2 0 0 1 2-2h1a5 5 0 0 0 5-5A10 10 0 0 0 12 2zM7 10h.01M12 6h.01M17 10h.01",
+    tools: "M14.7 6.3a4.5 4.5 0 0 0-6.4 5.6L3 17.2V21h3.8l5.3-5.3a4.5 4.5 0 0 0 5.6-6.4l-2.9 2.9-2.1-2.1z",
+    compass: "M12 2a10 10 0 1 0 .01 0M16 8l-2.5 5.5L8 16l2.5-5.5z",
+    gear: "M12 8a4 4 0 1 0 .01 0M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
+    tag: "M20.6 13.4l-8-8A2 2 0 0 0 11.2 5H5a2 2 0 0 0-2 2v6.2a2 2 0 0 0 .6 1.4l8 8a2 2 0 0 0 2.8 0l6.2-6.2a2 2 0 0 0 0-2.8zM7.5 9.5h.01",
+    print: "M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z",
+    reveal: "M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v1H5zM3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7",
+    copy: "M9 9h11v11H9zM5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1",
+    ask: "M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01M12 2a10 10 0 1 0 .01 0",
+    near: "M12 8a4 4 0 1 0 .01 0M12 2v2M12 20v2M2 12h2M20 12h2",
+    heal: "M22 12h-4l-3 9L9 3l-3 9H2",
+    x: "M18 6L6 18M6 6l12 12",
+  };
+
+  /** Open a document in the viewer, optionally at a specific page. */
+  function openDocument(d: DocumentItem, page: number | null = null) {
+    openDocPage = page;
+    openDoc = d;
+  }
+
+  async function shareDoc(target: ShareTarget, ids: number[], label: string, link?: string | null) {
+    const r = await shareTo(target, ids, label, link);
+    status = r.note;
+  }
+
+  /** Copy the on-disk PDF path (reference-only entries have none). */
+  async function copyPath(doc: DocumentItem) {
+    try {
+      const p = await documentPath(doc.id);
+      if (!p) {
+        status = "Questo riferimento non ha un file PDF";
+        return;
+      }
+      await navigator.clipboard.writeText(p);
+      status = "Percorso copiato negli appunti";
+    } catch (e) {
+      status = "Errore: " + e;
+    }
+  }
+
+  /** Remove the document from the collection currently being viewed. */
+  async function removeDocFromCurrentCollection(doc: DocumentItem) {
+    if (filter.kind !== "collection" || filter.id == null) return;
+    try {
+      await removeFromCollection(filter.id, doc.id);
+      status = `Rimosso da «${filter.label}»`;
+      await loadDocs();
+    } catch (e) {
+      status = "Errore: " + e;
+    }
+  }
+
+  const THEMES: { value: string; label: string; dark: boolean }[] = [
+    { value: "paper", label: "Carta", dark: false },
+    { value: "sepia", label: "Seppia", dark: false },
+    { value: "solarized", label: "Solarized", dark: false },
+    { value: "sage", label: "Salvia", dark: false },
+    { value: "pastel", label: "Pastello", dark: false },
+    { value: "medieval", label: "Medievale", dark: false },
+    { value: "dark", label: "Scuro", dark: true },
+    { value: "nord", label: "Nord", dark: true },
+    { value: "graphite", label: "Grafite", dark: true },
+    { value: "forest", label: "Foresta", dark: true },
+    { value: "synthwave", label: "Synthwave", dark: true },
+  ];
+
+  /** Doc radial: everything the old flat context menu offered, organized in orbits. */
+  function buildDocRadial(d: DocumentItem): RadialItem[] {
+    const shareKids: RadialItem[] = [
+      { id: "sh-wa", label: "WhatsApp", hint: "Copia il PDF e apre WhatsApp: incolla con Ctrl+V", action: () => shareDoc("whatsapp", [d.id], d.title ?? "Documento PDF", paperLink(d)) },
+      { id: "sh-tm", label: "Teams", hint: "Copia il PDF e apre Teams", action: () => shareDoc("teams", [d.id], d.title ?? "Documento PDF", paperLink(d)) },
+      { id: "sh-gm", label: "Gmail", hint: "Copia il PDF e apre Gmail", action: () => shareDoc("gmail", [d.id], d.title ?? "Documento PDF", paperLink(d)) },
+      { id: "sh-ol", label: "Outlook", hint: "Outlook desktop: PDF allegato direttamente", action: () => shareDoc("outlook", [d.id], d.title ?? "Documento PDF", paperLink(d)) },
+      { id: "sh-pr", label: "Stampa", icon: I.print, disabled: printing, action: () => printOne(d) },
+      { id: "sh-rv", label: "Mostra nella cartella", icon: I.reveal, action: () => revealDoc(d) },
+      { id: "sh-cp", label: "Copia percorso", icon: I.copy, hint: "Copia il percorso del file PDF", action: () => copyPath(d) },
+    ];
+    const citeKids: RadialItem[] = [
+      { id: "ci-apa", label: "Copia APA", action: () => copyCite(d, "apa") },
+      { id: "ci-ieee", label: "Copia IEEE", action: () => copyCite(d, "ieee") },
+      { id: "ci-bib", label: "Copia BibTeX", action: () => copyCite(d, "bibtex") },
+      { id: "ci-key", label: "Copia citekey", hint: d.citekey ?? undefined, action: () => copyCite(d, "citekey") },
+      { id: "ci-tex", label: "Copia \\cite{…}", hint: "Pronto per LaTeX", action: () => copyCite(d, "latex") },
+      { id: "ci-pan", label: "Copia [@…]", hint: "Pronto per Pandoc/Quarto", action: () => copyCite(d, "pandoc") },
+      { id: "ci-ref", label: "Riferimenti e citazioni", hint: "Bibliografia del paper e chi lo cita nella tua libreria", action: () => openCitations(d) },
+    ];
+    if (d.doi)
+      citeKids.push({ id: "ci-exp", label: "Esplora online", hint: "Snowball su OpenAlex: riferimenti e citazioni, aggiungili alla libreria", action: () => openExplore(d) });
+    const aiKids: RadialItem[] = [
+      { id: "ai-sum", label: "Riassumi", hint: "Riassunto in italiano con l'AI locale", disabled: !aiStat?.enabled || aiBusyAny, action: () => summarizeDoc(d) },
+      { id: "ai-tag", label: "Tag automatici", hint: "Suggerisce e assegna tag tematici", disabled: !aiStat?.enabled || aiBusyAny, action: () => autotagDoc(d) },
+      { id: "ai-ask", label: "Chiedi al documento", hint: "Domande in linguaggio naturale su questo PDF", disabled: !aiStat?.enabled, action: () => askAboutDoc(d) },
+      { id: "ai-rel", label: "Correlati", icon: I.near, hint: "I documenti più vicini per significato (indice semantico)", action: () => setFilter({ kind: "related", id: d.id, label: d.title ?? "documento" }) },
+    ];
+    const orgKids: RadialItem[] = [
+      { id: "or-meta", label: "Modifica metadati", icon: I.edit, action: () => (editingId = d.id) },
+      { id: "or-tag", label: "Tag…", icon: I.tag, hint: "Assegna o togli tag", action: () => (tagPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
+      { id: "or-coll", label: "Collezioni…", icon: I.folder, hint: "Aggiungi a una collezione", action: () => (collPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
+    ];
+    if (filter.kind === "collection")
+      orgKids.push({ id: "or-rm", label: `Togli da «${filter.label ?? "collezione"}»`, danger: true, action: () => removeDocFromCurrentCollection(d) });
+    if (!d.has_thumb)
+      orgKids.push({ id: "or-pdf", label: "Trova PDF", hint: "Cerca un PDF Open Access (Unpaywall/arXiv) e allegalo", action: () => doFindPdf(d) });
+    return [
+      { id: "d-open", label: "Apri", icon: I.open, hint: "Leggi nel visore integrato", action: () => openDocument(d) },
+      { id: "d-fav", label: "Preferito", icon: I.star, checked: d.favorite, hint: d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti", action: () => toggleFavorite(d) },
+      { id: "d-read", label: "Letto", icon: I.check, checked: d.is_read, hint: d.is_read ? "Segna come da leggere" : "Segna come letto", action: () => toggleRead(d) },
+      { id: "d-cite", label: "Cita", icon: I.quote, hint: "Copia citazioni, riferimenti, esplora", children: citeKids },
+      { id: "d-ai", label: "AI", icon: I.ai, hint: aiStat?.enabled ? "Riassunto, tag, domande, correlati" : "Correlati (per il resto attiva l'AI locale)", children: aiKids },
+      { id: "d-org", label: "Organizza", icon: I.folder, hint: "Metadati, tag, collezioni", children: orgKids },
+      { id: "d-code", label: "Codice & repo", icon: I.code, hint: "Repository GitHub citati + modelli e dataset Hugging Face", action: () => openHf(d) },
+      { id: "d-share", label: "Condividi", icon: I.share, hint: "Invia, stampa, mostra file", children: shareKids },
+      { id: "d-del", label: "Elimina", icon: I.trash, danger: true, hint: "Sposta nel cestino (recuperabile)", action: () => trashSelected([d.id]) },
+    ];
+  }
+
+  /** Selection radial: batch actions on the current multi-selection. */
+  function buildSelectionRadial(): RadialItem[] {
+    const ids = [...selected];
+    const one = ids.length === 1 ? displayed.find((d) => d.id === ids[0]) : undefined;
+    const label = one?.title ?? `${ids.length} documenti PDF`;
+    const link = one ? paperLink(one) : null;
+    const shareKids: RadialItem[] = (["whatsapp", "teams", "gmail", "outlook"] as ShareTarget[]).map((t) => ({
+      id: "ssh-" + t,
+      label: t === "whatsapp" ? "WhatsApp" : t === "teams" ? "Teams" : t === "gmail" ? "Gmail" : "Outlook",
+      action: () => shareDoc(t, ids, label, link),
+    }));
+    const tagKids: RadialItem[] = tags.map((t) => ({ id: "st-" + t.id, label: t.name, action: () => bulkAddTag(t) }));
+    const collKids: RadialItem[] = collections
+      .filter((c) => !c.is_smart)
+      .map((c) => ({ id: "sc-" + c.id, label: c.name, action: () => bulkAddCollection(c) }));
+    const items: RadialItem[] = [
+      { id: "s-print", label: "Stampa", icon: I.print, disabled: printing, hint: "Un unico lavoro di stampa", action: () => printSelected() },
+      { id: "s-share", label: "Condividi", icon: I.share, children: shareKids },
+    ];
+    if (aiEnabled) {
+      items.push({ id: "s-sum", label: "Riassumi (AI)", icon: I.ai, disabled: aiBusyAny, hint: "Un riassunto per ogni selezionato", action: () => runBatchAi("summary") });
+      items.push({ id: "s-tags", label: "Tag automatici (AI)", icon: I.tag, disabled: aiBusyAny, action: () => runBatchAi("tags") });
+    }
+    if (tagKids.length) items.push({ id: "s-tag", label: "Aggiungi tag", icon: I.tag, children: tagKids });
+    if (collKids.length) items.push({ id: "s-coll", label: "In collezione", icon: I.folder, children: collKids });
+    items.push({ id: "s-exp", label: "Esporta citazioni", icon: I.exp, action: () => exportLibrary(ids) });
+    items.push({ id: "s-none", label: "Deseleziona", icon: I.x, action: () => (selected = []) });
+    items.push({ id: "s-del", label: "Elimina", icon: I.trash, danger: true, action: () => trashSelected(ids) });
+    return items;
+  }
+
+  /** Global radial: the whole app, one flick away. */
+  function buildGlobalRadial(): RadialItem[] {
+    return [
+      {
+        id: "g-imp",
+        label: "Importa",
+        icon: I.imp,
+        hint: "PDF, BibTeX, identificatori, URL",
+        children: [
+          { id: "gi-pdf", label: "PDF dal disco…", action: () => importViaDialog() },
+          { id: "gi-bib", label: "Da BibTeX (.bib)…", hint: "Libreria Zotero/Mendeley", action: () => importBibtexDialog() },
+          { id: "gi-id", label: "Per identificatore…", hint: "DOI / arXiv / ISBN / PMID", action: () => (idModal = true) },
+          { id: "gi-url", label: "Da URL…", hint: "Scarica un PDF da un link", action: () => openUrlModal() },
+          { id: "gi-watch", label: "Cartella sorvegliata…", hint: "Importa automaticamente i PDF che aggiungi", action: () => pickWatchedFolder() },
+        ],
+      },
+      {
+        id: "g-view",
+        label: "Vista",
+        icon: I.eye,
+        hint: "Griglia, lista, costellazione, ordinamento",
+        children: [
+          { id: "gv-grid", label: "Griglia", icon: I.grid, checked: view === "grid", action: () => (view = "grid") },
+          { id: "gv-list", label: "Lista", icon: I.list, checked: view === "list", action: () => (view = "list") },
+          { id: "gv-map", label: "Costellazione", icon: I.map, checked: view === "map", hint: "Mappa semantica della libreria", action: () => (view = "map") },
+          { id: "gv-side", label: "Barra laterale", checked: !sidebarHidden, hint: "Mostra/nascondi (Ctrl+B)", action: () => (sidebarHidden = !sidebarHidden) },
+          ...SORT_KEYS.map((k) => ({
+            id: "gs-" + k,
+            label: "Ordina: " + SORT_LABELS[k],
+            checked: !!sortDirOf(k),
+            badge: sortDirOf(k) ? (sortDirOf(k) === "asc" ? "↑" : "↓") : undefined,
+            hint: "Un tocco attiva, un altro inverte, un terzo toglie",
+            action: () => cycleSort(k),
+          })),
+        ],
+      },
+      {
+        id: "g-search",
+        label: "Cerca",
+        icon: I.search,
+        children: [
+          { id: "gq-focus", label: "Cerca in libreria", hint: "Vai alla casella di ricerca", action: () => searchEl?.focus() },
+          { id: "gq-pal", label: "Palette comandi", hint: "Ctrl+K — ogni azione, digitando", action: () => (paletteOpen = true) },
+          { id: "gq-ask", label: "Chiedi alla libreria", icon: I.ask, hint: "Risposte con citazioni dai tuoi PDF (AI locale)", action: () => { setFilter({ kind: "ask" }); loadRagStatus(); } },
+          { id: "gq-disc", label: "Scopri online", hint: "arXiv, OpenAlex, ADS e altre fonti", action: () => setFilter({ kind: "discover" }) },
+        ],
+      },
+      { id: "g-redis", label: "Riscopri", icon: I.compass, hint: "Un documento dimenticato, pescato per te", action: () => rediscover() },
+      {
+        id: "g-exp",
+        label: "Esporta",
+        icon: I.exp,
+        children: [
+          { id: "ge-cit", label: "Citazioni (BibTeX/RIS/CSL)…", disabled: displayed.length === 0, action: () => exportLibrary() },
+          { id: "ge-obs", label: "In Obsidian (Markdown)", disabled: exportingObsidian || displayed.length === 0, action: () => runObsidianExport() },
+        ],
+      },
+      {
+        id: "g-tools",
+        label: "Strumenti",
+        icon: I.tools,
+        hint: "Manutenzione e diagnostica",
+        children: [
+          { id: "gt-meta", label: "Recupera metadati", badge: needsMeta > 0 ? String(needsMeta) : undefined, disabled: enriching || docs.length === 0, hint: "Da Crossref via DOI: autori, anno, rivista, riferimenti", action: () => enrichMeta() },
+          { id: "gt-health", label: "Salute libreria", icon: I.heal, hint: "File mancanti, PDF senza testo, duplicati…", action: () => openHealth() },
+          { id: "gt-gaps", label: "Gap di citazioni", hint: "I DOI più citati dai tuoi paper che ancora non possiedi", action: () => openGaps() },
+          { id: "gt-dup", label: "Duplicati", action: () => setFilter({ kind: "duplicates" }) },
+          { id: "gt-thumb", label: "Rigenera anteprime", disabled: rebuildingThumbs, action: () => rebuildThumbs() },
+          { id: "gt-emb", label: "Indice semantico", hint: `${emb.embedded}/${emb.total} documenti indicizzati`, disabled: generating || emb.embedded >= emb.total || emb.total === 0, action: () => generateIndex() },
+          { id: "gt-backup", label: "Backup libreria…", action: () => doBackup() },
+          { id: "gt-trash", label: "Cestino", icon: I.trash, action: () => setFilter({ kind: "trash" }) },
+          { id: "gt-term", label: "Terminale", hint: "PowerShell integrato nella cartella dei PDF", action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
+        ],
+      },
+      {
+        id: "g-theme",
+        label: "Aspetto",
+        icon: I.theme,
+        hint: "11 temi, chiari e scuri",
+        children: THEMES.map((t) => ({
+          id: "th-" + t.value,
+          label: t.label,
+          badge: t.dark ? "●" : "○",
+          checked: theme === t.value,
+          action: () => (theme = t.value),
+        })),
+      },
+      {
+        id: "g-sys",
+        label: "Sistema",
+        icon: I.gear,
+        children: [
+          { id: "gy-set", label: "Impostazioni", icon: I.gear, action: () => openSettings() },
+          { id: "gy-help", label: "Aiuto", icon: I.ask, action: () => (helpModal = true) },
+          { id: "gy-about", label: "Informazioni", action: () => (aboutModal = true) },
+        ],
+      },
+    ];
+  }
+
+  function openRadialDoc(e: MouseEvent, d: DocumentItem) {
+    e.preventDefault();
+    e.stopPropagation();
+    ensureThumbs([d]);
+    if (selected.length > 1 && selected.includes(d.id)) {
+      radial = { x: e.clientX, y: e.clientY, items: buildSelectionRadial(), title: `${selected.length} selezionati`, subtitle: "Azioni sulla selezione", thumb: thumbs[d.id] ?? null };
+    } else {
+      radial = { x: e.clientX, y: e.clientY, items: buildDocRadial(d), title: d.title ?? "Senza titolo", subtitle: authorLine(d) || undefined, thumb: thumbs[d.id] ?? null };
+    }
+  }
+
+  /** Right-click on empty chrome → the global radial. Native menu stays available
+   *  inside text fields and the terminal. */
+  function onGlobalContext(e: MouseEvent) {
+    const t = e.target as HTMLElement | null;
+    if (t?.closest("input, textarea, select, [contenteditable], .termview, .xterm, .card, .list tbody tr, .shelfcard, .modalback, .back, .menu, .pop, .floatpill, .toast")) return;
+    if (openDoc || radial || paletteOpen || editingId !== null) return;
+    e.preventDefault();
+    radial = { x: e.clientX, y: e.clientY, items: buildGlobalRadial(), title: "Scriptorium", subtitle: "Menu rapido", thumb: null };
+  }
+
+  // ----- Command palette entries: actions + navigation + themes + documents -----
+  function paletteEntries(): PaletteEntry[] {
+    const out: PaletteEntry[] = [];
+    const walk = (items: RadialItem[], trail: string) => {
+      for (const it of items) {
+        if (it.disabled) continue;
+        if (it.children) walk(it.children, trail ? `${trail} · ${it.label}` : it.label);
+        else if (it.action)
+          out.push({
+            id: "act-" + it.id,
+            title: trail ? `${trail} · ${it.label}` : it.label,
+            hint: it.hint,
+            section: "Azioni",
+            keywords: it.hint,
+            run: it.action,
+          });
+      }
+    };
+    walk(buildGlobalRadial(), "");
+    if (selected.length > 1) walk(buildSelectionRadial(), `Selezione (${selected.length})`);
+    // Navigation
+    const nav: [string, string, () => void][] = [
+      ["Tutti", "tutta la libreria", () => setFilter({ kind: "all" })],
+      ["Preferiti", "", () => setFilter({ kind: "favorite" })],
+      ["Da leggere", "", () => setFilter({ kind: "unread" })],
+      ["Con codice (GitHub)", "", () => setFilter({ kind: "github" })],
+      ["Peer-reviewed", "", () => setFilter({ kind: "peerreviewed" })],
+      ["Cestino", "", () => setFilter({ kind: "trash" })],
+    ];
+    for (const [label, hint, run] of nav) out.push({ id: "nav-" + label, title: label, hint, section: "Vai a", run });
+    for (const c of collections)
+      out.push({ id: "nav-c" + c.id, title: `Collezione: ${c.name}`, section: "Vai a", run: () => setFilter({ kind: "collection", id: c.id, label: c.name }) });
+    for (const t of tags)
+      out.push({ id: "nav-t" + t.id, title: `Tag: ${t.name}`, hint: `${t.count} documenti`, section: "Vai a", run: () => toggleTagFilter(t.id) });
+    for (const s of savedSearches)
+      out.push({ id: "nav-s" + s.id, title: `Ricerca salvata: ${s.name}`, hint: "rilancia e mostra le novità", section: "Vai a", run: () => runSaved(s) });
+    for (const t of THEMES)
+      out.push({ id: "th-" + t.value, title: `Tema: ${t.label}`, hint: t.dark ? "scuro" : "chiaro", section: "Aspetto", keywords: "tema aspetto colori", run: () => (theme = t.value) });
+    // Documents (open directly) — not in the trash view, where `docs` holds deleted items
+    const pool = filter.kind === "trash" ? [] : displayed.length ? displayed : docs;
+    for (const d of pool.slice(0, 400))
+      out.push({
+        id: "doc-" + d.id,
+        title: d.title ?? "Senza titolo",
+        hint: [d.authors[0], d.year].filter(Boolean).join(" · "),
+        section: "Documenti",
+        keywords: d.authors.join(" ") + " " + (d.citekey ?? ""),
+        run: () => openDocument(d),
+      });
+    return out;
+  }
+
+  // ----- Global keyboard shortcuts (main window only; the viewer has its own) -----
+  function onGlobalKey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      if (!openDoc) paletteOpen = !paletteOpen;
+      return;
+    }
+    if (openDoc) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
+      e.preventDefault();
+      sidebarHidden = !sidebarHidden;
+      return;
+    }
+    const t = e.target as HTMLElement | null;
+    const typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
+    if (e.key === "/" && !typing && !paletteOpen && !radial && editingId === null && !document.querySelector(".modalback, .back")) {
+      e.preventDefault();
+      searchEl?.focus();
+      return;
+    }
+    if (e.key === "Escape" && (sortPop || indexPop)) {
+      sortPop = false;
+      indexPop = false;
+    }
+  }
+
+  // ----- Costellazione (semantic map) -----
+  let graphError = $state(false); // latched on failure so the effect can't retry-loop
+  async function loadGraph(force = false) {
+    if (graphLoading || (graph && !force) || (graphError && !force)) return;
+    graphLoading = true;
+    graphError = false;
+    try {
+      graph = await similarityGraph();
+    } catch (e) {
+      graphError = true;
+      status = "Mappa semantica: " + e;
+    } finally {
+      graphLoading = false;
+    }
+  }
+  // Depend on `view` only: loadGraph's internal reads must not re-trigger this.
+  $effect(() => {
+    if (view === "map") untrack(() => loadGraph());
+  });
+
+  // ----- Riscopri: weighted serendipity over the library -----
+  async function rediscover() {
+    // Always draw from the full live library: `docs` may hold the trash or a
+    // filtered slice depending on the current view.
+    let pool: DocumentItem[] = [];
+    try {
+      pool = await listDocuments();
+    } catch {
+      pool = filter.kind === "trash" ? recentDocs : docs;
+    }
+    if (!pool.length) {
+      status = "La libreria è vuota: importa qualche PDF prima";
+      return;
+    }
+    const weights = pool.map((d) => {
+      let w = 1;
+      if (!d.is_read) w += 2; // prefer unread
+      if (!d.last_page) w += 1.5; // never opened
+      if (d.favorite) w += 0.5; // favorites deserve a comeback
+      return w;
+    });
+    let r = Math.random() * weights.reduce((a, b) => a + b, 0);
+    let pick = pool[0];
+    for (let i = 0; i < pool.length; i++) {
+      r -= weights[i];
+      if (r <= 0) {
+        pick = pool[i];
+        break;
+      }
+    }
+    ensureThumbs([pick]);
+    let blurb = "";
+    try {
+      const m = await getDocumentMeta(pick.id);
+      blurb = (m.summary || m.abstract_text || "").trim();
+    } catch {
+      /* ignore */
+    }
+    spotlight = { doc: pick, blurb: blurb.length > 420 ? blurb.slice(0, 420) + "…" : blurb };
+  }
+
+  // Status messages surface as a quiet toast that fades on its own.
+  let statusTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    if (!status) return;
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(() => (status = ""), 7000);
+  });
+
   const MODES: { value: SearchMode; label: string; desc: string }[] = [
     {
       value: "hybrid",
@@ -1938,7 +2563,11 @@
   ];
 </script>
 
-<svelte:window onclick={() => { cardMenu = null; headerMenu = null; }} />
+<svelte:window
+  onclick={() => { headerMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; }}
+  onkeydown={onGlobalKey}
+  oncontextmenu={onGlobalContext}
+/>
 
 {#snippet githubMark()}
   <svg class="ghmark" viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" /></svg>
@@ -1982,6 +2611,9 @@
 <div class="app" class:drag={dragOver}>
   <header>
     <div class="brand">
+      <button class="railtoggle" title="Mostra/nascondi la barra laterale (Ctrl+B)" aria-label="Barra laterale" onclick={(e) => { e.stopPropagation(); sidebarHidden = !sidebarHidden; }}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h18a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM9 4v16" /></svg>
+      </button>
       <h1>Scriptorium</h1>
       <span class="count" title="Documenti mostrati (o nel filtro attivo)">{tagFilter.length || query.trim() ? displayed.length : docs.length}</span>
       {#if aiStat?.enabled}
@@ -1996,14 +2628,25 @@
           <span class="aidot"></span>AI
         </button>
       {/if}
+      <button
+        class="aichip idxchip"
+        class:active={emb.total > 0 && emb.embedded >= emb.total}
+        class:busy={!!embedProgress && embedProgress.phase !== "done" && embedProgress.phase !== "cancelled"}
+        title="Indice semantico: abilita ricerca per significato, correlati e costellazione"
+        aria-label="Indice semantico"
+        onclick={(e) => { e.stopPropagation(); indexPop = !indexPop; sortPop = false; }}
+      >
+        <span class="aidot"></span>◈ {emb.embedded}/{emb.total}
+      </button>
     </div>
     <div class="searchgroup">
       <input
         class="search"
         type="search"
-        placeholder="Cerca per testo o significato…"
-        title="Cerca nei tuoi PDF"
+        placeholder="Cerca per testo o significato…  ( / )"
+        title="Cerca nei tuoi PDF — scorciatoia: /"
         bind:value={query}
+        bind:this={searchEl}
       />
       <select
         class="searchmode"
@@ -2016,101 +2659,105 @@
       </select>
       {#if searching}<span class="searchspin">cerco…</span>{/if}
     </div>
-    <button
-      class="ghost"
-      class:attn={needsMeta > 0 && !enriching}
-      onclick={enrichMeta}
-      disabled={enriching || docs.length === 0}
-      title={"Recupera da Crossref (tramite il DOI trovato nel PDF): titoli, autori, anno, rivista, abstract e l'elenco dei riferimenti.\nMolte funzioni si popolano solo dopo: «Riferimenti e citazioni», «Gap di citazioni» e i campi autore/anno/rivista delle schede." + (needsMeta > 0 ? `\n\n${needsMeta} ${needsMeta === 1 ? "documento è" : "documenti sono"} ancora senza metadati.` : "")}
-    >
-      {enriching ? "…" : "Metadati"}{#if needsMeta > 0 && !enriching}<span class="metabadge">{needsMeta}</span>{/if}
+    {#if needsMeta > 0}
+      <button
+        class="ambient"
+        onclick={enrichMeta}
+        disabled={enriching}
+        title={"Recupera da Crossref (tramite il DOI trovato nel PDF): titoli, autori, anno, rivista, abstract e riferimenti.\n«Riferimenti e citazioni», «Gap di citazioni» e i campi delle schede si popolano solo dopo."}
+      >
+        {enriching ? "recupero…" : `✦ ${needsMeta} senza metadati`}
+      </button>
+    {/if}
+    <button class="iconbtn" title="Palette comandi — ogni azione, digitando (Ctrl+K)" aria-label="Palette comandi" onclick={(e) => { e.stopPropagation(); paletteOpen = true; }}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3" /></svg>
     </button>
-    <button class="ghost" class:menuopen={headerMenu?.kind === "export"} onclick={(e) => openHeaderMenu(e, "export")} disabled={displayed.length === 0} title="Esporta: citazioni (BibTeX/RIS/CSL) o note Markdown per Obsidian">
-      Esporta ▾
-    </button>
-    <button class="primary" class:menuopen={headerMenu?.kind === "import"} onclick={(e) => openHeaderMenu(e, "import")} title="Importa: PDF dal disco o una libreria BibTeX (.bib)">
-      {busy || exportingObsidian ? "…" : "Importa ▾"}
+    <button class="primary" class:menuopen={headerMenu?.kind === "import"} onclick={(e) => openHeaderMenu(e, "import")} title="Aggiungi: PDF dal disco, BibTeX, identificatori o URL">
+      {busy || exportingObsidian ? "…" : "+ Aggiungi"}
     </button>
   </header>
 
-  <div class="toolbar">
-    <div class="modes">
-      <button class="mode" class:active={view === "grid"} onclick={() => (view = "grid")} title="Vista a griglia (copertine)">Griglia</button>
-      <button class="mode" class:active={view === "list"} onclick={() => (view = "list")} title="Vista a lista (dettagli, colonne ordinabili)">Lista</button>
-      {#if filter.kind !== "trash" && filter.kind !== "discover" && filter.kind !== "duplicates" && filter.kind !== "ask" && displayed.length}
-        <button class="mode" onclick={toggleSelectAll} title="Seleziona o deseleziona tutti i documenti mostrati (per le azioni multiple)">{allSelected ? "Deseleziona tutti" : "Seleziona tutti"}</button>
-      {/if}
-      {#if view === "grid" && filter.kind !== "discover" && filter.kind !== "ask"}
-        <div class="gridzoom" title="Dimensione delle copertine nella griglia">
-          <button class="zbtn" onclick={() => (gridSize = Math.max(120, gridSize - 30))} aria-label="Copertine più piccole" title="Più piccole">−</button>
-          <input class="zrange" type="range" min="120" max="360" step="10" bind:value={gridSize} aria-label="Dimensione copertine" />
-          <button class="zbtn" onclick={() => (gridSize = Math.min(360, gridSize + 30))} aria-label="Copertine più grandi" title="Più grandi">+</button>
-          <button class="zbtn refresh" onclick={rebuildThumbs} disabled={rebuildingThumbs} aria-label="Rigenera anteprime ad alta risoluzione" title="Rigenera le anteprime ad alta risoluzione, così restano nitide anche ingrandite. Su librerie grandi può richiedere qualche minuto.">{rebuildingThumbs ? "…" : "⟳"}</button>
-        </div>
-      {/if}
-    </div>
-    <div class="index">
-      <select class="themesel" bind:value={theme} title="Tema colori dell'interfaccia">
-        <optgroup label="Chiare">
-          <option value="paper">Carta</option>
-          <option value="sepia">Seppia</option>
-          <option value="solarized">Solarized</option>
-          <option value="sage">Salvia</option>
-          <option value="pastel">Pastello</option>
-          <option value="medieval">Medievale</option>
-        </optgroup>
-        <optgroup label="Scure">
-          <option value="dark">Scuro</option>
-          <option value="nord">Nord</option>
-          <option value="graphite">Grafite</option>
-          <option value="forest">Foresta</option>
-          <option value="synthwave">Synthwave</option>
-        </optgroup>
-      </select>
-      {#if embedProgress && embedProgress.phase !== "done" && embedProgress.phase !== "cancelled"}
-        <span class="hint">
-          {embedProgress.phase === "model" ? "Carico modello bge-m3…" : `Indicizzo ${embedProgress.done}/${embedProgress.total}`}
-        </span>
-        <div class="bar"><div class="fill" style="width:{embedProgress.total ? (embedProgress.done / embedProgress.total) * 100 : 8}%"></div></div>
-        <button class="ghost small" onclick={stopIndex} title="Ferma l'indicizzazione (i documenti già indicizzati restano salvati)">Stop</button>
-      {:else}
-        <span class="hint" title="Quanti documenti hanno l'embedding per la ricerca semantica, sul totale">Indice semantico: {emb.embedded}/{emb.total}</span>
-        <button
-          class="ghost small"
-          onclick={generateIndex}
-          disabled={generating || emb.embedded >= emb.total || emb.total === 0}
-          title="Calcola gli embedding dei documenti mancanti per abilitare la ricerca semantica (la prima volta scarica il modello ~2.3GB)"
-        >
-          {generating ? "…" : "Genera"}
-        </button>
-      {/if}
-    </div>
-  </div>
-
-  {#if filter.kind !== "trash" && filter.kind !== "discover" && filter.kind !== "duplicates" && filter.kind !== "terminal" && filter.kind !== "ask" && displayed.length}
-    <div class="sortbar">
-      <span class="sortlabel" title="Clicca un criterio per attivarlo, di nuovo per invertire (▲/▼), ancora per toglierlo. Più criteri si combinano nell'ordine in cui li attivi (il numero indica la priorità).">Ordina:</span>
-      {#each SORT_KEYS as k (k)}
-        <button class="sortchip" class:on={sortDirOf(k)} onclick={() => cycleSort(k)} title={`Ordina per ${SORT_LABELS[k].toLowerCase()}`}>
-          {SORT_LABELS[k]}{#if sortDirOf(k)}<span class="sar">{sortArrow(k)}</span>{#if sortChain.length > 1}<span class="srank">{sortRank(k)}</span>{/if}{/if}
-        </button>
-      {/each}
-      {#if sortChain.length}<button class="sortclear" onclick={clearSort} title="Azzera l'ordinamento">azzera</button>{/if}
+  {#if embedProgress && embedProgress.phase !== "done" && embedProgress.phase !== "cancelled"}
+    <div class="headprog" title={embedProgress.phase === "model" ? "Carico il modello bge-m3…" : `Indicizzo ${embedProgress.done}/${embedProgress.total}`}>
+      <div class="fill" style="width:{embedProgress.total ? (embedProgress.done / embedProgress.total) * 100 : 8}%"></div>
     </div>
   {/if}
 
-  {#if status}<div class="status">{status}</div>{/if}
+  {#if filter.kind !== "trash" && filter.kind !== "discover" && filter.kind !== "duplicates" && filter.kind !== "terminal" && filter.kind !== "ask"}
+    <div class="strip">
+      <div class="stripleft">
+        <div class="seg" role="group" aria-label="Vista">
+          <button class="segbtn" class:active={view === "grid"} onclick={() => (view = "grid")} title="Griglia (copertine)" aria-label="Vista a griglia">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z" /></svg>
+          </button>
+          <button class="segbtn" class:active={view === "list"} onclick={() => (view = "list")} title="Lista (colonne ordinabili)" aria-label="Vista a lista">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
+          </button>
+          <button class="segbtn" class:active={view === "map"} onclick={() => (view = "map")} title="Costellazione: la libreria come mappa semantica" aria-label="Vista a costellazione">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 4a2 2 0 1 0 .01 0M5 16a2 2 0 1 0 .01 0M19 16a2 2 0 1 0 .01 0M10.8 9.6L6.6 14.6M13.2 9.6l4.2 5" /></svg>
+          </button>
+        </div>
+        {#if view === "grid"}
+          <div class="gridzoom" title="Dimensione delle copertine nella griglia">
+            <button class="zbtn" onclick={() => (gridSize = Math.max(120, gridSize - 30))} aria-label="Copertine più piccole" title="Più piccole">−</button>
+            <input class="zrange" type="range" min="120" max="360" step="10" bind:value={gridSize} aria-label="Dimensione copertine" />
+            <button class="zbtn" onclick={() => (gridSize = Math.min(360, gridSize + 30))} aria-label="Copertine più grandi" title="Più grandi">+</button>
+          </div>
+        {/if}
+      </div>
+      <div class="stripright">
+        {#if displayed.length && view !== "map"}
+          <button class="chipbtn" onclick={toggleSelectAll} title="Seleziona o deseleziona tutti i documenti mostrati (per le azioni multiple)">{allSelected ? "Deseleziona tutti" : "Seleziona tutti"}</button>
+          <button class="chipbtn" class:on={sortChain.length > 0} onclick={(e) => { e.stopPropagation(); sortPop = !sortPop; indexPop = false; }} title="Ordina i documenti (più criteri combinabili)">
+            Ordina{#if sortChain.length}: {SORT_LABELS[sortChain[0].key]} {sortArrow(sortChain[0].key)}{#if sortChain.length > 1} +{sortChain.length - 1}{/if}{/if} ▾
+          </button>
+        {/if}
+      </div>
+      {#if sortPop}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="pop sortpop" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === "Escape") sortPop = false; e.stopPropagation(); }} role="menu" tabindex="-1">
+          <div class="poptitle">Ordina per <span class="popnote">un tocco attiva · un altro inverte · un terzo toglie</span></div>
+          <div class="popchips">
+            {#each SORT_KEYS as k (k)}
+              <button class="sortchip" class:on={sortDirOf(k)} onclick={() => cycleSort(k)} title={`Ordina per ${SORT_LABELS[k].toLowerCase()}`}>
+                {SORT_LABELS[k]}{#if sortDirOf(k)}<span class="sar">{sortArrow(k)}</span>{#if sortChain.length > 1}<span class="srank">{sortRank(k)}</span>{/if}{/if}
+              </button>
+            {/each}
+          </div>
+          {#if sortChain.length}<button class="sortclear" onclick={clearSort} title="Azzera l'ordinamento">azzera</button>{/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
 
-  {#if aiBatch}
-    <div class="batchbar">
-      <span>{aiBatch.kind === "summary" ? "Riassunto AI" : "Tag automatici AI"} in corso: {aiBatch.done}/{aiBatch.total}</span>
-      <div class="bar"><div class="fill" style="width:{aiBatch.total ? (aiBatch.done / aiBatch.total) * 100 : 0}%"></div></div>
-      <button class="ghost small" onclick={() => (batchCancel = true)} title="Interrompi l'operazione AI in corso">Stop</button>
+  {#if indexPop}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="pop indexpop" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === "Escape") indexPop = false; e.stopPropagation(); }} role="dialog" tabindex="-1">
+      <div class="poptitle">Indice semantico</div>
+      <p class="popbody">Abilita la ricerca per significato, i «Correlati» e la Costellazione. {emb.embedded}/{emb.total} documenti indicizzati.</p>
+      {#if embedProgress && embedProgress.phase !== "done" && embedProgress.phase !== "cancelled"}
+        <div class="poprow">
+          <span class="hint">{embedProgress.phase === "model" ? "Carico modello bge-m3…" : `Indicizzo ${embedProgress.done}/${embedProgress.total}`}</span>
+          <div class="bar"><div class="fill" style="width:{embedProgress.total ? (embedProgress.done / embedProgress.total) * 100 : 8}%"></div></div>
+          <button class="ghost small" onclick={stopIndex} title="Ferma l'indicizzazione (i documenti già indicizzati restano salvati)">Stop</button>
+        </div>
+      {:else}
+        <div class="poprow">
+          <button
+            class="ghost small"
+            onclick={generateIndex}
+            disabled={generating || emb.embedded >= emb.total || emb.total === 0}
+            title="Calcola gli embedding mancanti (la prima volta scarica il modello ~2.3GB)"
+          >
+            {generating ? "…" : emb.embedded >= emb.total && emb.total > 0 ? "Aggiornato ✓" : "Genera"}
+          </button>
+        </div>
+      {/if}
     </div>
   {/if}
 
   <div class="body">
-    <aside class="sidebar">
+    <aside class="sidebar" class:collapsed={sidebarHidden} inert={sidebarHidden}>
       <button class="navitem" class:active={filter.kind === "all"} onclick={() => setFilter({ kind: "all" })} title="Mostra tutti i documenti (rimuovi i filtri)">
         Tutti{#if facets.all}<span class="navcount">{facets.all}</span>{/if}
       </button>
@@ -2204,12 +2851,10 @@
       <div class="sec">Strumenti</div>
       <button class="navitem" class:active={filter.kind === "ask"} onclick={() => { setFilter({ kind: "ask" }); loadRagStatus(); }} title="Fai domande alla tua libreria: risposte con citazioni dai tuoi documenti (AI locale)">Chiedi alla libreria</button>
       <button class="navitem" class:active={filter.kind === "discover"} onclick={() => setFilter({ kind: "discover" })} title="Cerca paper online (arXiv / OpenAlex / ADS) e aggiungili alla libreria">Scopri online</button>
-      <button class="navitem" onclick={() => (idModal = true)} title="Aggiungi riferimenti incollando DOI / arXiv / ISBN / PMID (crea voci senza PDF allegato)">Aggiungi per ID</button>
       <button class="navitem" class:active={filter.kind === "duplicates"} onclick={() => setFilter({ kind: "duplicates" })} title="Trova e unisci documenti duplicati (per DOI o titolo+anno)">Duplicati</button>
-      <button class="navitem" onclick={openHealth} title="Salute della libreria: file mancanti, PDF senza testo, metadati/incorporamenti/copertine mancanti, duplicati">Salute libreria</button>
-      <button class="navitem" onclick={openGaps} title="I DOI che la tua libreria cita di più ma che non possiedi ancora">Gap di citazioni</button>
       <button class="navitem" class:active={filter.kind === "trash"} onclick={() => setFilter({ kind: "trash" })} title="Documenti eliminati: ripristina o elimina definitivamente">Cestino</button>
       <button class="navitem" class:active={filter.kind === "terminal"} onclick={() => { terminalOpened = true; setFilter({ kind: "terminal" }); }} title="Terminale integrato: usa claude code o altri strumenti a riga di comando sui tuoi PDF">Terminale</button>
+      <p class="sidehint" title="Aggancia da URL, Aggiungi per ID, Salute libreria, Gap di citazioni e tutto il resto vivono nel menu radiale (tasto destro) e nella palette (Ctrl+K)">Tasto destro: menu radiale · Ctrl+K: palette</p>
 
       <div class="sec">Cartella sorvegliata</div>
       <div class="watched">
@@ -2546,8 +3191,8 @@
           </div>
         {/if}
         {#if selected.length}
-          <div class="bulkbar">
-            <span>{selected.length} selezionati</span>
+          <div class="floatpill" role="toolbar" aria-label="Azioni sulla selezione">
+            <span class="pillcount">{selected.length} selezionati</span>
             <button onclick={printSelected} disabled={printing} title="Stampa i documenti selezionati come un unico lavoro di stampa">{printing ? "…" : "Stampa"}</button>
             <ShareMenu
               ids={selected}
@@ -2562,7 +3207,6 @@
               <button onclick={() => runBatchAi("summary")} disabled={aiBusyAny} title="Genera un riassunto AI per ogni documento selezionato">{aiBatch?.kind === "summary" ? `Riassunto ${aiBatch.done}/${aiBatch.total}…` : "Riassumi (AI)"}</button>
               <button onclick={() => runBatchAi("tags")} disabled={aiBusyAny} title="Genera tag automatici AI per ogni documento selezionato">{aiBatch?.kind === "tags" ? `Tag ${aiBatch.done}/${aiBatch.total}…` : "Tag automatici (AI)"}</button>
             {/if}
-            <button class="del" onclick={() => trashSelected(selected)} title="Sposta i selezionati nel cestino">Elimina</button>
             <select title="Aggiungi un tag ai selezionati" onchange={(e) => { const t = tags.find((x) => x.id === +e.currentTarget.value); if (t) bulkAddTag(t); e.currentTarget.value = ""; }}>
               <option value="">+ Tag…</option>
               {#each tags as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
@@ -2571,17 +3215,18 @@
               <option value="">+ Collezione…</option>
               {#each collections.filter((c) => !c.is_smart) as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
             </select>
-            <button onclick={() => (selected = [])} title="Annulla la selezione">Deseleziona</button>
+            <button class="del" onclick={() => trashSelected(selected)} title="Sposta i selezionati nel cestino">Elimina</button>
+            <button class="pillx" onclick={() => (selected = [])} title="Annulla la selezione" aria-label="Deseleziona">✕</button>
           </div>
         {/if}
         </div>
-        {#if filter.kind === "all" && !query.trim() && !tagFilter.length && recentDocs.length}
+        {#if filter.kind === "all" && view !== "map" && !query.trim() && !tagFilter.length && recentDocs.length}
           <section class="recentshelf">
             <h2 class="shelfh">Continua a leggere</h2>
             <div class="shelf">
               {#each recentDocs as d (d.id)}
                 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                <div class="shelfcard" role="button" tabindex="0" title={d.title ?? "Senza titolo"} onclick={() => (openDoc = d)} onkeydown={(e) => { if (e.key === "Enter") openDoc = d; }}>
+                <div class="shelfcard" role="button" tabindex="0" title={d.title ?? "Senza titolo"} onclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} onkeydown={(e) => { if (e.key === "Enter") openDocument(d); }}>
                   <div class="shelfthumb">
                     {#if thumbs[d.id]}<img src={thumbs[d.id]} alt="" />{:else}<div class="thumb-placeholder">PDF</div>{/if}
                   </div>
@@ -2591,7 +3236,32 @@
             </div>
           </section>
         {/if}
-        {#if displayed.length === 0}
+        {#if view === "map"}
+          <div class="mapwrap">
+            <Constellation
+              {graph}
+              loading={graphLoading}
+              {selected}
+              onOpen={(id) => openById(id)}
+              onContext={async (e, id) => {
+                let d = displayed.find((x) => x.id === id) ?? docs.find((x) => x.id === id) ?? recentDocs.find((x) => x.id === id);
+                if (!d) {
+                  // Node outside the current filter: fetch it so the radial menu
+                  // works on every star, not just the docs already loaded.
+                  try {
+                    d = (await listDocuments()).find((x) => x.id === id);
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                if (d) openRadialDoc(e, d);
+              }}
+              onToggleSelect={(id) => toggleSelect(id)}
+              onGenerate={() => generateIndex()}
+              onRefresh={() => loadGraph(true)}
+            />
+          </div>
+        {:else if displayed.length === 0}
           <div class="empty">
             {#if query.trim()}
               <p class="big">Nessun risultato</p><p>Prova un'altra ricerca o cambia modalità.</p>
@@ -2606,7 +3276,7 @@
         {:else if view === "grid"}
           <div class="grid" style="--grid-min: {gridSize}px">
             {#each displayed as d (d.id)}
-              <article class="card" class:selcard={selected.includes(d.id)} role="button" tabindex="0" onclick={() => (openDoc = d)} oncontextmenu={(e) => onContext(e, d)} onkeydown={(e) => { if (e.key === "Enter") openDoc = d; }}>
+              <article class="card" class:selcard={selected.includes(d.id)} role="button" tabindex="0" onclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} onkeydown={(e) => { if (e.key === "Enter") openDocument(d); }}>
                 <button class="dots" title="Altre azioni (anche col tasto destro)" onclick={(e) => openCardMenu(e, d)}>⋯</button>
                 <button class="cardsel" class:on={selected.includes(d.id)} title="Seleziona per azioni multiple" aria-label="Seleziona" onclick={(e) => { e.stopPropagation(); toggleSelect(d.id); }}>{selected.includes(d.id) ? "✓" : ""}</button>
                 <button class="starbtn" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>
@@ -2671,7 +3341,7 @@
               <tbody>
                 {#each displayed as d (d.id)}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <tr onclick={() => (openDoc = d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selected.includes(d.id)}>
+                  <tr onclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selected.includes(d.id)}>
                     <td class="sel"><input type="checkbox" checked={selected.includes(d.id)} onclick={(e) => e.stopPropagation()} onchange={() => toggleSelect(d.id)} title="Seleziona" /></td>
                     <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if d.citekey && !isBare(d)}<button type="button" class="ckey-inline" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}{#if isBare(d)}<span class="metamiss-inline" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ</span>{/if}</td>
                     <td class="dim" title={authorLine(d)}>{#if authorLine(d)}<button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button>{:else}—{/if}</td>
@@ -2698,67 +3368,114 @@
   {#if dragOver}<div class="dropmask"><span>Rilascia i PDF per importarli</span></div>{/if}
 
   {#if openDoc}
-    <Viewer id={openDoc.id} title={openDoc.title ?? "PDF"} link={paperLink(openDoc)} onClose={() => (openDoc = null)} />
+    <Viewer
+      id={openDoc.id}
+      title={openDoc.title ?? "PDF"}
+      link={paperLink(openDoc)}
+      aiEnabled={!!aiStat?.enabled}
+      initialPage={openDocPage}
+      onClose={() => { openDoc = null; openDocPage = null; }}
+    />
   {/if}
 
   {#if headerMenu}
     <div class="menu" use:clamp={{ x: headerMenu.x, y: headerMenu.y }}>
-      {#if headerMenu.kind === "import"}
-        <button class="medit" onclick={() => { headerMenu = null; importViaDialog(); }}>PDF dal disco…</button>
-        <button class="medit" onclick={() => { headerMenu = null; importBibtexDialog(); }}>Da BibTeX (.bib) — Zotero/Mendeley…</button>
-      {:else}
-        <button class="medit" onclick={() => { headerMenu = null; exportLibrary(); }} disabled={displayed.length === 0}>Citazioni (BibTeX / RIS / CSL)…</button>
-        <button class="medit" onclick={() => { headerMenu = null; runObsidianExport(); }} disabled={exportingObsidian || displayed.length === 0}>In Obsidian (note Markdown)</button>
-      {/if}
+      <button class="medit" onclick={() => { headerMenu = null; importViaDialog(); }}>PDF dal disco…</button>
+      <button class="medit" onclick={() => { headerMenu = null; importBibtexDialog(); }}>Da BibTeX (.bib) — Zotero/Mendeley…</button>
+      <button class="medit" onclick={() => { headerMenu = null; idModal = true; }} title="Incolla DOI / arXiv / ISBN / PMID (crea voci anche senza PDF)">Per identificatore…</button>
+      <button class="medit" onclick={() => { headerMenu = null; openUrlModal(); }} title="Scarica un PDF incollando il link (o col bookmarklet dal browser)">Da URL…</button>
     </div>
   {/if}
 
-  {#if cardMenu}
+  {#if radial}
+    {#key radial}
+      <RadialMenu
+        x={radial.x}
+        y={radial.y}
+        items={radial.items}
+        title={radial.title}
+        subtitle={radial.subtitle}
+        thumb={radial.thumb}
+        onclose={() => (radial = null)}
+      />
+    {/key}
+  {/if}
+
+  {#if paletteOpen}
+    <CommandPalette entries={paletteEntries()} onclose={() => (paletteOpen = false)} />
+  {/if}
+
+  {#if tagPanel}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="menu" use:clamp={{ x: cardMenu.x, y: cardMenu.y }} onclick={(e) => e.stopPropagation()}>
-      <button class="medit" onclick={() => { openDoc = cardMenu!.doc; cardMenu = null; }}>Apri</button>
-      <button class="medit" onclick={() => { editingId = cardMenu!.doc.id; cardMenu = null; }}>Modifica metadati</button>
-      <button class="medit" onclick={() => toggleFavorite(cardMenu!.doc)}>{cardMenu.doc.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"}</button>
-      <button class="medit" onclick={() => toggleRead(cardMenu!.doc)}>{cardMenu.doc.is_read ? "Segna come da leggere" : "Segna come letto"}</button>
-      <button class="medit" onclick={() => printOne(cardMenu!.doc)} disabled={printing} title="Stampa questo documento">Stampa</button>
-      <ShareMenu ids={[cardMenu.doc.id]} label={cardMenu.doc.title ?? "Documento PDF"} link={paperLink(cardMenu.doc)} variant="menuitem" onstatus={(s) => (status = s)} onclose={() => (cardMenu = null)} />
-      <button class="medit" onclick={() => revealDoc(cardMenu!.doc)} title="Apri la cartella che contiene il PDF">Mostra nella cartella</button>
-      {#if !cardMenu.doc.has_thumb}
-        <button class="medit" onclick={() => doFindPdf(cardMenu!.doc)} title="Cerca un PDF Open Access (Unpaywall / arXiv) e allegalo a questo riferimento">Trova PDF</button>
-      {/if}
-      {#if aiEnabled}
-        <button class="medit" onclick={() => summarizeDoc(cardMenu!.doc)} disabled={aiBusyAny} title="Genera un riassunto in italiano con Ollama (locale)">{aiBusy === cardMenu.doc.id ? "AI…" : "Riassumi (AI)"}</button>
-        <button class="medit" onclick={() => autotagDoc(cardMenu!.doc)} disabled={aiBusyAny} title="Suggerisci e assegna tag tematici con Ollama (locale)">{aiBusy === cardMenu.doc.id ? "AI…" : "Tag automatici (AI)"}</button>
-      {/if}
-      <button class="medit" title="Mostra i documenti più simili per significato (richiede l'indice semantico)" onclick={() => { setFilter({ kind: "related", id: cardMenu!.doc.id, label: cardMenu!.doc.title ?? "documento" }); cardMenu = null; }}>Correlati</button>
-      <button class="medit" title="Repository GitHub citati dal paper + modelli/dataset su Hugging Face" onclick={() => openHf(cardMenu!.doc)}>Codice & repository (GitHub + HF)</button>
-      <button class="medit" title="Bibliografia del paper e documenti della tua libreria che lo citano" onclick={() => openCitations(cardMenu!.doc)}>Riferimenti e citazioni</button>
-      {#if cardMenu.doc.doi}<button class="medit" title="Esplora online i riferimenti e i paper che lo citano (OpenAlex), e aggiungili alla libreria" onclick={() => openExplore(cardMenu!.doc)}>Esplora citazioni (online)</button>{/if}
-      <button class="medit" title="Fai una domanda solo su questo documento (AI locale)" onclick={() => askAboutDoc(cardMenu!.doc)}>Chiedi su questo documento</button>
-      <button class="medit" onclick={() => copyCite(cardMenu!.doc, "apa")} title="Copia la citazione formattata (APA) negli appunti">Copia citazione (APA)</button>
-      <button class="medit" onclick={() => copyCite(cardMenu!.doc, "bibtex")} title="Copia la voce BibTeX negli appunti">Copia BibTeX</button>
-      <button class="medit" onclick={() => copyCite(cardMenu!.doc, "citekey")} title="Copia la chiave di citazione (es. vaswani2017attention)">Copia citekey</button>
-      <button class="medit" onclick={() => copyCite(cardMenu!.doc, "latex")} title={"Copia \\cite{key} pronto per LaTeX"}>Copia \cite&#123;…&#125;</button>
-      <button class="medit del" onclick={() => trashSelected([cardMenu!.doc.id])} title="Sposta nel cestino (recuperabile)">Elimina</button>
-      <div class="mtitle">Tag</div>
+    <div class="menu flyout" use:clamp={{ x: tagPanel.x, y: tagPanel.y }} onclick={(e) => e.stopPropagation()}>
+      <div class="mtitle">Tag — {tagPanel.doc.title ?? "Senza titolo"}</div>
       {#each tags as t (t.id)}
         <label class="mtag">
-          <input type="checkbox" checked={cardMenu.doc.tags.some((x) => x.id === t.id)} onchange={() => toggleTag(cardMenu!.doc, t)} />
+          <input type="checkbox" checked={tagPanel.doc.tags.some((x) => x.id === t.id)} onchange={() => toggleTag(tagPanel!.doc, t)} />
           <span class="dot" style="background:{t.color ?? '#888'}"></span>{t.name}
         </label>
       {/each}
       <div class="mnew">
-        <input placeholder="nuovo tag…" bind:value={newTagName} onkeydown={(e) => e.key === "Enter" && makeTagAndAssign(cardMenu!.doc)} />
-        <button class="ghost small" onclick={() => makeTagAndAssign(cardMenu!.doc)}>+</button>
+        <input placeholder="nuovo tag…" bind:value={newTagName} onkeydown={(e) => e.key === "Enter" && makeTagAndAssign(tagPanel!.doc)} />
+        <button class="ghost small" onclick={() => makeTagAndAssign(tagPanel!.doc)}>+</button>
       </div>
-      {#if collections.filter((c) => !c.is_smart).length}
-        <div class="mtitle">Aggiungi a</div>
-        {#each collections.filter((c) => !c.is_smart) as c (c.id)}
-          <button class="mcoll" onclick={() => addDocToCollection(cardMenu!.doc, c)}>{c.name}</button>
-        {/each}
-      {/if}
+      <button class="mdone" onclick={() => (tagPanel = null)}>Fatto</button>
     </div>
   {/if}
+
+  {#if collPanel}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="menu flyout" use:clamp={{ x: collPanel.x, y: collPanel.y }} onclick={(e) => e.stopPropagation()}>
+      <div class="mtitle">Aggiungi a — {collPanel.doc.title ?? "Senza titolo"}</div>
+      {#if collections.filter((c) => !c.is_smart).length}
+        {#each collections.filter((c) => !c.is_smart) as c (c.id)}
+          <button class="mcoll" onclick={() => { addDocToCollection(collPanel!.doc, c); collPanel = null; }}>{c.name}</button>
+        {/each}
+      {:else}
+        <p class="mempty">Nessuna collezione: creane una dalla barra laterale.</p>
+      {/if}
+      <button class="mdone" onclick={() => (collPanel = null)}>Chiudi</button>
+    </div>
+  {/if}
+
+  {#if spotlight}
+    {@const sd = spotlight.doc}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) spotlight = null; }} role="presentation">
+      <div class="spotcard" role="dialog" aria-label="Riscopri">
+        <p class="spotkicker">Riscopri</p>
+        <div class="spotbody">
+          <div class="spotthumb">
+            {#if thumbs[sd.id]}<img src={thumbs[sd.id]} alt="" />{:else}<div class="thumb-placeholder">PDF</div>{/if}
+          </div>
+          <div class="spotmeta">
+            <h2 class="spottitle">{sd.title ?? "Senza titolo"}</h2>
+            {#if authorLine(sd)}<p class="spotauthors">{authorLine(sd)}</p>{/if}
+            {#if sd.year || sd.venue}<p class="spotvenue">{[sd.venue, sd.year].filter(Boolean).join(" · ")}</p>{/if}
+            {#if spotlight.blurb}<p class="spotblurb">{spotlight.blurb}</p>{/if}
+          </div>
+        </div>
+        <div class="spotactions">
+          <button class="primary" onclick={() => { openDocument(sd); spotlight = null; }}>Leggi ora</button>
+          <button class="ghost" onclick={() => rediscover()}>Un altro</button>
+          <button class="ghost" onclick={() => (spotlight = null)}>Chiudi</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <div class="toasts" aria-live="polite">
+    {#if aiBatch}
+      <div class="toast">
+        <span>{aiBatch.kind === "summary" ? "Riassunto AI" : "Tag automatici AI"}: {aiBatch.done}/{aiBatch.total}</span>
+        <div class="bar"><div class="fill" style="width:{aiBatch.total ? (aiBatch.done / aiBatch.total) * 100 : 0}%"></div></div>
+        <button class="ghost small" onclick={() => (batchCancel = true)} title="Interrompi l'operazione AI in corso">Stop</button>
+      </div>
+    {/if}
+    {#if status}
+      <div class="toast">{status}</div>
+    {/if}
+  </div>
 
   {#if editingId !== null}
     <MetaEditor
@@ -2787,6 +3504,35 @@
         <div class="modactions">
           <button class="ghost" onclick={() => (idModal = false)}>Annulla</button>
           <button class="primary" onclick={addIds} disabled={addingIds}>{addingIds ? "…" : "Aggiungi"}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if urlModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) urlModal = false; }} role="presentation">
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="idmodal" onclick={(e) => e.stopPropagation()}>
+        <h2>Aggancia da URL</h2>
+        <p class="dimtext">
+          Incolla il link diretto a un PDF (deve terminare in <code>.pdf</code> o essere servito come PDF): lo scarico
+          e lo aggiungo alla libreria, con i metadati se trovo un DOI. Per farlo con <strong>un clic dal browser</strong>
+          usa il bookmarklet in <button class="linklike" onclick={() => { urlModal = false; settingsModal = true; settingsTab = "connector"; loadConnector(); }}>Impostazioni → Connettore browser</button>.
+        </p>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input
+            style="flex:1;"
+            type="text"
+            bind:value={urlInput}
+            placeholder="https://arxiv.org/pdf/2401.12345"
+            onkeydown={(e) => { if (e.key === "Enter") doAddFromUrl(); }}
+          />
+          <button class="ghost small" onclick={pasteUrlFromClipboard} title="Incolla dagli appunti">📋</button>
+        </div>
+        <div class="modactions">
+          <button class="ghost" onclick={() => (urlModal = false)}>Annulla</button>
+          <button class="primary" onclick={doAddFromUrl} disabled={urlBusy || !urlInput.trim()}>{urlBusy ? "Scarico…" : "Aggancia"}</button>
         </div>
       </div>
     </div>
@@ -3105,16 +3851,27 @@
         <p class="dimtext">Gestore di PDF e riferimenti, locale e veloce. Tutto resta sul tuo computer; le funzioni di rete e AI sono opzionali e disattivabili.</p>
 
         <div class="helpsec">
+          <h3>Menu radiale e palette — l'interfaccia in due gesti</h3>
+          <ul>
+            <li><strong>Tasto destro</strong> su un documento → il <strong>menu radiale</strong>: le azioni disposte ad anello attorno al cursore, organizzate in orbite (Cita, AI, Organizza, Condividi…). Tasto destro sullo <strong>spazio vuoto</strong> → il menu radiale globale (Importa, Vista, Aspetto, Strumenti…).</li>
+            <li><strong>Come si naviga</strong>: muovi il mouse verso un petalo (basta la direzione, non serve arrivarci) e clicca; oppure <strong>secondo clic destro</strong> per entrare nei sottomenu senza spostarti; <strong>rotella</strong> per ruotare la selezione; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; frecce + Invio da tastiera. <kbd>Esc</kbd> chiude, il centro torna indietro.</li>
+            <li><kbd>Ctrl</kbd>+<kbd>K</kbd> → la <strong>palette comandi</strong>: ogni azione, documento, filtro e tema, digitando. <kbd>/</kbd> va alla ricerca, <kbd>Ctrl</kbd>+<kbd>B</kbd> mostra/nasconde la barra laterale.</li>
+            <li>Con più documenti <strong>selezionati</strong>, il tasto destro su uno di essi apre il radiale della <strong>selezione</strong> (stampa, condivisione, AI, tag, collezioni in blocco).</li>
+          </ul>
+        </div>
+
+        <div class="helpsec">
           <h3>Libreria e organizzazione</h3>
           <ul>
-            <li><strong>Importa ▾</strong> (in alto): PDF dal disco (anche trascinandoli) o una libreria <strong>Zotero/Mendeley</strong> via <em>.bib</em>; oppure riferimenti da DOI/arXiv/ISBN/PMID con <em>Aggiungi per ID</em> (sidebar).</li>
-            <li><strong>Tag</strong> colorati e <strong>Collezioni</strong> (anche “smart”, che si popolano da sole).</li>
+            <li><strong>+ Aggiungi</strong> (in alto): PDF dal disco (anche trascinandoli), libreria <strong>Zotero/Mendeley</strong> via <em>.bib</em>, riferimenti per <em>identificatore</em> (DOI/arXiv/ISBN/PMID) o <em>da URL</em>.</li>
+            <li><strong>Tag</strong> colorati e <strong>Collezioni</strong> (anche “smart”, che si popolano da sole). In una collezione, tasto destro → Organizza → <em>Togli da…</em>.</li>
             <li><strong>Filtri</strong> rapidi nella sidebar: Tutti, Preferiti, Da leggere, <strong>Con codice (GitHub)</strong>, <strong>Peer-reviewed</strong>.</li>
             <li><strong>Badge</strong> su card/lista/risultati: <em>preprint</em> / <em>peer-reviewed</em> (e se per un preprint esiste la versione pubblicata, link diretto al DOI).</li>
-            <li><strong>Ordinamento</strong> combinabile (barra “Ordina”): preferiti, autore, titolo, anno, data — clic per attivare/invertire/togliere, i numeri indicano la priorità.</li>
-            <li><strong>Griglia</strong>: le copertine si <strong>ridimensionano</strong> con il cursore <em>− ▭ +</em> nella barra in alto (la dimensione scelta viene ricordata).</li>
+            <li><strong>Ordinamento</strong> combinabile (chip «Ordina ▾» sopra la griglia): clic per attivare/invertire/togliere, i numeri indicano la priorità.</li>
+            <li><strong>Viste</strong>: griglia (copertine ridimensionabili con − ▭ +), lista a colonne, e <strong>Costellazione</strong> — la libreria come mappa semantica: ogni stella un documento, i legami sono la somiglianza di significato. Clic per aprire, tasto destro per il menu, Ctrl+clic per selezionare.</li>
             <li><strong>Continua a leggere</strong>: in “Tutti” trovi in alto gli ultimi PDF aperti. Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
-            <li><strong>Duplicati</strong> (unione) e <strong>Cestino</strong> (ripristino/eliminazione definitiva) tra gli Strumenti.</li>
+            <li><strong>Riscopri</strong> (menu radiale o palette): ti ripesca un documento dimenticato o mai letto.</li>
+            <li><strong>Duplicati</strong> (unione) e <strong>Cestino</strong> tra gli Strumenti; <strong>Salute libreria</strong> e <strong>Gap di citazioni</strong> dal menu radiale → Strumenti.</li>
           </ul>
         </div>
 
@@ -3124,7 +3881,7 @@
             <li><strong>Locale</strong>: barra in alto, modalità <em>Testo</em>, <em>Semantica</em> (per significato) o <em>Ibrida</em>. Cerca anche nelle tue <strong>note e annotazioni</strong>.</li>
             <li><strong>Online</strong> (<em>Scopri online</em>): arXiv, OpenAlex, ADS, Semantic Scholar, Europe PMC, CORE, DOAJ, Hugging Face. Filtri anno/autore/solo-OA e, sui risultati, chip <strong>Con codice</strong> / <strong>Peer-reviewed</strong> / <strong>Preprint</strong> (con conteggi) oltre alle colonne ordinabili. I PDF Open Access si scaricano, gli altri si aggiungono come riferimento.</li>
             <li><strong>Ricerche salvate</strong>: dopo una ricerca premi <em>★ Salva</em> → compare nella sidebar; cliccandola la rilancia e marca con <strong>“novità”</strong> i risultati nuovi dall'ultima volta.</li>
-            <li><strong>Trova PDF</strong> (menu ⋯): per un riferimento senza file, cerca un PDF Open Access (Unpaywall/arXiv) e lo allega.</li>
+            <li><strong>Trova PDF</strong> (tasto destro → Organizza): per un riferimento senza file, cerca un PDF Open Access (Unpaywall/arXiv) e lo allega.</li>
           </ul>
         </div>
 
@@ -3132,9 +3889,9 @@
           <h3>Codice & repository</h3>
           <ul>
             <li>I paper che citano un repo mostrano l'icona <strong>GitHub</strong> (card, lista, risultati online): cliccala per aprire il repository.</li>
-            <li>Menu ⋯ → <strong>Codice & repository</strong>: anteprima del <strong>README</strong> nell'app, più i modelli/dataset collegati su <strong>Hugging Face</strong>.</li>
+            <li>Tasto destro → <strong>Codice & repo</strong>: anteprima del <strong>README</strong> nell'app, più i modelli/dataset collegati su <strong>Hugging Face</strong>.</li>
             <li>Filtro <strong>“Con codice (GitHub)”</strong> nella sidebar per vedere solo i paper con codice disponibile.</li>
-            <li>Menu ⋯ → <strong>Riferimenti e citazioni</strong>: la bibliografia del paper (con i riferimenti già nella tua libreria cliccabili) e i documenti che lo <strong>citano</strong>. I riferimenti arrivano dall'arricchimento <em>Metadati</em>.</li>
+            <li>Tasto destro → Cita → <strong>Riferimenti e citazioni</strong>: la bibliografia del paper (con i riferimenti già nella tua libreria cliccabili) e i documenti che lo <strong>citano</strong>. Lì trovi anche <strong>Copia APA / IEEE / BibTeX / citekey / \cite / [@…]</strong>.</li>
           </ul>
         </div>
 
@@ -3145,6 +3902,8 @@
             <li><strong>Cerca nel documento</strong>, <strong>indice</strong>, zoom/adatta, rotazione, due pagine, modalità notte; riprende dall'<strong>ultima pagina</strong> letta.</li>
             <li><strong>Estrai tabella</strong> (icona griglia): trascina un rettangolo su una tabella → anteprima → esporta in CSV / Markdown / Excel (+ “migliora con AI”).</li>
             <li><strong>Estrai testo</strong> (icona testo): trascina un'area → copia il testo o salvalo in .txt/.md.</li>
+            <li><strong>Lente AI</strong>: seleziona un passaggio → <em>Spiega</em>, <em>Traduci</em> o <em>Chiedi</em> — la risposta arriva in una scheda accanto al testo e puoi salvarla nelle note (richiede l'AI locale attiva).</li>
+            <li>Le <strong>fonti numerate</strong> di «Chiedi alla libreria» aprono il PDF <strong>alla pagina giusta</strong>.</li>
           </ul>
           <table class="kbdtable">
             <tbody>
@@ -3163,11 +3922,20 @@
         </div>
 
         <div class="helpsec">
+          <h3>Metadati & manutenzione</h3>
+          <ul>
+            <li><strong>Metadati</strong>: quando ci sono schede incomplete compare in alto il suggerimento «✦ N senza metadati» — un clic recupera titolo, autori, anno, rivista, abstract e riferimenti da Crossref (lo trovi anche nel radiale → Strumenti). Il titolo recuperato viene <strong>verificato</strong> contro l'inizio del PDF: se non corrisponde il documento <strong>non</strong> viene arricchito.</li>
+            <li><strong>Impostazioni → Manutenzione → «Ripara metadati errati»</strong>: ricontrolla tutta la libreria e corregge le schede il cui titolo non corrisponde al PDF. I paper <strong>arXiv</strong> recuperano i dati corretti da arXiv (ID dal nome file); per gli altri il titolo è ricavato dalla prima riga del PDF. I documenti già corretti non vengono toccati. Sicuro e ripetibile.</li>
+            <li>Le schede senza metadati mostrano <strong>ⓘ</strong>: premi «Metadati» per recuperarli, oppure usa il <strong>clic destro → Modifica metadati</strong> per inserirli/correggerli a mano.</li>
+          </ul>
+        </div>
+
+        <div class="helpsec">
           <h3>Funzioni opzionali</h3>
           <ul>
-            <li><strong>Esporta ▾</strong> (in alto): <em>Citazioni</em> (BibTeX / RIS / CSL) dei documenti mostrati, oppure <em>In Obsidian</em> (note Markdown nel tuo vault).</li>
-            <li><strong>AI locale</strong> (Ollama / LM Studio): riassunti e tag automatici — opzionali, mai automatici, disattivabili. Impostazioni → AI locale.</li>
-            <li><strong>Terminale</strong> integrato (es. per <code>claude code</code>), <strong>Backup</strong> completo, e <strong>temi</strong> dell'interfaccia (in alto a destra).</li>
+            <li><strong>Esporta</strong> (radiale → Esporta, o Ctrl+K): <em>Citazioni</em> (BibTeX / RIS / CSL) dei documenti mostrati, oppure <em>In Obsidian</em> (note Markdown nel tuo vault).</li>
+            <li><strong>AI locale</strong> (Ollama / LM Studio): riassunti, tag automatici, lente di lettura — opzionali, mai automatici, disattivabili. Impostazioni → AI locale.</li>
+            <li><strong>Terminale</strong> integrato (es. per <code>claude code</code>), <strong>Backup</strong> completo, e <strong>11 temi</strong> dell'interfaccia (radiale → Aspetto, o palette).</li>
             <li>Suggerimento: le finestre si <strong>ridimensionano</strong> trascinando l'angolo in basso a destra.</li>
           </ul>
         </div>
@@ -3188,7 +3956,9 @@
             <button class="setnavitem" class:active={settingsTab === "online"} onclick={() => (settingsTab = "online")}>Ricerca online</button>
             <button class="setnavitem" class:active={settingsTab === "ai"} onclick={() => (settingsTab = "ai")}>AI locale</button>
             <button class="setnavitem" class:active={settingsTab === "obsidian"} onclick={() => (settingsTab = "obsidian")}>Obsidian</button>
+            <button class="setnavitem" class:active={settingsTab === "connector"} onclick={() => { settingsTab = "connector"; loadConnector(); }}>Connettore browser</button>
             <button class="setnavitem" class:active={settingsTab === "backup"} onclick={() => (settingsTab = "backup")}>Backup</button>
+            <button class="setnavitem" class:active={settingsTab === "maint"} onclick={() => (settingsTab = "maint")}>Manutenzione</button>
           </nav>
           <div class="setpane">
             {#if settingsTab === "online"}
@@ -3287,9 +4057,70 @@
                 </div>
               </label>
               <p class="dimtext">Per esportare usa il pulsante <strong>→ Obsidian</strong> in alto: invia i documenti mostrati (o quelli selezionati).</p>
-            {:else}
+            {:else if settingsTab === "connector"}
+              <p class="dimtext">
+                Aggancia un PDF direttamente dal browser con <strong>un clic</strong>. Trascina una volta il pulsante
+                qui sotto nella <strong>barra dei preferiti</strong>; poi, quando sei su un PDF (o su una pagina che
+                ne contiene uno), cliccalo e il file finisce nella tua libreria. Perfetto con arXiv e i PDF ad
+                accesso aperto.
+              </p>
+              <label class="setrow">
+                <input
+                  type="checkbox"
+                  checked={connectorInfo?.enabled ?? false}
+                  onchange={(e) => toggleConnector(e.currentTarget.checked)}
+                />
+                Abilita il connettore (server locale su 127.0.0.1) — disattivato di default
+              </label>
+              {#if connectorInfo}
+                <p class="sethint" style="margin-top:-6px;">
+                  {#if !connectorInfo.enabled}Disattivato — attiva l'interruttore per usare il bookmarklet.
+                  {:else if connectorInfo.running}✓ In ascolto sulla porta <code>{connectorInfo.port}</code>.
+                  {:else}⚠ Attivo, ma non ho trovato una porta libera: chiudi eventuali conflitti e riattiva.{/if}
+                </p>
+              {/if}
+
+              <div class="setlbl">
+                Trascina nella barra dei preferiti
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px;">
+                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_missing_attribute -->
+                  <a
+                    href={bookmarklet}
+                    draggable="true"
+                    onclick={(e) => { e.preventDefault(); status = "Trascina il pulsante nella barra dei preferiti (non cliccarlo qui)"; }}
+                    style="display:inline-block;padding:8px 14px;background:var(--accent);color:var(--on-accent);border-radius:var(--r-pill,999px);font-weight:600;text-decoration:none;cursor:grab;user-select:none;"
+                    title="Trascinami nella barra dei preferiti del browser"
+                  >📎 Scriptorium</a>
+                  <button class="ghost small" onclick={copyBookmarklet} disabled={!bookmarklet}>Copia bookmarklet</button>
+                </div>
+                <span class="sethint">
+                  Non cliccarlo qui: <strong>trascinalo</strong> nella barra dei preferiti. In alternativa premi
+                  «Copia bookmarklet», crea un nuovo preferito e incolla il testo come <em>indirizzo/URL</em>.
+                </span>
+              </div>
+
+              <p class="sethint">
+                🔒 Il server ascolta solo in locale (<code>127.0.0.1</code>, non raggiungibile dalla rete) ed è protetto
+                da un <strong>token segreto</strong> incluso solo nel tuo bookmarklet: nessun altro sito può aggiungere
+                PDF. Il download passa dagli stessi controlli anti-abuso del resto dell'app (solo https, solo file PDF).
+                Se disattivi e riattivi il connettore, o cambia la porta, ri-trascina il bookmarklet aggiornato.
+              </p>
+            {:else if settingsTab === "backup"}
               <p class="dimtext">Salva una copia completa (database + PDF + miniature) in una cartella a tua scelta.</p>
               <button class="ghost" onclick={doBackup}>Scegli cartella e salva backup…</button>
+            {:else}
+              <p class="dimtext">
+                <strong>Verifica e ripara metadati.</strong> Controlla ogni documento e corregge quelli il cui
+                titolo non corrisponde al PDF — di solito perché l'arricchimento ha pescato il DOI di un
+                <em>lavoro citato</em> invece di quello del documento. I paper <strong>arXiv</strong> recuperano
+                i dati corretti da arXiv (anche quelli ancora senza metadati); per gli altri il titolo viene
+                ricavato dalla prima riga del PDF. I documenti già corretti non vengono toccati.
+                È sicuro e ripetibile; può richiedere fino a un minuto.
+              </p>
+              <button class="ghost" onclick={repairMeta} disabled={repairing || docs.length === 0}>
+                {repairing ? "Riparazione in corso…" : "Verifica e ripara metadati"}
+              </button>
+              {#if repairMsg}<p class="sethint" style="margin-top:8px;">{repairMsg}</p>{/if}
             {/if}
           </div>
         </div>
@@ -3488,11 +4319,45 @@
   }
   .searchmode:focus { border-color: var(--accent); }
   .searchspin { align-self: center; margin-left: 8px; font-size: 11px; color: var(--faint); white-space: nowrap; }
-  .themesel {
-    background: var(--field); color: var(--text); border: 1px solid var(--border);
-    border-radius: 7px; padding: 4px 8px; font-size: 12px; cursor: pointer; outline: none;
+  /* ===== Orbita chrome: header icon controls, ambient chips, popovers ===== */
+  .railtoggle, .iconbtn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; flex: 0 0 auto;
+    background: transparent; color: var(--dim);
+    border: 1px solid transparent; border-radius: var(--r-sm); cursor: pointer;
+    transition: background var(--ease), color var(--ease), border-color var(--ease);
   }
-  .themesel:focus { border-color: var(--accent); }
+  .railtoggle:hover, .iconbtn:hover { background: var(--hover); color: var(--accent); border-color: var(--border-soft); }
+  .railtoggle svg, .iconbtn svg { width: 19px; height: 19px; }
+  .idxchip { font-variant-numeric: tabular-nums; }
+  .idxchip.busy .aidot { background: var(--accent); animation: idxpulse 1.1s ease-in-out infinite; }
+  @keyframes idxpulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+  .ambient {
+    display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+    background: var(--accent-soft); color: var(--accent);
+    border: 1px solid var(--accent-soft2); border-radius: var(--r-pill);
+    padding: 6px 13px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+    transition: background var(--ease), box-shadow var(--ease);
+  }
+  .ambient:hover:not(:disabled) { box-shadow: var(--shadow-sm); }
+  .ambient:disabled { opacity: 0.6; cursor: default; }
+  /* slim indeterminate-ish progress line under the header while embedding */
+  .headprog { height: 3px; background: var(--border-soft); }
+  .headprog .fill { height: 100%; }
+  .pop {
+    position: fixed; z-index: 70;
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border); border-radius: var(--r-md);
+    box-shadow: var(--shadow-lg); padding: 12px 14px; max-width: 380px;
+  }
+  .sortpop { top: 108px; right: 22px; }
+  .indexpop { top: 58px; left: 220px; }
+  .poptitle { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 8px; font-family: var(--serif); }
+  .popnote { font-weight: 400; color: var(--faint); font-size: 11px; margin-left: 6px; }
+  .popbody { font-size: 12.5px; color: var(--dim); margin: 0 0 10px; line-height: 1.5; }
+  .poprow { display: flex; align-items: center; gap: 10px; }
+  .popchips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
   button.primary {
     margin-left: auto; background: var(--accent); color: var(--on-accent); border: none;
     border-radius: var(--r-sm); padding: 9px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
@@ -3510,23 +4375,35 @@
   button.ghost:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
   button.ghost:disabled { opacity: 0.5; cursor: default; }
   button.menuopen { border-color: var(--accent); background: var(--accent-soft); }
-  /* Count of documents still missing metadata, on the "Metadati" button. */
-  button.ghost.attn { border-color: var(--accent-soft2); background: var(--accent-soft); }
-  .metabadge {
-    display: inline-block; min-width: 16px; margin-left: 6px; padding: 0 5px;
-    border-radius: 9px; background: var(--accent); color: var(--on-accent);
-    font-size: 10.5px; font-weight: 700; line-height: 16px; text-align: center; vertical-align: 1px;
-  }
-  .toolbar {
+  /* one quiet strip replaces the old toolbar + sort bar */
+  .strip {
+    position: relative;
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    padding: 8px 22px; background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 6px 22px; background: var(--bg); border-bottom: 1px solid var(--border-soft);
+    min-height: 40px;
   }
-  .modes { display: flex; align-items: center; gap: 6px; }
-  button.mode {
+  .stripleft, .stripright { display: flex; align-items: center; gap: 10px; }
+  .seg {
+    display: inline-flex; align-items: center; gap: 2px;
+    background: var(--panel); border: 1px solid var(--border-soft);
+    border-radius: var(--r-pill); padding: 2px;
+  }
+  .segbtn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 26px; border: none; border-radius: var(--r-pill);
+    background: transparent; color: var(--dim); cursor: pointer;
+    transition: background var(--ease), color var(--ease);
+  }
+  .segbtn svg { width: 16px; height: 16px; }
+  .segbtn:hover { color: var(--accent); }
+  .segbtn.active { background: var(--surface); color: var(--accent); box-shadow: var(--shadow-sm); }
+  .chipbtn {
     background: transparent; color: var(--dim); border: 1px solid transparent;
-    border-radius: 7px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+    border-radius: var(--r-pill); padding: 4px 12px; font-size: 12.5px; cursor: pointer;
+    transition: background var(--ease), color var(--ease), border-color var(--ease);
   }
-  button.mode.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-soft2); }
+  .chipbtn:hover { color: var(--accent); border-color: var(--border); }
+  .chipbtn.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-soft2); font-weight: 600; }
   /* grid thumbnail zoom (− slider +) */
   .gridzoom { display: flex; align-items: center; gap: 4px; margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--border); }
   .zbtn {
@@ -3536,17 +4413,9 @@
   }
   .zbtn:hover { border-color: var(--accent-soft2); color: var(--accent); }
   .zrange { width: 96px; accent-color: var(--accent); cursor: pointer; }
-  .index { display: flex; align-items: center; gap: 10px; }
   .hint { font-size: 12px; color: var(--faint); white-space: nowrap; }
   .bar { width: 140px; height: 6px; background: var(--border); border-radius: 4px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); transition: width 0.2s; }
-  .status { padding: 8px 22px; color: var(--dim); font-size: 13px; border-bottom: 1px solid var(--border-soft); }
-  /* multi-criteria sort bar (grid + list) */
-  .sortbar {
-    display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-    padding: 7px 22px; background: var(--bg); border-bottom: 1px solid var(--border-soft);
-  }
-  .sortlabel { font-size: 12px; color: var(--dim); margin-right: 2px; cursor: help; }
   .sortchip {
     display: inline-flex; align-items: center; gap: 4px;
     background: transparent; color: var(--dim); border: 1px solid var(--border);
@@ -3556,26 +4425,42 @@
   .sortchip.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-soft2); font-weight: 600; }
   .sortchip .sar { font-size: 9px; }
   .sortchip .srank {
-    font-size: 9px; font-weight: 700; background: var(--accent); color: #fff;
+    font-size: 9px; font-weight: 700; background: var(--accent); color: var(--on-accent);
     border-radius: 50%; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center;
   }
   .sortclear { background: transparent; border: none; color: var(--faint); font-size: 12px; cursor: pointer; padding: 3px 6px; text-decoration: underline; }
   .sortclear:hover { color: var(--danger); }
   .list th .ar.rnk {
-    font-size: 8px; font-weight: 700; background: var(--accent); color: #fff;
+    font-size: 8px; font-weight: 700; background: var(--accent); color: var(--on-accent);
     border-radius: 50%; padding: 0 3px; margin-left: 2px;
   }
-  .batchbar {
-    display: flex; align-items: center; gap: 12px;
-    padding: 8px 22px; background: var(--accent-soft);
-    border-bottom: 1px solid var(--accent-soft2); font-size: 13px; color: var(--accent);
+  /* quiet toast stack, bottom-right: status messages + batch-AI progress */
+  .toasts {
+    position: fixed; right: 18px; bottom: 18px; z-index: 74;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+    pointer-events: none;
   }
+  .toast {
+    display: flex; align-items: center; gap: 10px; pointer-events: auto;
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--border); border-radius: var(--r-md);
+    box-shadow: var(--shadow-md); padding: 9px 14px;
+    color: var(--text); font-size: 12.5px; max-width: min(460px, 80vw);
+    animation: toastin 0.16s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+  }
+  @keyframes toastin { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
 
   .body { flex: 1; display: flex; min-height: 0; }
   .sidebar {
     width: 222px; flex: 0 0 222px; background: var(--panel); border-right: 1px solid var(--border);
     padding: 12px 10px; overflow: auto;
+    transition: margin-left 0.22s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.18s ease;
   }
+  .sidebar.collapsed { margin-left: -223px; opacity: 0; pointer-events: none; }
+  @media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
+  .sidehint { margin: 14px 6px 4px; font-size: 10.5px; color: var(--faint); line-height: 1.5; cursor: help; }
   .sec { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--faint); font-weight: 600; margin: 16px 6px 6px; }
   .navrow { display: flex; align-items: center; }
   .navitem {
@@ -3653,7 +4538,7 @@
   }
   .fbanner button:hover { border-color: var(--accent); }
   .topbars { position: sticky; top: 0; z-index: 3; }
-  .topbars > .fbanner, .topbars > .bulkbar { position: static; }
+  .topbars > .fbanner { position: static; }
   .tagbanner { flex-wrap: wrap; }
   .tagfilter { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .tflabel { color: var(--dim); }
@@ -3864,21 +4749,30 @@
   .list td.sel { text-align: center; overflow: visible; }
   .list tbody tr.selrow { background: var(--accent-soft2) !important; }
   .rowbtn.del:hover { border-color: var(--danger); color: var(--danger); }
-  .medit.del { color: var(--danger); }
-  .medit.del:hover { background: var(--danger-soft); }
 
-  /* bulk selection bar */
-  .bulkbar {
-    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 9px 20px; background: var(--accent-soft); border-bottom: 1px solid var(--accent-soft2);
-    font-size: 13px; color: var(--accent); position: sticky; top: 0; z-index: 2;
+  /* floating selection pill: appears bottom-center while documents are selected */
+  .floatpill {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    z-index: 72; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    max-width: min(92vw, 900px); justify-content: center;
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    backdrop-filter: blur(14px);
+    border: 1px solid var(--border); border-radius: var(--r-pill);
+    box-shadow: var(--shadow-lg); padding: 8px 14px;
+    font-size: 13px; color: var(--accent);
+    animation: pillin 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.15);
   }
-  .bulkbar button, .bulkbar select {
-    background: var(--surface); color: var(--accent); border: 1px solid var(--border);
-    border-radius: 7px; padding: 5px 11px; font-size: 12px; cursor: pointer; outline: none;
+  @keyframes pillin { from { opacity: 0; transform: translateX(-50%) translateY(12px); } to { opacity: 1; transform: translateX(-50%); } }
+  @media (prefers-reduced-motion: reduce) { .floatpill { animation: none; } }
+  .floatpill .pillcount { font-weight: 700; font-variant-numeric: tabular-nums; margin-right: 2px; }
+  .floatpill button, .floatpill select {
+    background: transparent; color: var(--accent); border: 1px solid transparent;
+    border-radius: var(--r-pill); padding: 5px 11px; font-size: 12px; cursor: pointer; outline: none;
+    transition: background var(--ease), border-color var(--ease);
   }
-  .bulkbar button:hover { border-color: var(--accent); }
-  .bulkbar button.del:hover { border-color: var(--danger); color: var(--danger); }
+  .floatpill button:hover, .floatpill select:hover { border-color: var(--accent-soft2); background: var(--accent-soft); }
+  .floatpill button.del:hover { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
+  .floatpill .pillx { padding: 5px 9px; color: var(--dim); }
 
   /* duplicates view */
   .dupwrap { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
@@ -4220,4 +5114,47 @@
     color: var(--text); padding: 5px 4px; font-size: 13px; cursor: pointer; border-radius: 6px;
   }
   .mcoll:hover { background: var(--accent-soft); }
+  /* tag/collection flyouts opened from the radial menu */
+  .menu.flyout {
+    width: 250px;
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    backdrop-filter: blur(12px);
+  }
+  .mdone {
+    display: block; width: 100%; margin-top: 8px;
+    background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-soft2);
+    border-radius: var(--r-sm); padding: 6px; font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .mdone:hover { background: var(--accent-soft2); }
+  .mempty { color: var(--faint); font-size: 12px; margin: 4px; }
+
+  /* Costellazione host: fills the visible main area (header + strip ≈ 105px) */
+  .mapwrap { position: relative; height: calc(100vh - 108px); min-height: 340px; }
+
+  /* "Riscopri" spotlight card */
+  .spotcard {
+    width: 560px; max-width: 94vw;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--r-lg); box-shadow: var(--shadow-lg); padding: 26px 28px;
+  }
+  .spotkicker {
+    margin: 0 0 14px; font-size: 11px; font-weight: 700; letter-spacing: 2px;
+    text-transform: uppercase; color: var(--accent);
+  }
+  .spotbody { display: flex; gap: 20px; align-items: flex-start; }
+  .spotthumb {
+    flex: 0 0 128px; width: 128px; aspect-ratio: 3 / 4; overflow: hidden;
+    border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--thumb-bg);
+    box-shadow: var(--shadow-md);
+  }
+  .spotthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .spotmeta { flex: 1; min-width: 0; }
+  .spottitle { margin: 0 0 6px; font-size: 19px; line-height: 1.3; font-family: var(--serif); font-weight: 600; }
+  .spotauthors { margin: 0 0 2px; font-size: 13px; color: var(--dim); }
+  .spotvenue { margin: 0 0 10px; font-size: 12px; color: var(--faint); }
+  .spotblurb {
+    margin: 0; font-size: 12.5px; color: var(--dim); line-height: 1.55;
+    max-height: 132px; overflow: hidden;
+  }
+  .spotactions { display: flex; gap: 8px; margin-top: 20px; justify-content: flex-end; }
 </style>

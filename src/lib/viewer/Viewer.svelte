@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import * as pdfjsLib from "pdfjs-dist";
   import { TextLayer } from "pdfjs-dist";
   import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -18,7 +19,7 @@
   } from "$lib/api";
   import { printDocument } from "$lib/print";
   import { revealDocument } from "$lib/share";
-  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile } from "$lib/api";
+  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, aiExplain } from "$lib/api";
   import { save } from "@tauri-apps/plugin-dialog";
   import ShareMenu from "$lib/ShareMenu.svelte";
 
@@ -28,8 +29,17 @@
     id,
     title,
     link = null,
+    aiEnabled = false,
+    initialPage = null,
     onClose,
-  }: { id: number; title: string; link?: string | null; onClose: () => void } = $props();
+  }: {
+    id: number;
+    title: string;
+    link?: string | null;
+    aiEnabled?: boolean;
+    initialPage?: number | null;
+    onClose: () => void;
+  } = $props();
 
   const HL_COLOR = "#ffd54a";
 
@@ -365,6 +375,17 @@
       docNotes = (await getDocumentMeta(id).then((m) => m.notes ?? "").catch(() => "")) ?? "";
       notesSaved = true;
       restorePage = (await getLastPage(id).catch(() => null)) ?? 0;
+      // A parent-provided initial page (e.g. a citation/deep link) wins over the
+      // persisted last-read page for the first scroll only; what gets persisted
+      // (set_last_page on close) is untouched.
+      if (
+        initialPage != null &&
+        Number.isInteger(initialPage) &&
+        initialPage >= 1 &&
+        initialPage <= pdf.numPages
+      ) {
+        restorePage = initialPage;
+      }
       await buildOutline();
       await renderPages();
       if (restorePage > 1) scrollToPage(restorePage, "instant");
@@ -1036,6 +1057,132 @@
     clearFindLayers();
   }
 
+  // ----- Lente AI: explain / translate / ask on the selected text -----
+  type LensTask = "explain" | "translate" | "ask";
+  let lens = $state<{
+    task: LensTask;
+    quote: string; // own copy of the selection — `pending` may clear underneath us
+    answer: string;
+    busy: boolean;
+    asking: boolean; // "ask" mode: inline question input shown, request not sent yet
+  } | null>(null);
+  let lensPos = $state<{ x: number; top: number | null; bottom: number | null } | null>(null);
+  let lensQuestion = $state("");
+  let lensAskInput = $state<HTMLInputElement>();
+  let lensReq = 0; // monotonic counter: source of per-request correlation ids
+  // Id of the in-flight request; the backend echoes it as `req` in every
+  // explain-token event, so a stale stream (from a closed or superseded run)
+  // can never bleed tokens into the current card.
+  let lensActiveReq: string | null = null;
+  let unlistenExplain: (() => void) | undefined;
+
+  const LENS_LABEL: Record<LensTask, string> = {
+    explain: "Spiega",
+    translate: "Traduci",
+    ask: "Chiedi",
+  };
+
+  function lensSnippet(q: string): string {
+    const t = q.replace(/\s+/g, " ").trim();
+    return t.length > 140 ? t.slice(0, 140) + "…" : t;
+  }
+
+  /** Place the card near the selection button: below it if there's room, else above.
+   *  Clamped to the viewport with 12px margins (assuming the 46vh max height).
+   *  Called on every run so the card re-anchors to the current selection; with
+   *  no selection anchor an already-placed card simply stays where it is. */
+  function placeLens() {
+    if (!selBtn && lensPos) return;
+    const margin = 12;
+    const cw = Math.min(430, window.innerWidth * 0.9);
+    const maxH = window.innerHeight * 0.46;
+    const ax = selBtn?.x ?? window.innerWidth / 2;
+    const ay = selBtn?.y ?? window.innerHeight / 2;
+    const x = Math.min(Math.max(margin, ax - cw / 2), Math.max(margin, window.innerWidth - cw - margin));
+    const spaceBelow = window.innerHeight - ay - margin - 14;
+    if (spaceBelow >= Math.min(maxH, 160)) {
+      lensPos = { x, top: Math.min(ay + 14, Math.max(margin, window.innerHeight - margin - maxH)), bottom: null };
+    } else {
+      const bottom = Math.min(
+        Math.max(margin, window.innerHeight - ay + 14),
+        Math.max(margin, window.innerHeight - margin - maxH),
+      );
+      lensPos = { x, top: null, bottom };
+    }
+  }
+
+  /** Close the lens card only — never touches `pending`/`selBtn` or the browser selection. */
+  function closeLens() {
+    lensActiveReq = null; // in-flight stream + resolution become no-ops
+    lens = null;
+    lensPos = null;
+    lensQuestion = "";
+  }
+
+  /** "Chiedi": open the card immediately with the inline question input. */
+  async function openLensAsk() {
+    if (lens?.busy) return;
+    const quote = pending?.quote ?? lens?.quote ?? "";
+    if (!quote) return;
+    placeLens();
+    lensQuestion = "";
+    lens = { task: "ask", quote, answer: "", busy: false, asking: true };
+    await tick();
+    lensAskInput?.focus();
+  }
+
+  async function runLens(task: LensTask, question?: string) {
+    if (lens?.busy) return;
+    // "ask" runs on the quote already captured in the card; the palette actions
+    // run on the live selection (falling back to the card's quote if any).
+    const quote = (task === "ask" ? (lens?.quote ?? pending?.quote) : (pending?.quote ?? lens?.quote)) ?? "";
+    if (!quote) return;
+    placeLens(); // re-anchor to the current selection on every run
+    const reqId = String(++lensReq);
+    lensActiveReq = reqId;
+    lens = { task, quote, answer: "", busy: true, asking: false };
+    try {
+      const full = await aiExplain({ text: quote, task, question: question ?? null, docId: id, req: reqId });
+      if (lensActiveReq === reqId && lens) {
+        lens.answer = full; // replace the streamed text with the authoritative result
+        lens.busy = false;
+      }
+    } catch (e) {
+      if (lensActiveReq === reqId && lens) {
+        lens.answer = "⚠ " + (e instanceof Error ? e.message : String(e));
+        lens.busy = false;
+      }
+    }
+  }
+
+  function submitLensQuestion() {
+    const q = lensQuestion.trim();
+    if (!q || lens?.busy) return;
+    runLens("ask", q);
+  }
+
+  async function copyLensAnswer() {
+    if (!lens?.answer) return;
+    try {
+      await navigator.clipboard.writeText(lens.answer);
+      setNotice("Risposta copiata negli appunti ✓");
+    } catch {
+      setNotice("Impossibile copiare negli appunti");
+    }
+  }
+
+  /** Append quote + answer to the document notes, via the same autosave path as the textarea. */
+  function lensToNotes() {
+    if (!lens?.answer) return;
+    const quoteSnippet = lensSnippet(lens.quote);
+    const answer = lens.answer;
+    docNotes = docNotes
+      ? docNotes + "\n\n> " + quoteSnippet + "\n" + answer
+      : "> " + quoteSnippet + "\n" + answer;
+    onNotesInput(); // marks unsaved + debounced flushNotes, exactly like typing
+    setNotice("Aggiunto alle note");
+  }
+
   function onKey(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
       e.preventDefault();
@@ -1049,6 +1196,7 @@
       else if (tableMode) tableMode = false;
       else if (textMode) textMode = false;
       else if (noteMode) noteMode = false;
+      else if (lens) closeLens();
       else if (findOpen) closeFind();
       else if (popover) popover = null;
       else onClose();
@@ -1089,8 +1237,21 @@
     load();
     // Non-passive so Ctrl+wheel zoom can preventDefault the page scroll/zoom.
     pagesEl?.addEventListener("wheel", onWheel, { passive: false });
+    // Lente AI: stream tokens into the open card while a request is in flight.
+    // Each event echoes the request id, so stale streams are dropped on the floor.
+    let unmounted = false;
+    listen<{ token: string; req: string | null }>("explain-token", (e) => {
+      if (lens?.busy && lensActiveReq !== null && e.payload.req === lensActiveReq) {
+        lens.answer += e.payload.token;
+      }
+    }).then((un) => {
+      if (unmounted) un();
+      else unlistenExplain = un;
+    });
     return () => {
+      unmounted = true;
       pagesEl?.removeEventListener("wheel", onWheel);
+      unlistenExplain?.();
       clearTimeout(noticeTimer);
       clearTimeout(findTimer);
       clearTimeout(notesTimer);
@@ -1294,6 +1455,58 @@
           <button class="hlc" style="background:{p.color}" onclick={() => saveHighlight(p.color)} title={p.label} aria-label={p.label}></button>
         {/each}
       </div>
+      {#if aiEnabled}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="hlai" onmousedown={(e) => e.preventDefault()}>
+          <button onclick={() => runLens("explain")} disabled={!!lens?.busy} title="Spiega la selezione con l'AI locale">Spiega</button>
+          <button onclick={() => runLens("translate")} disabled={!!lens?.busy} title="Traduci la selezione con l'AI locale">Traduci</button>
+          <button onclick={openLensAsk} disabled={!!lens?.busy} title="Fai una domanda sulla selezione">Chiedi</button>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
+  {#if lens && lensPos}
+    <div
+      class="lenscard"
+      style={lensPos.top != null
+        ? `left:${lensPos.x}px; top:${lensPos.top}px`
+        : `left:${lensPos.x}px; bottom:${lensPos.bottom}px`}
+      role="dialog"
+      tabindex="-1"
+      aria-label="Lente AI"
+    >
+      <div class="lenshd">
+        <strong>Lente AI — {LENS_LABEL[lens.task]}</strong>
+        {#if lens.busy}<span class="lensdot" aria-hidden="true"></span>{/if}
+        <span style="flex:1"></span>
+        <button class="lensx" onclick={closeLens} title="Chiudi (Esc)" aria-label="Chiudi">✕</button>
+      </div>
+      <p class="lensquote">{lensSnippet(lens.quote)}</p>
+      {#if lens.asking}
+        <div class="lensask">
+          <input
+            bind:this={lensAskInput}
+            bind:value={lensQuestion}
+            placeholder="Fai una domanda sul testo selezionato…"
+            onkeydown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); submitLensQuestion(); }
+              else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeLens(); }
+            }}
+          />
+          <button class="lensgo" onclick={submitLensQuestion} disabled={!lensQuestion.trim()}>Invia</button>
+        </div>
+      {:else}
+        <div class="lensbody">
+          {#if lens.answer}{lens.answer}{:else if lens.busy}<span class="lensdots" aria-label="In attesa della risposta"><i></i><i></i><i></i></span>{/if}
+        </div>
+      {/if}
+      <div class="lensft">
+        <button onclick={copyLensAnswer} disabled={!lens.answer || lens.busy}>Copia</button>
+        <button onclick={lensToNotes} disabled={!lens.answer || lens.busy}>→ Note</button>
+        <span style="flex:1"></span>
+        <button onclick={closeLens}>Chiudi</button>
+      </div>
     </div>
   {/if}
 
@@ -1332,6 +1545,7 @@
           <li><kbd>N</kbd> <span>Aggiungi una nota</span></li>
           <li><kbd>I</kbd> <span>Modalità notte</span></li>
           <li><kbd>[</kbd> / <kbd>]</kbd> <span>Ruota</span></li>
+          <li>Selezione testo <span>Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)</span></li>
           <li><kbd>Esc</kbd> <span>Chiudi / annulla</span></li>
           <li><kbd>?</kbd> <span>Mostra questo aiuto</span></li>
         </ul>
@@ -1668,6 +1882,81 @@
     cursor: pointer; padding: 0;
   }
   .hlc:hover { transform: scale(1.12); }
+  /* AI actions inside the selection palette */
+  .hlai { display: flex; gap: 4px; padding-left: 8px; border-left: 1px solid var(--border); }
+  .hlai button {
+    height: 24px; padding: 0 8px; font-size: 12px; cursor: pointer;
+    background: var(--field); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+  }
+  .hlai button:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .hlai button:disabled { opacity: 0.55; cursor: default; }
+
+  /* ---- Lente AI: floating result card ---- */
+  .lenscard {
+    position: fixed;
+    z-index: 62;
+    width: min(430px, 90vw);
+    max-height: 46vh;
+    display: flex;
+    flex-direction: column;
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg, 14px);
+    box-shadow: var(--shadow-lg, 0 16px 48px rgba(0, 0, 0, 0.3));
+    overflow: hidden;
+  }
+  .lenshd { display: flex; align-items: center; gap: 8px; padding: 9px 12px 8px; border-bottom: 1px solid var(--border); }
+  .lenshd strong { font-family: var(--serif); font-size: 12px; font-weight: 600; color: var(--text); }
+  .lensdot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    animation: lenspulse 1.1s ease-in-out infinite;
+  }
+  @keyframes lenspulse {
+    0%, 100% { opacity: 0.35; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1); }
+  }
+  .lensx { background: transparent; border: none; color: var(--dim); font-size: 13px; cursor: pointer; padding: 2px 4px; }
+  .lensx:hover { color: var(--text); }
+  .lensquote {
+    margin: 0; padding: 7px 12px; font-size: 11px; font-style: italic; color: var(--faint);
+    border-left: 3px solid var(--accent);
+    background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
+  }
+  .lensask { display: flex; gap: 6px; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+  .lensask input {
+    flex: 1; background: var(--field); border: 1px solid var(--border); border-radius: var(--r-md, 8px);
+    color: var(--text); padding: 6px 9px; font-size: 13px; outline: none;
+  }
+  .lensask input:focus { border-color: var(--accent); }
+  .lensgo {
+    background: var(--accent); color: var(--on-accent); border: none; border-radius: var(--r-md, 8px);
+    padding: 6px 12px; font-size: 12px; cursor: pointer;
+  }
+  .lensgo:disabled { opacity: 0.55; cursor: default; }
+  .lensbody {
+    flex: 1; min-height: 0; overflow: auto; padding: 10px 12px;
+    font-size: 13px; line-height: 1.55; white-space: pre-wrap; color: var(--text);
+  }
+  .lensdots { display: inline-flex; gap: 4px; padding: 3px 0; }
+  .lensdots i {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--dim);
+    animation: lensblink 1s ease-in-out infinite;
+  }
+  .lensdots i:nth-child(2) { animation-delay: 0.18s; }
+  .lensdots i:nth-child(3) { animation-delay: 0.36s; }
+  @keyframes lensblink {
+    0%, 100% { opacity: 0.25; transform: translateY(0); }
+    50% { opacity: 1; transform: translateY(-2px); }
+  }
+  .lensft { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border); }
+  .lensft button {
+    background: transparent; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  }
+  .lensft button:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+  .lensft button:disabled { opacity: 0.5; cursor: default; }
 
   /* unsaved-notes indicator on the toolbar button */
   .bar .dot { color: var(--accent); margin-left: 3px; font-weight: 700; }

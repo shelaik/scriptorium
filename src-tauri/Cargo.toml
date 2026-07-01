@@ -1,6 +1,6 @@
 [package]
 name = "pdfmanage"
-version = "0.1.1"
+version = "0.2.0"
 description = "Lean, fast, local-first PDF & reference manager"
 authors = ["you"]
 edition = "2021"
@@ -66,6 +66,10 @@ notify = "8"
 
 # --- Embedded terminal (PTY for the in-app terminal tab) ---
 portable-pty = "0.8"
+
+# --- Browser connector: a tiny loopback HTTP server for the "grab a PDF from
+#     the browser" bookmarklet (blocking, no async runtime, few deps) ---
+tiny_http = "0.12"
 
 # --- OCR fallback for scanned PDFs: the built-in Windows.Media.Ocr engine
 #     (no bundled engine/models; uses the OS OCR language packs). ---

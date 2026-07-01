@@ -35,9 +35,16 @@ fn import_watched(app: &AppHandle, path: PathBuf) {
     let state = app.state::<AppState>();
 
     // Retry prepare a few times (sharing violation while still being written).
+    // Each attempt serializes whole-document pdfium work behind `pdfium_lock`
+    // (acquired per-attempt, never across the sleep) so it can't overlap another
+    // import/scan and corrupt pdfium's global state.
     let mut prepared = None;
     for _ in 0..4 {
-        match import::prepare_import(&state.pdfium, &thumb_dir, &path) {
+        let attempt = {
+            let _pdf_guard = state.pdfium_lock.lock();
+            import::prepare_import(&state.pdfium, &thumb_dir, &path)
+        };
+        match attempt {
             Ok(p) => {
                 prepared = Some(p);
                 break;
@@ -83,7 +90,11 @@ pub fn scan_existing(app: AppHandle, dir: String) {
                 continue;
             }
             let state = app.state::<AppState>();
-            if let Ok(prepared) = import::prepare_import(&state.pdfium, &thumb_dir, &path) {
+            let prepared = {
+                let _pdf_guard = state.pdfium_lock.lock();
+                import::prepare_import(&state.pdfium, &thumb_dir, &path)
+            };
+            if let Ok(prepared) = prepared {
                 let outcome = {
                     let conn = state.db.lock();
                     import::commit_import(&conn, &prepared)

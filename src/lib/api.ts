@@ -294,6 +294,22 @@ export const discoverSearch = (
 export const discoverAdd = (result: SearchResult) =>
   invoke<string>("discover_add", { result });
 
+// ----- "Aggancia da URL" + browser connector -----
+/** Download a PDF from a URL and import it. Returns "added"|"duplicate"|"not_pdf". */
+export const addFromUrl = (url: string) => invoke<string>("add_from_url", { url });
+
+export interface ConnectorInfo {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  token: string;
+}
+/** Current state of the loopback browser connector + port/token for the bookmarklet. */
+export const getConnectorInfo = () => invoke<ConnectorInfo>("get_connector_info");
+/** Enable/disable the loopback connector (starts/stops it live). */
+export const setConnectorEnabled = (enabled: boolean) =>
+  invoke<ConnectorInfo>("set_connector_enabled", { enabled });
+
 // ----- Snowball / citation explorer -----
 export interface CitationNeighbors {
   references: SearchResult[];
@@ -388,11 +404,24 @@ export const rebuildThumbnails = () =>
 export interface EnrichSummary {
   updated: number;
   no_doi: number;
+  /** DOIs that pointed at a cited work (title didn't match the PDF), skipped. */
+  skipped_mismatch: number;
   errors: string[];
 }
 
 /** Enrich all documents lacking a DOI via Crossref. */
 export const enrichAll = () => invoke<EnrichSummary>("enrich_all");
+
+export interface RepairSummary {
+  checked: number;
+  repaired_arxiv: number;
+  retitled: number;
+  cleared: number;
+  details: string[];
+}
+
+/** Re-verify enriched documents and fix any whose title doesn't match the PDF. */
+export const repairMetadata = () => invoke<RepairSummary>("repair_metadata");
 
 export type SearchMode = "fulltext" | "semantic" | "hybrid";
 
@@ -568,3 +597,58 @@ export const deleteAnnotation = (id: number) =>
 /** Save just a document's free-text notes (cheap autosave path from the reader). */
 export const setDocumentNotes = (id: number, notes: string) =>
   invoke<void>("set_document_notes", { id, notes });
+
+// ----- Similarity graph (embedding KNN over the whole library) -----
+export interface GraphNode {
+  id: number;
+  title: string | null;
+  year: number | null;
+  /** Color of the document's most-used tag (null if untagged / colorless). */
+  color: string | null;
+  /** Number of edges incident to this node (0 = isolated). */
+  degree: number;
+  unread: boolean;
+  favorite: boolean;
+}
+export interface GraphEdge {
+  a: number;
+  b: number;
+  /** Cosine similarity of the pair (minSim..1). */
+  w: number;
+}
+export interface SimilarityGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  embedded: number;
+  total: number;
+}
+
+/** K-nearest-neighbour similarity graph over all embedded documents (k default 4, minSim default 0.55). */
+export async function similarityGraph(k?: number, minSim?: number): Promise<SimilarityGraph> {
+  return invoke<SimilarityGraph>("similarity_graph", { k: k ?? null, minSim: minSim ?? null });
+}
+
+/** Explain / translate / answer a question about a selected passage with the local LLM.
+ *  Streams "explain-token" events ({ token: string; req: string | null }) while generating —
+ *  `req` echoes the caller's correlation id so stale streams can be filtered out.
+ *  Resolves with the full text. */
+export async function aiExplain(args: {
+  text: string;
+  task: "explain" | "translate" | "ask";
+  question?: string | null;
+  docId?: number | null;
+  req?: string | null;
+}): Promise<string> {
+  return invoke<string>("ai_explain", {
+    text: args.text,
+    task: args.task,
+    question: args.question ?? null,
+    docId: args.docId ?? null,
+    req: args.req ?? null,
+  });
+}
+
+/** Absolute path of a document's PDF on disk (null for reference-only items). */
+export async function documentPath(id: number): Promise<string | null> {
+  return invoke<string | null>("document_path", { id });
+}
