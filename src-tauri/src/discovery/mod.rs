@@ -872,24 +872,28 @@ pub async fn search_doaj(
     Ok(results)
 }
 
-/// Hugging Face "Daily Papers" — a curated feed of trending ML papers (each tied
-/// to an arXiv id). Not a full-text search: the query, if any, filters the feed
-/// client-side by title/summary.
+/// Hugging Face Papers — the official successor of Papers with Code (sunset by
+/// Meta in July 2025; paperswithcode.com now redirects here). With a query we
+/// hit the real search endpoint (`/api/papers/search`), which covers the whole
+/// paper index and carries the paper→code links (githubRepo/githubStars) that
+/// made PwC useful; with no query we fall back to the trending "daily papers"
+/// feed. Every entry is tied to an arXiv id.
 pub async fn search_huggingface(
     client: &reqwest::Client,
     query: &str,
     _filters: &Filters,
 ) -> Result<Vec<SearchResult>> {
-    let resp = client
-        .get("https://huggingface.co/api/daily_papers?limit=80")
-        .send()
-        .await
-        .context("Hugging Face request")?;
+    let q = query.trim();
+    let url = if q.is_empty() {
+        "https://huggingface.co/api/daily_papers?limit=80".to_string()
+    } else {
+        format!("https://huggingface.co/api/papers/search?q={}", enc(q))
+    };
+    let resp = client.get(&url).send().await.context("Hugging Face request")?;
     if !resp.status().is_success() {
         anyhow::bail!("Hugging Face HTTP {}", resp.status());
     }
     let body: Value = resp.json().await.context("Hugging Face JSON")?;
-    let terms: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_string).collect();
     let mut results = Vec::new();
     for item in body.as_array().cloned().unwrap_or_default() {
         let p = &item["paper"];
@@ -899,13 +903,6 @@ pub async fn search_huggingface(
         }
         let title = p["title"].as_str().or_else(|| item["title"].as_str());
         let summary = p["summary"].as_str();
-        // Client-side filter: keep only items matching all query terms (if any).
-        if !terms.is_empty() {
-            let hay = format!("{} {}", title.unwrap_or(""), summary.unwrap_or("")).to_lowercase();
-            if !terms.iter().all(|t| hay.contains(t)) {
-                continue;
-            }
-        }
         let authors = p["authors"]
             .as_array()
             .map(|a| a.iter().filter_map(|x| x["name"].as_str()).map(str::to_string).collect())
@@ -914,6 +911,11 @@ pub async fn search_huggingface(
             .as_str()
             .or_else(|| item["publishedAt"].as_str())
             .and_then(year_of);
+        // The paper→code link Papers with Code was loved for.
+        let github_url = p["githubRepo"]
+            .as_str()
+            .filter(|s| s.starts_with("https://github.com/"))
+            .map(str::to_string);
         results.push(SearchResult {
             source: "huggingface".to_string(),
             external_id: aid.to_string(),
@@ -921,14 +923,14 @@ pub async fn search_huggingface(
             title: title.map(str::to_string),
             authors,
             year,
-            venue: Some("arXiv · Hugging Face".to_string()),
+            venue: Some("arXiv · HF Papers".to_string()),
             abstract_text: summary.map(str::to_string),
             oa_pdf_url: Some(format!("https://arxiv.org/pdf/{aid}")),
             url: Some(format!("https://huggingface.co/papers/{aid}")),
             is_oa: true,
             citations: p["upvotes"].as_i64().unwrap_or(0),
             in_library: false,
-            github_url: None,
+            github_url,
             pub_status: None,
         });
     }

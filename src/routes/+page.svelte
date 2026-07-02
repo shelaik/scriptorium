@@ -374,7 +374,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.2.0";
+  const APP_VERSION = "0.2.1";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2215,8 +2215,15 @@
       { id: "ci-pan", label: "Copia [@…]", hint: "Pronto per Pandoc/Quarto", action: () => copyCite(d, "pandoc") },
       { id: "ci-ref", label: "Riferimenti e citazioni", hint: "Bibliografia del paper e chi lo cita nella tua libreria", action: () => openCitations(d) },
     ];
-    if (d.doi)
-      citeKids.push({ id: "ci-exp", label: "Esplora online", hint: "Snowball su OpenAlex: riferimenti e citazioni, aggiungili alla libreria", action: () => openExplore(d) });
+    citeKids.push({
+      id: "ci-exp",
+      label: "Esplora citazioni (online)",
+      hint: d.doi
+        ? "Snowball su OpenAlex: citazioni da e verso questo paper, aggiungile alla libreria"
+        : "Serve il DOI — recuperalo con «✦ senza metadati» in alto o da Modifica metadati",
+      disabled: !d.doi,
+      action: () => openExplore(d),
+    });
     const aiKids: RadialItem[] = [
       { id: "ai-sum", label: "Riassumi", hint: "Riassunto in italiano con l'AI locale", disabled: !aiStat?.enabled || aiBusyAny, action: () => summarizeDoc(d) },
       { id: "ai-tag", label: "Tag automatici", hint: "Suggerisce e assegna tag tematici", disabled: !aiStat?.enabled || aiBusyAny, action: () => autotagDoc(d) },
@@ -3011,7 +3018,7 @@
             <option value="europepmc">Europe PMC</option>
             <option value="core">CORE</option>
             <option value="doaj">DOAJ</option>
-            <option value="huggingface">Hugging Face (trending ML)</option>
+            <option value="huggingface">HF Papers (ex Papers with Code)</option>
           </select>
           <input
             class="discq"
@@ -3040,7 +3047,7 @@
         {#if discoverResults.length === 0}
           <div class="empty">
             <p class="big">Cerca paper online</p>
-            <p>Fonti: arXiv (preprint STEM), OpenAlex (tutto), ADS (astrofisica), Semantic Scholar (citazioni), Europe PMC (biomedicina), CORE (full-text OA), DOAJ (riviste OA). I PDF si scaricano solo se Open Access; gli altri si aggiungono come riferimento.</p>
+            <p>Fonti: arXiv (preprint STEM), OpenAlex (tutto), ADS (astrofisica), Semantic Scholar (citazioni), Europe PMC (biomedicina), CORE (full-text OA), DOAJ (riviste OA), HF Papers (paper con codice — il successore di Papers with Code). I PDF si scaricano solo se Open Access; gli altri si aggiungono come riferimento.</p>
           </div>
         {:else}
           <div class="discfilters">
@@ -3879,7 +3886,7 @@
           <h3>Ricerca</h3>
           <ul>
             <li><strong>Locale</strong>: barra in alto, modalità <em>Testo</em>, <em>Semantica</em> (per significato) o <em>Ibrida</em>. Cerca anche nelle tue <strong>note e annotazioni</strong>.</li>
-            <li><strong>Online</strong> (<em>Scopri online</em>): arXiv, OpenAlex, ADS, Semantic Scholar, Europe PMC, CORE, DOAJ, Hugging Face. Filtri anno/autore/solo-OA e, sui risultati, chip <strong>Con codice</strong> / <strong>Peer-reviewed</strong> / <strong>Preprint</strong> (con conteggi) oltre alle colonne ordinabili. I PDF Open Access si scaricano, gli altri si aggiungono come riferimento.</li>
+            <li><strong>Online</strong> (<em>Scopri online</em>): arXiv, OpenAlex, ADS, Semantic Scholar, Europe PMC, CORE, DOAJ, <strong>HF Papers</strong> (il successore di Papers with Code: cerca nell'indice e mostra il repo GitHub di ogni paper). Filtri anno/autore/solo-OA e, sui risultati, chip <strong>Con codice</strong> / <strong>Peer-reviewed</strong> / <strong>Preprint</strong> (con conteggi) oltre alle colonne ordinabili. I PDF Open Access si scaricano, gli altri si aggiungono come riferimento.</li>
             <li><strong>Ricerche salvate</strong>: dopo una ricerca premi <em>★ Salva</em> → compare nella sidebar; cliccandola la rilancia e marca con <strong>“novità”</strong> i risultati nuovi dall'ultima volta.</li>
             <li><strong>Trova PDF</strong> (tasto destro → Organizza): per un riferimento senza file, cerca un PDF Open Access (Unpaywall/arXiv) e lo allega.</li>
           </ul>
