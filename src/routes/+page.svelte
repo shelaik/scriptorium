@@ -134,6 +134,7 @@
   import CommandPalette from "$lib/CommandPalette.svelte";
   import type { PaletteEntry } from "$lib/palette";
   import Constellation from "$lib/Constellation.svelte";
+  import CitationMap from "$lib/CitationMap.svelte";
 
   type Filter = {
     kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki";
@@ -389,7 +390,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.4.3";
+  const APP_VERSION = "0.4.4";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -960,6 +961,24 @@
 
   // Snowball / online citation explorer (OpenAlex).
   let exploreModal = $state(false);
+  // Esploratore: vista Mappa (default) o Lista; popover azioni sul nodo cliccato.
+  let exploreView = $state<"map" | "list">("map");
+  let mapPop = $state<{ r: SearchResult; x: number; y: number } | null>(null);
+  /** Open the in-library document matching this DOI (map node click). */
+  async function openByDoi(doi: string) {
+    try {
+      const all = await listDocuments();
+      const d = all.find((x) => x.doi?.toLowerCase() === doi.toLowerCase());
+      if (d) {
+        exploreModal = false;
+        openDocument(d);
+      } else {
+        status = "Non trovo questo DOI in libreria (rigenera l'esplorazione?)";
+      }
+    } catch (e) {
+      status = "" + e;
+    }
+  }
   let exploreLoading = $state(false);
   let exploreData = $state<CitationNeighbors | null>(null);
   let exploreTitle = $state("");
@@ -990,11 +1009,13 @@
   }
   /** Snowball to a neighbour, remembering the current node so «← Indietro» can return. */
   async function navExplore(doi: string, title: string) {
+    mapPop = null;
     if (exploreSeedDoi) exploreStack = [...exploreStack, { doi: exploreSeedDoi, title: exploreTitle }];
     await runExplore(doi, title);
   }
   /** Go back to the previously explored paper. */
   async function backExplore() {
+    mapPop = null;
     const prev = exploreStack[exploreStack.length - 1];
     if (!prev) return;
     exploreStack = exploreStack.slice(0, -1);
@@ -1049,6 +1070,8 @@
       return;
     }
     exploreStack = [];
+    exploreView = "map";
+    mapPop = null;
     exploreModal = true;
     await runExplore(d.doi, d.title ?? "documento");
   }
@@ -1061,6 +1084,8 @@
         list.map((x) => (x.external_id === r.external_id ? { ...x, in_library: true } : x));
       if (exploreData)
         exploreData = { ...exploreData, references: mark(exploreData.references), citations: mark(exploreData.citations) };
+      if (mapPop && mapPop.r.external_id === r.external_id)
+        mapPop = { ...mapPop, r: { ...mapPop.r, in_library: true } };
       status =
         res === "added_pdf" ? "Aggiunto con PDF ✓" : res === "added_ref" ? "Aggiunto (solo metadati) ✓" : "Già presente";
       await loadDocs();
@@ -3058,7 +3083,7 @@
 </script>
 
 <svelte:window
-  onclick={() => { headerMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; }}
+  onclick={() => { headerMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; mapPop = null; }}
   onkeydown={onGlobalKey}
   oncontextmenu={onGlobalContext}
   onfocus={checkClipboard}
@@ -4322,9 +4347,11 @@
                 {#each citData.references as r, i (i)}
                   <li class="refrow">
                     {#if r.in_library}
+                      <span class="libdot in" title="Già in libreria"></span>
                       <button class="hflink" onclick={() => openById(r.in_library!)} title="Nella tua libreria — apri">{r.title ?? r.raw ?? r.ref_doi}</button>
                       <span class="badge2 inlibref">in libreria</span>
                     {:else}
+                      <span class="libdot" title="Non in libreria"></span>
                       <span class="reftext">{r.raw ?? r.ref_doi ?? "—"}</span>
                       {#if r.ref_doi}<button class="hflink small" onclick={() => openInBrowser(`https://doi.org/${r.ref_doi}`)} title="Apri il DOI">DOI ↗</button>{/if}
                     {/if}
@@ -4342,7 +4369,7 @@
   {#snippet neighborRow(r: SearchResult)}
     <li class="exrow">
       <div class="exmain">
-        <span class="extitle" title={r.title ?? ""}>{r.title ?? "Senza titolo"}</span>
+        <span class="extitle" title={r.title ?? ""}><span class="libdot" class:in={r.in_library} title={r.in_library ? "Già in libreria" : "Non in libreria"}></span>{r.title ?? "Senza titolo"}</span>
         <span class="exmeta">{[r.authors?.[0], r.year, r.venue].filter(Boolean).join(" · ")}{r.citations ? ` · ${r.citations} cit.` : ""}</span>
       </div>
       <div class="exacts">
@@ -4384,13 +4411,32 @@
             <button class="hflink small exback" onclick={backExplore} title="Torna al paper precedente">← Indietro</button>
           {/if}
         </div>
-        <p class="dimtext" title={exploreTitle}>{exploreTitle} — da OpenAlex; «Esplora ↗» per spostarti di nodo in nodo (snowball)</p>
+        <p class="dimtext" title={exploreTitle}>{exploreTitle} — da OpenAlex; clicca un nodo (o «Esplora ↗») per spostarti di paper in paper (snowball)</p>
         {#if exploreLoading}
           <p class="dimtext">Carico la rete di citazioni…</p>
         {:else if exploreData}
           {#if exploreData.seed_unresolved}
             <p class="dimtext">OpenAlex non conosce questo paper (DOI non trovato). Prova con un documento che ha un DOI valido.</p>
           {:else}
+            <div class="exbar">
+              <div class="seg" role="group" aria-label="Vista esplorazione">
+                <button class="segbtn wide" class:active={exploreView === "map"} onclick={() => (exploreView = "map")} title="Mappa temporale: riferimenti a sinistra, citazioni a destra">Mappa</button>
+                <button class="segbtn wide" class:active={exploreView === "list"} onclick={() => (exploreView = "list")} title="Liste con tutte le azioni (+ PDF, salva…)">Lista</button>
+              </div>
+              <span class="exlegend">
+                <span class="libdot in"></span>{exploreData.references.filter((r) => r.in_library).length + exploreData.citations.filter((r) => r.in_library).length} in libreria
+                <span class="libdot"></span>{exploreData.references.filter((r) => !r.in_library).length + exploreData.citations.filter((r) => !r.in_library).length} mancanti
+                · nodo più grande = più citato
+              </span>
+            </div>
+            {#if exploreView === "map"}
+              <CitationMap
+                refs={exploreData.references}
+                cits={exploreData.citations}
+                title={exploreTitle}
+                onNode={(r, e) => { e.stopPropagation(); mapPop = { r, x: e.clientX, y: e.clientY }; }}
+              />
+            {:else}
             <div class="exgrid">
               <div class="hfsec">
                 <div class="exsechead">
@@ -4411,9 +4457,34 @@
                 {:else}<p class="dimtext">Nessun paper che cita questo (ancora) su OpenAlex.</p>{/if}
               </div>
             </div>
+            {/if}
           {/if}
         {/if}
       </div>
+    </div>
+  {/if}
+
+  {#if mapPop}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
+    <div class="menu mappop" role="menu" tabindex="-1" use:clamp={{ x: mapPop.x, y: mapPop.y }} onclick={(e) => e.stopPropagation()}>
+      <div class="mtitle" title={mapPop.r.title ?? ""}>{mapPop.r.title ?? "Senza titolo"}</div>
+      <div class="mapmeta">{[mapPop.r.authors?.[0], mapPop.r.year, mapPop.r.venue].filter(Boolean).join(" · ")}{mapPop.r.citations ? ` · ${mapPop.r.citations} cit.` : ""}</div>
+      {#if mapPop.r.in_library}
+        {#if mapPop.r.doi}
+          <button class="medit" onclick={() => { const doi = mapPop!.r.doi!; mapPop = null; openByDoi(doi); }}>Apri in libreria</button>
+        {:else}
+          <div class="mapmeta">✓ già in libreria</div>
+        {/if}
+      {:else}
+        <button class="medit" disabled={addingExt === mapPop.r.external_id} onclick={() => { const r = mapPop!.r; addNeighbor(r); }} title="Scarica il PDF se Open Access, altrimenti aggiunge come riferimento">{addingExt === mapPop.r.external_id ? "…" : "+ Aggiungi alla libreria"}</button>
+      {/if}
+      {#if mapPop.r.doi}
+        <button class="medit" onclick={() => { const r = mapPop!.r; mapPop = null; navExplore(r.doi!, r.title ?? "documento"); }} title="Ricentra la mappa su questo paper (← Indietro per tornare)">Esplora da qui</button>
+        <button class="medit" onclick={() => { const doi = mapPop!.r.doi!; mapPop = null; openInBrowser(`https://doi.org/${doi}`); }}>DOI ↗</button>
+      {/if}
+      {#if mapPop.r.url}
+        <button class="medit" onclick={() => { const u = mapPop!.r.url!; mapPop = null; openInBrowser(u); }}>Pagina del paper ↗</button>
+      {/if}
     </div>
   {/if}
 
@@ -4621,6 +4692,7 @@
             <li>Tasto destro → <strong>Codice & repo</strong>: anteprima del <strong>README</strong> nell'app, più i modelli/dataset collegati su <strong>Hugging Face</strong>.</li>
             <li>Filtro <strong>“Con codice (GitHub)”</strong> nella sidebar per vedere solo i paper con codice disponibile.</li>
             <li>Tasto destro → Cita → <strong>Riferimenti e citazioni</strong>: la bibliografia del paper (con i riferimenti già nella tua libreria cliccabili) e i documenti che lo <strong>citano</strong>. Lì trovi anche <strong>Copia APA / IEEE / BibTeX / citekey / \cite / [@…]</strong>.</li>
+            <li><strong>Esplora citazioni (online)</strong> si apre sulla <strong>Mappa</strong>: riferimenti a sinistra (il passato su cui si fonda), citazioni a destra (il futuro), in ordine di anno; pallino <strong>pieno</strong> = già in libreria, <strong>tratteggiato</strong> = mancante, nodo più grande = paper più citato. Clic su un nodo → aggiungi / apri / <em>esplora da qui</em> (la mappa si ricentra, «← Indietro» per tornare). La <strong>Lista</strong> con tutte le azioni (+ PDF, salva) resta a un click.</li>
           </ul>
         </div>
 
@@ -5978,6 +6050,18 @@
   .wikisrc.unused { opacity: 0.55; }
   .wikipages { display: inline-flex; gap: 4px; flex-wrap: wrap; }
   .wikiintro { max-width: 520px; margin: 0 auto; }
+
+  /* ===== Esplora citazioni: mappa a due ali + indicatore in-libreria ===== */
+  .libdot {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    border: 1.4px dashed var(--dim); margin-right: 6px; vertical-align: -1px; flex: 0 0 auto;
+  }
+  .libdot.in { background: var(--accent); border: 1.4px solid var(--accent); }
+  .exbar { display: flex; align-items: center; gap: 14px; margin: 6px 0 10px; flex-wrap: wrap; }
+  .exbar .segbtn { width: auto; padding: 0 14px; font-size: 12px; }
+  .exlegend { font-size: 11px; color: var(--faint); display: inline-flex; align-items: center; gap: 6px; }
+  .menu.mappop { width: 270px; }
+  .mapmeta { font-size: 11px; color: var(--faint); margin: 0 4px 6px; }
 
   /* AI-summary indicator: this document already has a cached summary */
   .aisum {
