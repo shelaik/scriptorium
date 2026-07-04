@@ -106,6 +106,7 @@
     documentPath,
     removeFromCollection,
     getDocumentMeta,
+    attachFromUrl,
     type SimilarityGraph,
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
@@ -374,7 +375,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.2.2";
+  const APP_VERSION = "0.2.3";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2216,10 +2217,74 @@
     x: "M18 6L6 18M6 6l12 12",
   };
 
-  /** Open a document in the viewer, optionally at a specific page. */
+  /** Open a document in the viewer, optionally at a specific page. Reference-only
+   *  entries have no file: offer to attach one instead of a failing viewer. */
   function openDocument(d: DocumentItem, page: number | null = null) {
+    if (!d.has_file) {
+      refPanel = { doc: d, url: "", busy: false };
+      return;
+    }
     openDocPage = page;
     openDoc = d;
+  }
+
+  // ---- "Riferimento senza PDF": attach a file to an existing entry ----
+  let refPanel = $state<{ doc: DocumentItem; url: string; busy: boolean } | null>(null);
+
+  async function refFindPdf() {
+    if (!refPanel || refPanel.busy) return;
+    refPanel.busy = true;
+    const id = refPanel.doc.id;
+    try {
+      await doFindPdf(refPanel.doc); // status + reload già gestiti lì
+    } finally {
+      const fresh = docs.find((x) => x.id === id);
+      if (fresh?.has_file) {
+        refPanel = null;
+        openDocument(fresh);
+      } else if (refPanel) {
+        refPanel.busy = false;
+      }
+    }
+  }
+
+  async function refAttach() {
+    if (!refPanel || refPanel.busy) return;
+    const u = refPanel.url.trim();
+    if (!u) return;
+    refPanel.busy = true;
+    try {
+      const r = await attachFromUrl(refPanel.doc.id, u);
+      status =
+        r === "attached"
+          ? "PDF allegato al riferimento ✓"
+          : r === "already"
+            ? "Questo documento ha già un PDF"
+            : r === "duplicate"
+              ? "Quel PDF è già in libreria (in un altro documento): usa Strumenti → Duplicati per unirli"
+              : "Quel link non è un PDF diretto";
+      if (r === "attached") {
+        await loadDocs();
+        await loadSidebar();
+        const fresh = docs.find((x) => x.id === refPanel!.doc.id);
+        refPanel = null;
+        if (fresh) openDocument(fresh);
+        return;
+      }
+    } catch (e) {
+      status = "Errore: " + e;
+    }
+    if (refPanel) refPanel.busy = false;
+  }
+
+  async function refPaste() {
+    if (!refPanel) return;
+    try {
+      const t = await navigator.clipboard.readText();
+      if (t && t.trim()) refPanel.url = t.trim();
+    } catch {
+      status = "Non riesco a leggere gli appunti: incolla con Ctrl+V";
+    }
   }
 
   async function shareDoc(target: ShareTarget, ids: number[], label: string, link?: string | null) {
@@ -2310,8 +2375,8 @@
     ];
     if (filter.kind === "collection")
       orgKids.push({ id: "or-rm", label: `Togli da «${filter.label ?? "collezione"}»`, danger: true, action: () => removeDocFromCurrentCollection(d) });
-    if (!d.has_thumb)
-      orgKids.push({ id: "or-pdf", label: "Trova PDF", hint: "Cerca un PDF Open Access (Unpaywall/arXiv) e allegalo", action: () => doFindPdf(d) });
+    if (!d.has_file)
+      orgKids.push({ id: "or-pdf", label: "Allega PDF…", hint: "Questa voce è solo un riferimento: trova un PDF Open Access o allegane uno da un link", action: () => (refPanel = { doc: d, url: "", busy: false }) });
     return [
       { id: "d-open", label: "Apri", icon: I.open, hint: "Leggi nel visore integrato", action: () => openDocument(d) },
       { id: "d-fav", label: "Preferito", icon: I.star, checked: d.favorite, hint: d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti", action: () => toggleFavorite(d) },
@@ -3362,7 +3427,7 @@
                 <button class="cardsel" class:on={selected.includes(d.id)} title="Seleziona per azioni multiple" aria-label="Seleziona" onclick={(e) => { e.stopPropagation(); toggleSelect(d.id); }}>{selected.includes(d.id) ? "✓" : ""}</button>
                 <button class="starbtn" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>
                 <div class="thumb">
-                  {#if thumbs[d.id]}<img src={thumbs[d.id]} alt="" />{:else}<div class="thumb-placeholder">PDF</div>{/if}
+                  {#if thumbs[d.id]}<img src={thumbs[d.id]} alt="" />{:else}<div class="thumb-placeholder" class:refonly={!d.has_file}>{d.has_file ? "PDF" : "Riferimento — senza PDF"}</div>{/if}
                   {#if readPct(d) !== null}
                     {@const pct = readPct(d)}
                     <div class="progress" class:done={d.is_read} title={d.is_read ? "Letto" : `Letto al ${pct}%${d.page_count ? ` (pag. ${d.last_page}/${d.page_count})` : ""}`}>
@@ -3519,6 +3584,38 @@
     </div>
   {/if}
 
+  {#if refPanel}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget && !refPanel!.busy) refPanel = null; }} role="presentation">
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
+      <div class="idmodal refmodal" role="dialog" tabindex="-1" aria-label="Riferimento senza PDF" onclick={(e) => e.stopPropagation()}>
+        <h2>Riferimento senza PDF</h2>
+        <p class="dimtext">
+          «{refPanel.doc.title ?? "Senza titolo"}» è in libreria come <strong>citazione</strong>: non ha ancora un file
+          allegato (quando è stato aggiunto non c'era un PDF Open Access scaricabile).
+        </p>
+        <div class="refactions">
+          <button class="primary" onclick={refFindPdf} disabled={refPanel.busy} title="Cerca una copia Open Access via Unpaywall/arXiv e allegala a questa voce">
+            {refPanel.busy ? "…" : "Trova PDF (Open Access)"}
+          </button>
+          <button class="ghost" onclick={() => (editingId = refPanel!.doc.id)}>Modifica metadati</button>
+          <button class="ghost" onclick={() => (refPanel = null)}>Chiudi</button>
+        </div>
+        <div class="refor">…oppure allega tu un link al PDF:</div>
+        <div class="refurl">
+          <input
+            placeholder="https://…/file.pdf (vanno bene anche le pagine GitHub /blob/)"
+            bind:value={refPanel.url}
+            onkeydown={(e) => e.key === "Enter" && refAttach()}
+          />
+          <button class="ghost small" onclick={refPaste} title="Incolla il link dagli appunti">📋</button>
+          <button class="ghost small" onclick={refAttach} disabled={refPanel.busy || !refPanel.url.trim()}>{refPanel.busy ? "…" : "Allega"}</button>
+        </div>
+        <p class="refhint">Il file viene scaricato e allegato a <strong>questa</strong> voce — tag, citazioni e metadati restano; nessun duplicato.</p>
+      </div>
+    </div>
+  {/if}
+
   {#if spotlight}
     {@const sd = spotlight.doc}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -3527,7 +3624,7 @@
         <p class="spotkicker">Riscopri</p>
         <div class="spotbody">
           <div class="spotthumb">
-            {#if thumbs[sd.id]}<img src={thumbs[sd.id]} alt="" />{:else}<div class="thumb-placeholder">PDF</div>{/if}
+            {#if thumbs[sd.id]}<img src={thumbs[sd.id]} alt="" />{:else}<div class="thumb-placeholder" class:refonly={!sd.has_file}>{sd.has_file ? "PDF" : "Riferimento"}</div>{/if}
           </div>
           <div class="spotmeta">
             <h2 class="spottitle">{sd.title ?? "Senza titolo"}</h2>
@@ -3973,7 +4070,7 @@
             <li><strong>Locale</strong>: barra in alto, modalità <em>Testo</em>, <em>Semantica</em> (per significato) o <em>Ibrida</em>. Cerca anche nelle tue <strong>note e annotazioni</strong>.</li>
             <li><strong>Online</strong> (<em>Scopri online</em>): arXiv, OpenAlex, ADS, Semantic Scholar, Europe PMC, CORE, DOAJ, <strong>HF Papers</strong> (il successore di Papers with Code: cerca nell'indice e mostra il repo GitHub di ogni paper). Filtri anno/autore/solo-OA e, sui risultati, chip <strong>Con codice</strong> / <strong>Peer-reviewed</strong> / <strong>Preprint</strong> (con conteggi) oltre alle colonne ordinabili. I PDF Open Access si scaricano, gli altri si aggiungono come riferimento.</li>
             <li><strong>Ricerche salvate</strong>: dopo una ricerca premi <em>★ Salva</em> → compare nella sidebar; cliccandola la rilancia e marca con <strong>“novità”</strong> i risultati nuovi dall'ultima volta.</li>
-            <li><strong>Trova PDF</strong> (tasto destro → Organizza): per un riferimento senza file, cerca un PDF Open Access (Unpaywall/arXiv) e lo allega.</li>
+            <li><strong>Riferimenti senza PDF</strong>: le voci aggiunte come sola citazione (da Scopri online, Esplora citazioni, BibTeX o per ID) mostrano «Riferimento — senza PDF» sulla copertina. Aprendole compare il pannello per allegare il file: <strong>Trova PDF</strong> (Open Access via Unpaywall/arXiv) oppure <strong>Allega</strong> da un link — il PDF si aggancia alla stessa voce, senza duplicati. Lo trovi anche nel radiale → Organizza → «Allega PDF…».</li>
           </ul>
         </div>
 
@@ -4702,6 +4799,12 @@
   .progress .pfill { height: 100%; background: var(--accent); transition: width var(--ease); }
   .progress.done .pfill { background: var(--ok, #3a9d5b); }
   .thumb-placeholder { color: var(--thumb-fg); font-size: 28px; font-weight: 700; font-family: var(--serif); }
+  /* reference-only entries: no file attached, say it instead of a misleading "PDF" */
+  .thumb-placeholder.refonly {
+    font-size: 13px; font-weight: 600; font-family: var(--sans);
+    color: var(--dim); text-align: center; line-height: 1.4; padding: 0 14px;
+    border: 1.5px dashed var(--border); border-radius: var(--r-sm); margin: 14px;
+  }
   .meta { padding: 11px 13px 14px; }
   .meta h3 {
     font-size: 14px; margin: 0 0 4px; line-height: 1.34; font-family: var(--serif); font-weight: 600; color: var(--text);
@@ -5271,4 +5374,16 @@
     max-height: 132px; overflow: hidden;
   }
   .spotactions { display: flex; gap: 8px; margin-top: 20px; justify-content: flex-end; }
+
+  /* "Riferimento senza PDF" panel */
+  .refmodal { width: 560px; }
+  .refactions { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 4px; }
+  .refor { font-size: 12px; color: var(--faint); margin: 14px 0 6px; }
+  .refurl { display: flex; gap: 6px; align-items: stretch; }
+  .refurl input {
+    flex: 1; min-width: 0; background: var(--field); border: 1px solid var(--border); color: var(--text);
+    border-radius: var(--r-sm); padding: 8px 10px; font-size: 13px; outline: none;
+  }
+  .refurl input:focus { border-color: var(--accent); }
+  .refhint { font-size: 11.5px; color: var(--faint); line-height: 1.45; margin: 10px 0 0; }
 </style>

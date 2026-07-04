@@ -25,6 +25,8 @@ export interface DocumentItem {
   authors: string[];
   tags: Tag[];
   has_thumb: boolean;
+  /** False for reference-only entries (no PDF attached yet). */
+  has_file: boolean;
   added_at: string | null;
   is_read: boolean;
   favorite: boolean;
@@ -61,6 +63,10 @@ export const importBibtex = (path: string) =>
   invoke<{ added: number; skipped: number; errors: string[] }>("import_bibtex", { path });
 /** Try to attach an Open-Access PDF to a reference-only doc. "attached"|"already"|"not_found". */
 export const findPdf = (id: number) => invoke<string>("find_pdf", { id });
+/** Attach the PDF at `url` to an EXISTING reference-only doc (no new entry).
+ *  "attached" | "already" | "duplicate" | "not_pdf". GitHub blob links are normalized. */
+export const attachFromUrl = (id: number, url: string) =>
+  invoke<string>("attach_from_url", { id, url });
 
 export interface HfItem { id: string; likes: number; downloads: number; url: string }
 export interface HfResources {

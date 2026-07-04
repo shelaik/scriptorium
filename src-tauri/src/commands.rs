@@ -1719,6 +1719,7 @@ fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> any
             authors,
             tags: load_tags(conn, id).unwrap_or_default(),
             has_thumb: thumb_path.map(|t| !t.is_empty()).unwrap_or(false),
+            has_file: path.as_deref().map(|p| !p.starts_with("ref:")).unwrap_or(false),
             added_at,
             is_read: is_read != 0,
             favorite: favorite != 0,
@@ -2426,6 +2427,76 @@ pub async fn find_pdf(app: AppHandle, id: i64) -> Result<String, String> {
         params![prepared.path, prepared.hash, prepared.thumb_path, prepared.fulltext, prepared.github_url, id],
     )
     .map_err(|e| e.to_string())?;
+    Ok("attached".into())
+}
+
+/// Attach a PDF downloaded from `url` to an EXISTING reference-only document —
+/// unlike [`add_from_url`], which creates a new entry. Same SSRF-guarded
+/// download and the same attach path as [`find_pdf`] (hash-dedupe against the
+/// rest of the library, GitHub blob links normalized to the raw file). Returns
+/// `"attached"` | `"already"` (the doc has a file) | `"duplicate"` | `"not_pdf"`.
+#[tauri::command]
+pub async fn attach_from_url(app: AppHandle, id: i64, url: String) -> Result<String, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("URL vuoto".into());
+    }
+    let url = normalize_pdf_url(url);
+    let path: Option<String> = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        conn.query_row(
+            "SELECT path FROM documents WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "documento non trovato".to_string())?
+    };
+    if path.as_deref().map(|p| !p.starts_with("ref:")).unwrap_or(false) {
+        return Ok("already".into());
+    }
+    let Some(saved) = download_pdf(&app, &url).await? else {
+        return Ok("not_pdf".into());
+    };
+    let state = app.state::<AppState>();
+    let dir = thumb_dir(&app);
+    let prepared = {
+        let _pdf_guard = state.pdfium_lock.lock();
+        import::prepare_import(&state.pdfium, &dir, &saved)
+    }
+    .map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
+    // Same bytes already in the library under another document? Don't duplicate
+    // (content-addressed storage: never delete `saved`, the twin may reference it).
+    let dup: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM documents WHERE file_hash = ?1 AND id != ?2 AND deleted_at IS NULL",
+            params![prepared.hash, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if dup.is_some() {
+        return Ok("duplicate".into());
+    }
+    conn.execute(
+        "UPDATE documents SET path = ?1, file_hash = ?2, thumb_path = ?3, fulltext = ?4,
+         github_url = COALESCE(?5, github_url), page_count = COALESCE(?6, page_count) WHERE id = ?7",
+        params![
+            prepared.path,
+            prepared.hash,
+            prepared.thumb_path,
+            prepared.fulltext,
+            prepared.github_url,
+            (prepared.page_count > 0).then_some(prepared.page_count),
+            id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("library-changed", ());
     Ok("attached".into())
 }
 
@@ -5058,6 +5129,7 @@ fn query_documents(
             authors,
             tags: load_tags(conn, id).unwrap_or_default(),
             has_thumb: thumb_path.map(|t| !t.is_empty()).unwrap_or(false),
+            has_file: path.as_deref().map(|p| !p.starts_with("ref:")).unwrap_or(false),
             added_at,
             is_read: is_read != 0,
             favorite: favorite != 0,

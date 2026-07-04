@@ -26,6 +26,9 @@ pub struct Document {
     pub tags: Vec<Tag>,
     /// Whether a cached thumbnail exists (fetch its bytes via `get_thumbnail`).
     pub has_thumb: bool,
+    /// Whether a real PDF file is attached (false for reference-only entries,
+    /// whose `path` is a `ref:source:id` sentinel).
+    pub has_file: bool,
     pub added_at: Option<String>,
     pub is_read: bool,
     pub favorite: bool,
