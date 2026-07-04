@@ -695,9 +695,11 @@ export const wikiList = () => invoke<WikiPageMeta[]>("wiki_list");
 /** One wiki page rendered to sanitized HTML (citations and cross-links woven in). */
 export const wikiGet = (slug: string) => invoke<WikiPage>("wiki_get", { slug });
 /** Generate (or regenerate) the page for a concept with the local LLM.
- *  Emits "wiki-progress" events ({ phase, done, total, concept }); returns the slug. */
-export const wikiGenerate = (concept: string, tagId?: number | null) =>
-  invoke<string>("wiki_generate", { concept, tagId: tagId ?? null });
+ *  Sources: `ids` when given (explicit selection, max 10), else the tag with
+ *  the same name / `tagId`, else semantic search. Emits "wiki-progress"
+ *  events ({ phase, done, total, concept }); returns the slug. */
+export const wikiGenerate = (concept: string, tagId?: number | null, ids?: number[] | null) =>
+  invoke<string>("wiki_generate", { concept, tagId: tagId ?? null, ids: ids ?? null });
 export const wikiDelete = (slug: string) => invoke<void>("wiki_delete", { slug });
 /** Ask the running generation to stop at the next step. */
 export const wikiCancel = () => invoke<void>("wiki_cancel");

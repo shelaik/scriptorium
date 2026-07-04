@@ -5596,13 +5596,15 @@ fn top_chunks(conn: &Connection, doc_id: i64, qvec: &[f32], k: usize) -> Vec<(St
 
 /// Generate (or regenerate) the wiki page for `concept`: per-paper claim
 /// extraction → synthesis → source-coverage repair, all on the local LLM.
-/// Documents come from the tag with the same name (or `tag_id`), else from
-/// semantic search. Emits `wiki-progress` events; cancellable via [`wiki_cancel`].
+/// Sources: `ids` when given (the user picked them explicitly), else the tag
+/// with the same name (or `tag_id`), else semantic search. Emits
+/// `wiki-progress` events; cancellable via [`wiki_cancel`].
 #[tauri::command]
 pub async fn wiki_generate(
     app: AppHandle,
     concept: String,
     tag_id: Option<i64>,
+    ids: Option<Vec<i64>>,
 ) -> Result<String, String> {
     let concept = concept.trim().to_string();
     if concept.is_empty() {
@@ -5630,12 +5632,18 @@ pub async fn wiki_generate(
     let app2 = app.clone();
     let concept2 = concept.clone();
     let ollama2 = ollama_url.clone();
+    let explicit_sel = ids.as_ref().map(|l| !l.is_empty()).unwrap_or(false);
     let materials: Vec<WikiDocMaterial> =
         tauri::async_runtime::spawn_blocking(move || -> Result<Vec<WikiDocMaterial>, String> {
             let qvec = embed_query_text(gpu, &ollama2, &cache, &concept2).map_err(|e| e.to_string())?;
             let state = app2.state::<AppState>();
             let conn = state.db.lock();
-            let mut ids: Vec<i64> = if let Some(tid) = tag_id {
+            let mut ids: Vec<i64> = if let Some(list) = ids.filter(|l| !l.is_empty()) {
+                // Explicit selection: exactly these documents, in the given order
+                // (still filtered to existing, non-deleted rows below via the
+                // per-document metadata query).
+                list
+            } else if let Some(tid) = tag_id {
                 let mut s = conn
                     .prepare(
                         "SELECT dt.document_id FROM document_tags dt
@@ -5668,7 +5676,7 @@ pub async fn wiki_generate(
                     .collect();
                 v
             };
-            ids.truncate(8); // LLM-context budget
+            ids.truncate(if explicit_sel { 10 } else { 8 }); // LLM-context budget
             if ids.is_empty() {
                 return Err(
                     "Nessun documento per questo concetto: usa il nome di un tag esistente o genera l'indice semantico".into(),
@@ -5678,7 +5686,7 @@ pub async fn wiki_generate(
             for id in ids {
                 let Some((title, year, abstract_)) = conn
                     .query_row(
-                        "SELECT COALESCE(title,'Senza titolo'), year, abstract FROM documents WHERE id = ?1",
+                        "SELECT COALESCE(title,'Senza titolo'), year, abstract FROM documents WHERE id = ?1 AND deleted_at IS NULL",
                         params![id],
                         |r| {
                             Ok((

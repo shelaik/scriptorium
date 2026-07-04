@@ -389,7 +389,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.4.2";
+  const APP_VERSION = "0.4.3";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2469,6 +2469,7 @@
       if (ids.length >= 2)
         items.push({ id: "s-rev", label: "Rassegna (AI)", icon: I.quote, disabled: aiBusyAny || wikiBusy, hint: "Mini related-work per temi, con citazioni [n] e citekey pronti", action: () => runReview() });
       items.push({ id: "s-res", label: "Tabella risultati (AI)", icon: I.grid, disabled: aiBusyAny || wikiBusy, hint: "Raccogli metriche e numeri dei paper in un'unica tabella (CSV/Excel)", action: () => runHarvest() });
+      items.push({ id: "s-wiki", label: "Pagina wiki (AI)", icon: I.open, disabled: aiBusyAny || wikiBusy, hint: "Una pagina della Wiki con esattamente questi documenti come fonti (max 10)", action: () => (wikiFromSel = { ids: [...selected].slice(0, 10), concept: "" }) });
     }
     if (tagKids.length) items.push({ id: "s-tag", label: "Aggiungi tag", icon: I.tag, children: tagKids });
     if (collKids.length) items.push({ id: "s-coll", label: "In collezione", icon: I.folder, children: collKids });
@@ -2805,6 +2806,29 @@
       wikiProg = null;
     }
   }
+  // "Pagina wiki dalla selezione": the user picks the sources explicitly.
+  let wikiFromSel = $state<{ ids: number[]; concept: string } | null>(null);
+  async function runWikiFromSelection() {
+    if (!wikiFromSel || wikiBusy) return;
+    const c = wikiFromSel.concept.trim();
+    if (!c) return;
+    const ids = wikiFromSel.ids;
+    wikiFromSel = null;
+    wikiBusy = true;
+    try {
+      const slug = await wikiGenerate(c, null, ids);
+      openWikiView();
+      await loadWikiList();
+      await openWikiPage(slug);
+      status = `Pagina wiki «${c}» generata dalle ${ids.length} fonti scelte ✓`;
+    } catch (e) {
+      status = "Wiki: " + e;
+    } finally {
+      wikiBusy = false;
+      wikiProg = null;
+    }
+  }
+
   async function removeWikiPage(slug: string) {
     if (!(await confirmAsk("Eliminare questa pagina wiki? I documenti non vengono toccati.", "Elimina"))) return;
     try {
@@ -4068,6 +4092,31 @@
     </div>
   {/if}
 
+  {#if wikiFromSel}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) wikiFromSel = null; }} role="presentation">
+      <div class="idmodal wikiselmodal" role="dialog" tabindex="-1" aria-label="Pagina wiki dalla selezione" onclick={(e) => e.stopPropagation()}>
+        <h2>Pagina wiki dalla selezione</h2>
+        <p class="dimtext">
+          La pagina userà come fonti <strong>esattamente</strong> {wikiFromSel.ids.length === 1 ? "il documento selezionato" : `i ${wikiFromSel.ids.length} documenti selezionati`}
+          {selected.length > 10 ? " (i primi 10)" : ""} — ognuno dovrà comparire nel testo, o essere dichiarato non pertinente.
+        </p>
+        <div class="refurl">
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            placeholder="Titolo del concetto (es. «ragionamento negli LLM»)…"
+            bind:value={wikiFromSel.concept}
+            autofocus
+            onkeydown={(e) => e.key === "Enter" && runWikiFromSelection()}
+          />
+          <button class="primary" onclick={runWikiFromSelection} disabled={wikiBusy || !wikiFromSel.concept.trim()}>{wikiBusy ? "…" : "Genera"}</button>
+          <button class="ghost small" onclick={() => (wikiFromSel = null)}>Annulla</button>
+        </div>
+        <p class="refhint">Se esiste già una pagina con lo stesso titolo verrà sostituita. La trovi poi in «Wiki della libreria».</p>
+      </div>
+    </div>
+  {/if}
+
   {#if refPanel}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget && !refPanel!.busy) refPanel = null; }} role="presentation">
@@ -4605,7 +4654,7 @@
           <h3>Wiki della libreria</h3>
           <ul>
             <li>La tua <strong>enciclopedia privata</strong>: una pagina per concetto, scritta dall'AI locale leggendo solo i tuoi documenti (barra laterale → <em>Wiki della libreria</em>).</li>
-            <li><strong>«Genera/aggiorna dai tag»</strong> crea una pagina per ogni tag con almeno 2 documenti; oppure scrivi un concetto libero (usa la ricerca semantica per trovare i paper pertinenti).</li>
+            <li>Le fonti, in tre modi: <strong>«Genera/aggiorna dai tag»</strong> (una pagina per ogni tag con almeno 2 documenti); un <strong>concetto libero</strong> (i paper pertinenti li trova la ricerca semantica); oppure <strong>scegli tu le fonti</strong> — seleziona i documenti nella griglia → tasto destro → <em>Pagina wiki (AI)</em>: la pagina usa esattamente quelli (max 10).</li>
             <li>Le citazioni <strong>[n]</strong> nel testo aprono il PDF <strong>alla pagina giusta</strong>; i concetti citati in altre pagine diventano <strong>link</strong> tra pagine; in fondo trovi le fonti con i passaggi usati (chip «p. N»).</li>
             <li>Ogni fonte <em>deve</em> comparire nella pagina: se la sintesi non la usa, viene dichiarata in «Fonti non integrate» — mai omessa in silenzio. Il pallino <strong>●</strong> sull'elenco segnala che la libreria è cambiata e conviene rigenerare.</li>
             <li>Richiede l'AI locale attiva e l'indice dei passaggi (Chiedi alla libreria → Costruisci indice). Consiglio: un modello ≥ 8B (es. <code>gemma3:27b</code>) per una prosa all'altezza.</li>
