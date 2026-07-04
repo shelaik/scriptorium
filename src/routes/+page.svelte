@@ -389,7 +389,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.4.0";
+  const APP_VERSION = "0.4.1";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -4967,7 +4967,9 @@
     --zebra: #16271f; --thumb-bg: #0f1c16; --thumb-fg: #345644; --viewer-bg: #0d1813;
     --ring: rgba(111, 194, 141, 0.32); --shadow-lg: 0 22px 60px rgba(0, 0, 0, 0.5);
   }
-  .app { min-height: 100vh; display: flex; flex-direction: column; position: relative; }
+  /* Lock the chrome: the app fills the window exactly, so header/strip/sidebar
+     stay put and only the document area (.main, overflow:auto) scrolls. */
+  .app { height: 100vh; overflow: hidden; display: flex; flex-direction: column; position: relative; }
   header {
     display: flex; align-items: center; gap: 16px;
     padding: 14px 22px; background: var(--surface); border-bottom: 1px solid var(--border);
