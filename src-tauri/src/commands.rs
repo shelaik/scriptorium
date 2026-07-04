@@ -1659,9 +1659,9 @@ fn rrf_merge(a: &[i64], b: &[i64], limit: usize) -> Vec<i64> {
 /// Fetch documents by id, preserving the order of `ids`.
 fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> anyhow::Result<Vec<Document>> {
     let sql = if include_deleted {
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count FROM documents WHERE id = ?1"
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, (summary IS NOT NULL AND TRIM(summary) != '') FROM documents WHERE id = ?1"
     } else {
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count FROM documents WHERE id = ?1 AND deleted_at IS NULL"
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, (summary IS NOT NULL AND TRIM(summary) != '') FROM documents WHERE id = ?1 AND deleted_at IS NULL"
     };
     let mut doc_stmt = conn.prepare(sql)?;
     let mut author_stmt = conn.prepare(
@@ -1688,10 +1688,11 @@ fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> any
                     r.get::<_, Option<String>>(11)?,
                     r.get::<_, Option<i64>>(12)?,
                     r.get::<_, Option<i64>>(13)?,
+                    r.get::<_, i64>(14)?,
                 ))
             })
             .optional()?;
-        let Some((id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count)) = row else {
+        let Some((id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, has_summary)) = row else {
             continue;
         };
         let pub_status = discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref());
@@ -1721,6 +1722,7 @@ fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> any
             tags: load_tags(conn, id).unwrap_or_default(),
             has_thumb: thumb_path.map(|t| !t.is_empty()).unwrap_or(false),
             has_file: path.as_deref().map(|p| !p.starts_with("ref:")).unwrap_or(false),
+            has_summary: has_summary != 0,
             added_at,
             is_read: is_read != 0,
             favorite: favorite != 0,
@@ -5067,14 +5069,14 @@ fn query_documents(
         _ => {}
     }
     let sql = format!(
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, (summary IS NOT NULL AND TRIM(summary) != '')
          FROM documents WHERE {} ORDER BY added_at DESC, id DESC",
         conds.join(" AND ")
     );
 
     let mut stmt = conn.prepare(&sql)?;
     #[allow(clippy::type_complexity)]
-    let base: Vec<(i64, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>)> =
+    let base: Vec<(i64, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>, i64)> =
         stmt.query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -5091,6 +5093,7 @@ fn query_documents(
                 r.get(11)?,
                 r.get(12)?,
                 r.get(13)?,
+                r.get(14)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -5102,7 +5105,7 @@ fn query_documents(
     )?;
 
     let mut docs = Vec::with_capacity(base.len());
-    for (id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count) in base {
+    for (id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, has_summary) in base {
         let pub_status = discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref());
         let paper_url = paper_link_for(doi.as_deref(), path.as_deref());
         let authors: Vec<String> = author_stmt
@@ -5131,6 +5134,7 @@ fn query_documents(
             tags: load_tags(conn, id).unwrap_or_default(),
             has_thumb: thumb_path.map(|t| !t.is_empty()).unwrap_or(false),
             has_file: path.as_deref().map(|p| !p.starts_with("ref:")).unwrap_or(false),
+            has_summary: has_summary != 0,
             added_at,
             is_read: is_read != 0,
             favorite: favorite != 0,

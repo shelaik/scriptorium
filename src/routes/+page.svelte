@@ -389,7 +389,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.4.1";
+  const APP_VERSION = "0.4.2";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1532,10 +1532,13 @@
   }
   async function summarizeDoc(doc: DocumentItem) {
     aiBusy = doc.id;
-    status = "Riassunto in corso… (può richiedere un momento)";
+    status = doc.has_summary
+      ? "Rigenero il riassunto… (quello esistente verrà sostituito)"
+      : "Riassunto in corso… (può richiedere un momento)";
     try {
       await summarizeDocument(doc.id);
       status = 'Riassunto generato — aprilo da "Modifica metadati"';
+      await loadDocs(); // refresh the ✦ indicator
     } catch (e) {
       status = "Errore AI: " + e;
     } finally {
@@ -1560,7 +1563,23 @@
    *  (local LLMs handle one request at a time), with live progress + cancel. */
   async function runBatchAi(kind: "summary" | "tags") {
     if (!selected.length || aiBusyAny) return; // no concurrent AI requests
-    const ids = [...selected];
+    // Skip documents that are already done: a summary is regenerated only on
+    // explicit single-document request, and autotag only runs on untagged docs.
+    const all = [...selected];
+    const docOf = (id: number) => displayed.find((x) => x.id === id) ?? docs.find((x) => x.id === id);
+    const ids = all.filter((id) => {
+      const d = docOf(id);
+      if (!d) return true;
+      return kind === "summary" ? !d.has_summary : d.tags.length === 0;
+    });
+    const skipped = all.length - ids.length;
+    if (!ids.length) {
+      status =
+        kind === "summary"
+          ? "Tutti i selezionati hanno già un riassunto AI (per rifarne uno: tasto destro sul singolo documento)"
+          : "Tutti i selezionati hanno già dei tag";
+      return;
+    }
     batchCancel = false;
     aiBatch = { kind, done: 0, total: ids.length };
     let ok = 0;
@@ -1584,14 +1603,13 @@
     }
     aiBatch = null;
     batchCancel = false;
-    if (kind === "tags") {
-      // Refresh so the new tag chips + sidebar appear.
-      await loadDocs();
-      await loadSidebar();
-    }
+    // Refresh so tag chips / ✦ summary indicators appear.
+    await loadDocs();
+    if (kind === "tags") await loadSidebar();
     const label = kind === "summary" ? "Riassunti" : "Tag automatici";
     status =
       `${label}: ${ok} completati` +
+      (skipped ? ` · ${skipped} saltati (già presenti)` : "") +
       (errs ? ` · ${errs} errori (es. ${lastErr})` : "") +
       (broke ? " · interrotto" : "");
   }
@@ -2382,8 +2400,22 @@
       action: () => openExplore(d),
     });
     const aiKids: RadialItem[] = [
-      { id: "ai-sum", label: "Riassumi", hint: "Riassunto in italiano con l'AI locale", disabled: !aiStat?.enabled || aiBusyAny, action: () => summarizeDoc(d) },
-      { id: "ai-tag", label: "Tag automatici", hint: "Suggerisce e assegna tag tematici", disabled: !aiStat?.enabled || aiBusyAny, action: () => autotagDoc(d) },
+      {
+        id: "ai-sum",
+        label: d.has_summary ? "Riassunto ✓ (rigenera)" : "Riassumi",
+        checked: d.has_summary,
+        hint: d.has_summary ? "Già presente: cliccando lo rigeneri e sovrascrivi" : "Riassunto in italiano con l'AI locale",
+        disabled: !aiStat?.enabled || aiBusyAny,
+        action: () => summarizeDoc(d),
+      },
+      {
+        id: "ai-tag",
+        label: d.tags.length ? "Tag automatici (ha già tag)" : "Tag automatici",
+        checked: d.tags.length > 0,
+        hint: d.tags.length ? `Ha già ${d.tags.length} tag: la chiamata può aggiungerne altri` : "Suggerisce e assegna tag tematici",
+        disabled: !aiStat?.enabled || aiBusyAny,
+        action: () => autotagDoc(d),
+      },
       { id: "ai-ask", label: "Chiedi al documento", hint: "Domande in linguaggio naturale su questo PDF", disabled: !aiStat?.enabled, action: () => askAboutDoc(d) },
       { id: "ai-rel", label: "Correlati", icon: I.near, hint: "I documenti più vicini per significato (indice semantico)", action: () => setFilter({ kind: "related", id: d.id, label: d.title ?? "documento" }) },
       { id: "ai-path", label: "Percorso di lettura", icon: I.map, hint: "Cosa leggere prima per capirlo: fondamenti citati + vicini precedenti (senza LLM)", action: () => openReadingPath(d) },
@@ -3809,6 +3841,7 @@
                   {#if authorLine(d)}<p class="authors"><button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button></p>{/if}
                   {#if d.year || d.venue}<p class="venue">{[d.venue, d.year].filter(Boolean).join(" · ")}</p>{/if}
                   {#if d.citekey && !isBare(d)}<button type="button" class="ckey" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}
+                  {#if d.has_summary}<span class="aisum" title="Riassunto AI già presente — lo trovi in «Modifica metadati» (il batch AI salta questo documento)">✦ AI</span>{/if}
                   {#if isBare(d)}<p class="metamiss" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ metadati non recuperati</p>{/if}
                   {#if d.pub_status}<div class="badgerow">{@render pubBadge(d.pub_status, d.paper_url)}</div>{/if}
                   {#if d.github_url}
@@ -3858,7 +3891,7 @@
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
                   <tr onclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selected.includes(d.id)}>
                     <td class="sel"><input type="checkbox" checked={selected.includes(d.id)} onclick={(e) => e.stopPropagation()} onchange={() => toggleSelect(d.id)} title="Seleziona" /></td>
-                    <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if d.citekey && !isBare(d)}<button type="button" class="ckey-inline" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}{#if isBare(d)}<span class="metamiss-inline" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ</span>{/if}</td>
+                    <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if d.citekey && !isBare(d)}<button type="button" class="ckey-inline" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}{#if d.has_summary}<span class="aisum inline" title="Riassunto AI già presente (il batch AI salta questo documento)">✦</span>{/if}{#if isBare(d)}<span class="metamiss-inline" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ</span>{/if}</td>
                     <td class="dim" title={authorLine(d)}>{#if authorLine(d)}<button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button>{:else}—{/if}</td>
                     <td class="num dim">{d.year ?? "—"}</td>
                     <td class="dim" title={d.venue ?? ""}>{d.venue || "—"}{#if d.pub_status}<span class="badgeinline">{@render pubBadge(d.pub_status, d.paper_url)}</span>{/if}</td>
@@ -4603,6 +4636,7 @@
           <ul>
             <li><strong>Esporta</strong> (radiale → Esporta, o Ctrl+K): <em>Citazioni</em> (BibTeX / RIS / CSL) dei documenti mostrati, oppure <em>In Obsidian</em> (note Markdown nel tuo vault).</li>
             <li><strong>AI locale</strong> (Ollama / LM Studio): riassunti, tag automatici, lente di lettura — opzionali, mai automatici, disattivabili. Impostazioni → AI locale.</li>
+            <li>Le schede con un <strong>riassunto AI</strong> mostrano il bollino <strong>✦ AI</strong>; nel menu radiale le voci AI indicano ✓ ciò che c'è già. Il <strong>batch</strong> sulla selezione <strong>salta</strong> chi ha già riassunto/tag (te lo dice: «N saltati»); per rigenerare un riassunto usa il tasto destro sul singolo documento.</li>
             <li><strong>Terminale</strong> integrato (es. per <code>claude code</code>), <strong>Backup</strong> completo, e <strong>11 temi</strong> dell'interfaccia (radiale → Aspetto, o palette).</li>
             <li>Suggerimento: le finestre si <strong>ridimensionano</strong> trascinando l'angolo in basso a destra.</li>
           </ul>
@@ -5895,6 +5929,16 @@
   .wikisrc.unused { opacity: 0.55; }
   .wikipages { display: inline-flex; gap: 4px; flex-wrap: wrap; }
   .wikiintro { max-width: 520px; margin: 0 auto; }
+
+  /* AI-summary indicator: this document already has a cached summary */
+  .aisum {
+    display: inline-block; margin-left: 6px; padding: 0 6px;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.3px; line-height: 15px;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid var(--accent-soft2); border-radius: var(--r-pill);
+    vertical-align: 1px; cursor: help;
+  }
+  .aisum.inline { margin-left: 5px; padding: 0 4px; }
 
   /* ===== Sintesi sulla selezione + percorso di lettura ===== */
   .aidocmodal { width: 760px; }

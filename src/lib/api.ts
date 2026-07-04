@@ -27,6 +27,8 @@ export interface DocumentItem {
   has_thumb: boolean;
   /** False for reference-only entries (no PDF attached yet). */
   has_file: boolean;
+  /** True when an AI summary is already stored (batch AI skips these). */
+  has_summary: boolean;
   added_at: string | null;
   is_read: boolean;
   favorite: boolean;

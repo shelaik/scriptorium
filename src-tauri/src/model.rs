@@ -29,6 +29,9 @@ pub struct Document {
     /// Whether a real PDF file is attached (false for reference-only entries,
     /// whose `path` is a `ref:source:id` sentinel).
     pub has_file: bool,
+    /// Whether an AI summary has already been generated (so the UI can show it
+    /// and batch AI can skip the document instead of regenerating).
+    pub has_summary: bool,
     pub added_at: Option<String>,
     pub is_read: bool,
     pub favorite: bool,
