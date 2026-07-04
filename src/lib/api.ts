@@ -658,3 +658,44 @@ export async function aiExplain(args: {
 export async function documentPath(id: number): Promise<string | null> {
   return invoke<string | null>("document_path", { id });
 }
+
+
+// ===== Wiki della libreria =====
+export interface WikiClaim { text: string; page: number | null }
+export interface WikiSource {
+  n: number;
+  document_id: number;
+  title: string;
+  year: number | null;
+  claims: WikiClaim[];
+  used: boolean;
+}
+export interface WikiPageMeta {
+  slug: string;
+  concept: string;
+  title: string;
+  generated_at: string | null;
+  model: string | null;
+  n_sources: number;
+  stale: boolean;
+}
+export interface WikiPage {
+  slug: string;
+  concept: string;
+  title: string;
+  html: string;
+  sources: WikiSource[];
+  generated_at: string | null;
+  model: string | null;
+}
+/** All wiki pages (metadata only), alphabetical. */
+export const wikiList = () => invoke<WikiPageMeta[]>("wiki_list");
+/** One wiki page rendered to sanitized HTML (citations and cross-links woven in). */
+export const wikiGet = (slug: string) => invoke<WikiPage>("wiki_get", { slug });
+/** Generate (or regenerate) the page for a concept with the local LLM.
+ *  Emits "wiki-progress" events ({ phase, done, total, concept }); returns the slug. */
+export const wikiGenerate = (concept: string, tagId?: number | null) =>
+  invoke<string>("wiki_generate", { concept, tagId: tagId ?? null });
+export const wikiDelete = (slug: string) => invoke<void>("wiki_delete", { slug });
+/** Ask the running generation to stop at the next step. */
+export const wikiCancel = () => invoke<void>("wiki_cancel");

@@ -107,7 +107,14 @@
     removeFromCollection,
     getDocumentMeta,
     attachFromUrl,
+    wikiList,
+    wikiGet,
+    wikiGenerate,
+    wikiDelete,
+    wikiCancel,
     type SimilarityGraph,
+    type WikiPageMeta,
+    type WikiPage,
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
   import MetaEditor from "$lib/MetaEditor.svelte";
@@ -122,7 +129,7 @@
   import Constellation from "$lib/Constellation.svelte";
 
   type Filter = {
-    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask";
+    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki";
     id?: number;
     label?: string;
   };
@@ -375,7 +382,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.2.3";
+  const APP_VERSION = "0.3.0";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2064,6 +2071,7 @@
   let ragP: Promise<() => void> | undefined;
   let askP: Promise<() => void> | undefined;
   let connP: Promise<() => void> | undefined;
+  let wikiP: Promise<() => void> | undefined;
   let clearTimer: ReturnType<typeof setTimeout> | undefined;
   onMount(() => {
     loadDocs();
@@ -2140,6 +2148,9 @@
     askP = listen<string>("ask-token", (e) => {
       if (asking) askAnswer += e.payload;
     });
+    wikiP = listen<{ phase: string; done: number; total: number; concept: string }>("wiki-progress", (e) => {
+      wikiProg = e.payload.phase === "done" ? null : e.payload;
+    });
     return () => {
       dragP?.then((f) => f());
       embP?.then((f) => f());
@@ -2147,6 +2158,7 @@
       ragP?.then((f) => f());
       askP?.then((f) => f());
       connP?.then((f) => f());
+      wikiP?.then((f) => f());
       clearTimeout(searchTimer);
       clearTimeout(clearTimer);
       clearInterval(aiStatusTimer);
@@ -2465,6 +2477,7 @@
           { id: "gq-focus", label: "Cerca in libreria", hint: "Vai alla casella di ricerca", action: () => searchEl?.focus() },
           { id: "gq-pal", label: "Palette comandi", hint: "Ctrl+K — ogni azione, digitando", action: () => (paletteOpen = true) },
           { id: "gq-ask", label: "Chiedi alla libreria", icon: I.ask, hint: "Risposte con citazioni dai tuoi PDF (AI locale)", action: () => { setFilter({ kind: "ask" }); loadRagStatus(); } },
+          { id: "gq-wiki", label: "Wiki della libreria", icon: I.open, hint: "La tua enciclopedia privata, generata dai tuoi paper", action: () => openWikiView() },
           { id: "gq-disc", label: "Scopri online", hint: "arXiv, OpenAlex, ADS e altre fonti", action: () => setFilter({ kind: "discover" }) },
         ],
       },
@@ -2681,6 +2694,121 @@
     spotlight = { doc: pick, blurb: blurb.length > 420 ? blurb.slice(0, 420) + "…" : blurb };
   }
 
+  // ---- Wiki della libreria: pagine concettuali generate dall'LLM locale ----
+  let wikiPages = $state<WikiPageMeta[]>([]);
+  let wikiPage = $state<WikiPage | null>(null);
+  let wikiNewConcept = $state("");
+  let wikiBusy = $state(false);
+  let wikiProg = $state<{ phase: string; done: number; total: number; concept: string } | null>(null);
+
+  async function loadWikiList() {
+    try {
+      wikiPages = await wikiList();
+    } catch (e) {
+      status = "Wiki: " + e;
+    }
+  }
+  function openWikiView() {
+    setFilter({ kind: "wiki" });
+    loadWikiList();
+  }
+  async function openWikiPage(slug: string) {
+    try {
+      wikiPage = await wikiGet(slug);
+    } catch (e) {
+      status = "Wiki: " + e;
+    }
+  }
+  async function runWikiGenerate(concept: string, tagId: number | null = null) {
+    const c = concept.trim();
+    if (!c || wikiBusy) return;
+    wikiBusy = true;
+    try {
+      const slug = await wikiGenerate(c, tagId);
+      wikiNewConcept = "";
+      await loadWikiList();
+      await openWikiPage(slug);
+      status = `Pagina wiki «${c}» generata ✓`;
+    } catch (e) {
+      status = "Wiki: " + e;
+    } finally {
+      wikiBusy = false;
+      wikiProg = null;
+    }
+  }
+  /** Generate/refresh one page per tag (≥2 documents make a meaningful page). */
+  async function wikiGenerateFromTags() {
+    if (wikiBusy) return;
+    const worth = tags.filter((t) => t.count >= 2);
+    if (!worth.length) {
+      status = "Nessun tag con almeno 2 documenti: assegna qualche tag prima";
+      return;
+    }
+    wikiBusy = true;
+    try {
+      for (const t of worth) {
+        const slug = await wikiGenerate(t.name, t.id);
+        await loadWikiList();
+        if (!wikiPage) await openWikiPage(slug);
+      }
+      status = `Wiki aggiornata: ${worth.length} pagine ✓`;
+    } catch (e) {
+      status = "Wiki: " + e;
+    } finally {
+      wikiBusy = false;
+      wikiProg = null;
+    }
+  }
+  async function removeWikiPage(slug: string) {
+    if (!(await confirmAsk("Eliminare questa pagina wiki? I documenti non vengono toccati.", "Elimina"))) return;
+    try {
+      await wikiDelete(slug);
+      if (wikiPage?.slug === slug) wikiPage = null;
+      await loadWikiList();
+    } catch (e) {
+      status = "" + e;
+    }
+  }
+  async function stopWiki() {
+    try {
+      await wikiCancel();
+    } catch {
+      /* ignore */
+    }
+  }
+  /** First cited page of source [n], for the deep link into the PDF. */
+  function wikiSourceTarget(n: number): { docId: number; page: number | null } | null {
+    const s = wikiPage?.sources.find((x) => x.n === n);
+    if (!s) return null;
+    return { docId: s.document_id, page: s.claims.find((c) => c.page != null)?.page ?? null };
+  }
+  /** Intercept clicks inside the rendered page: [n] → source PDF at page; [[…]] → other page. */
+  function wikiLinksAction(node: HTMLElement) {
+    const handler = (e: MouseEvent) => {
+      const a = (e.target as HTMLElement).closest("a");
+      if (!a) return;
+      const href = a.getAttribute("href") ?? "";
+      if (href.startsWith("#src-")) {
+        e.preventDefault();
+        const t = wikiSourceTarget(parseInt(href.slice(5), 10));
+        if (t) openById(t.docId, t.page);
+      } else if (href.startsWith("#wiki-")) {
+        e.preventDefault();
+        const slug = href.slice(6);
+        if (wikiPages.some((p) => p.slug === slug)) openWikiPage(slug);
+      } else if (/^https?:/i.test(href)) {
+        e.preventDefault();
+        openInBrowser(href);
+      }
+    };
+    node.addEventListener("click", handler);
+    return {
+      destroy() {
+        node.removeEventListener("click", handler);
+      },
+    };
+  }
+
   // Status messages surface as a quiet toast that fades on its own.
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
@@ -2829,7 +2957,7 @@
     </div>
   {/if}
 
-  {#if filter.kind !== "trash" && filter.kind !== "discover" && filter.kind !== "duplicates" && filter.kind !== "terminal" && filter.kind !== "ask"}
+  {#if filter.kind !== "trash" && filter.kind !== "discover" && filter.kind !== "duplicates" && filter.kind !== "terminal" && filter.kind !== "ask" && filter.kind !== "wiki"}
     <div class="strip">
       <div class="stripleft">
         <div class="seg" role="group" aria-label="Vista">
@@ -2996,6 +3124,7 @@
 
       <div class="sec">Strumenti</div>
       <button class="navitem" class:active={filter.kind === "ask"} onclick={() => { setFilter({ kind: "ask" }); loadRagStatus(); }} title="Fai domande alla tua libreria: risposte con citazioni dai tuoi documenti (AI locale)">Chiedi alla libreria</button>
+      <button class="navitem" class:active={filter.kind === "wiki"} onclick={openWikiView} title="La tua enciclopedia privata: pagine per concetto generate dall'AI locale dai tuoi paper, con fonti che aprono il PDF alla pagina giusta">Wiki della libreria</button>
       <button class="navitem" class:active={filter.kind === "discover"} onclick={() => setFilter({ kind: "discover" })} title="Cerca paper online (arXiv / OpenAlex / ADS) e aggiungili alla libreria">Scopri online</button>
       <button class="navitem" class:active={filter.kind === "duplicates"} onclick={() => setFilter({ kind: "duplicates" })} title="Trova e unisci documenti duplicati (per DOI o titolo+anno)">Duplicati</button>
       <button class="navitem" class:active={filter.kind === "trash"} onclick={() => setFilter({ kind: "trash" })} title="Documenti eliminati: ripristina o elimina definitivamente">Cestino</button>
@@ -3143,6 +3272,81 @@
               </div>
             {/if}
           {/if}
+        </div>
+      {:else if filter.kind === "wiki"}
+        <div class="wikiwrap">
+          <aside class="wikinav">
+            <div class="wikinew">
+              <input
+                placeholder="Nuova pagina: concetto o tag…"
+                bind:value={wikiNewConcept}
+                onkeydown={(e) => e.key === "Enter" && runWikiGenerate(wikiNewConcept)}
+                title="Scrivi un concetto (o il nome di un tag): la pagina viene sintetizzata dai documenti pertinenti"
+              />
+              <button class="ghost small" onclick={() => runWikiGenerate(wikiNewConcept)} disabled={wikiBusy || !wikiNewConcept.trim()}>{wikiBusy ? "…" : "Genera"}</button>
+            </div>
+            <button class="ghost small wikiall" onclick={wikiGenerateFromTags} disabled={wikiBusy} title="Una pagina per ogni tag con almeno 2 documenti (le esistenti vengono rigenerate)">
+              {wikiBusy ? "Genero…" : "Genera/aggiorna dai tag"}
+            </button>
+            {#if wikiProg}
+              <div class="wikiprog">
+                <span class="hint">{wikiProg.phase === "estrazione" ? `Leggo le fonti ${wikiProg.done + 1}/${wikiProg.total - 1}` : wikiProg.phase === "sintesi" ? "Scrivo la pagina…" : "Controllo le fonti…"} — {wikiProg.concept}</span>
+                <div class="bar"><div class="fill" style="width:{wikiProg.total ? (wikiProg.done / wikiProg.total) * 100 : 5}%"></div></div>
+                <button class="ghost small" onclick={stopWiki} title="Ferma al prossimo passaggio">Stop</button>
+              </div>
+            {/if}
+            {#if !aiStat?.enabled}
+              <p class="askwarn">Le funzioni AI sono disattivate: abilitale in <strong>Impostazioni → AI locale</strong>.</p>
+            {/if}
+            <div class="wikilist">
+              {#each wikiPages as p (p.slug)}
+                <div class="navrow">
+                  <button class="navitem" class:active={wikiPage?.slug === p.slug} onclick={() => openWikiPage(p.slug)} title={`${p.n_sources} fonti · generata ${p.generated_at ?? ""}${p.stale ? " · la libreria è cambiata: rigenera" : ""}`}>
+                    {p.title}
+                    {#if p.stale}<span class="wikistale" title="La libreria è cambiata da quando è stata generata">●</span>{/if}
+                  </button>
+                  <button class="x" title="Elimina questa pagina" onclick={() => removeWikiPage(p.slug)}>×</button>
+                </div>
+              {/each}
+              {#if !wikiPages.length}
+                <p class="wikiempty">Nessuna pagina ancora. Scrivi un concetto qui sopra, o parti da «Genera dai tag».</p>
+              {/if}
+            </div>
+          </aside>
+          <section class="wikibody">
+            {#if wikiPage}
+              <header class="wikihead">
+                <h2 class="wikititle">{wikiPage.title}</h2>
+                <span class="wikimeta">{wikiPage.sources.length} fonti · {wikiPage.model ?? ""}</span>
+                <button class="ghost small" onclick={() => runWikiGenerate(wikiPage!.concept)} disabled={wikiBusy} title="Rigenera la pagina con lo stato attuale della libreria">Rigenera</button>
+              </header>
+              <article class="wikihtml" use:wikiLinksAction>
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- HTML sanificato dal backend (ammonia) -->
+                {@html wikiPage.html}
+              </article>
+              <div class="wikisources">
+                <h3>Fonti</h3>
+                {#each wikiPage.sources as s (s.n)}
+                  <div class="wikisrc" class:unused={!s.used}>
+                    <button class="hflink" onclick={() => openById(s.document_id, s.claims.find((c) => c.page != null)?.page ?? null)} title={s.used ? "Apri il PDF" : "Fonte non utilizzata dalla sintesi — apri comunque"}>
+                      [{s.n}] {s.title}{s.year ? ` (${s.year})` : ""}
+                    </button>
+                    <span class="wikipages">
+                      {#each s.claims.filter((c) => c.page != null) as c, ci (ci)}
+                        <button class="passchip" onclick={() => openById(s.document_id, c.page)} title={c.text}>p. {c.page}</button>
+                      {/each}
+                    </span>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <div class="empty wikiintro">
+                <p class="big">La tua enciclopedia privata</p>
+                <p>Ogni pagina è scritta dall'AI locale leggendo <strong>solo i tuoi documenti</strong>: le citazioni [n] aprono il PDF alla pagina giusta, i concetti si collegano tra loro, e nulla esce dal tuo computer.</p>
+                <p class="dimtext">Suggerimento: parti da «Genera/aggiorna dai tag» — una pagina per ciascun tema della tua libreria.</p>
+              </div>
+            {/if}
+          </section>
         </div>
       {:else if filter.kind === "discover"}
         <div class="discbar">
@@ -4108,6 +4312,17 @@
               <tr><td><kbd>?</kbd></td><td>Scorciatoie (dentro il lettore)</td></tr>
             </tbody>
           </table>
+        </div>
+
+        <div class="helpsec">
+          <h3>Wiki della libreria</h3>
+          <ul>
+            <li>La tua <strong>enciclopedia privata</strong>: una pagina per concetto, scritta dall'AI locale leggendo solo i tuoi documenti (barra laterale → <em>Wiki della libreria</em>).</li>
+            <li><strong>«Genera/aggiorna dai tag»</strong> crea una pagina per ogni tag con almeno 2 documenti; oppure scrivi un concetto libero (usa la ricerca semantica per trovare i paper pertinenti).</li>
+            <li>Le citazioni <strong>[n]</strong> nel testo aprono il PDF <strong>alla pagina giusta</strong>; i concetti citati in altre pagine diventano <strong>link</strong> tra pagine; in fondo trovi le fonti con i passaggi usati (chip «p. N»).</li>
+            <li>Ogni fonte <em>deve</em> comparire nella pagina: se la sintesi non la usa, viene dichiarata in «Fonti non integrate» — mai omessa in silenzio. Il pallino <strong>●</strong> sull'elenco segnala che la libreria è cambiata e conviene rigenerare.</li>
+            <li>Richiede l'AI locale attiva e l'indice dei passaggi (Chiedi alla libreria → Costruisci indice). Consiglio: un modello ≥ 8B (es. <code>gemma3:27b</code>) per una prosa all'altezza.</li>
+          </ul>
         </div>
 
         <div class="helpsec">
@@ -5374,6 +5589,46 @@
     max-height: 132px; overflow: hidden;
   }
   .spotactions { display: flex; gap: 8px; margin-top: 20px; justify-content: flex-end; }
+
+  /* ===== Wiki della libreria ===== */
+  .wikiwrap { display: flex; min-height: calc(100vh - 60px); }
+  .wikinav {
+    width: 260px; flex: 0 0 260px; border-right: 1px solid var(--border-soft);
+    padding: 14px 12px; background: var(--bg);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .wikinew { display: flex; gap: 6px; }
+  .wikinew input {
+    flex: 1; min-width: 0; background: var(--field); border: 1px solid var(--border); color: var(--text);
+    border-radius: var(--r-sm); padding: 7px 10px; font-size: 12.5px; outline: none;
+  }
+  .wikinew input:focus { border-color: var(--accent); }
+  .wikiall { width: 100%; }
+  .wikiprog { display: flex; flex-direction: column; gap: 6px; padding: 8px; background: var(--panel); border-radius: var(--r-sm); }
+  .wikiprog .bar { width: 100%; }
+  .wikilist { flex: 1; overflow: auto; margin-top: 4px; }
+  .wikistale { color: var(--accent); font-size: 9px; margin-left: 6px; }
+  .wikiempty { font-size: 12px; color: var(--faint); line-height: 1.5; padding: 4px 6px; }
+  .wikibody { flex: 1; min-width: 0; overflow: auto; padding: 26px 36px 60px; }
+  .wikihead { display: flex; align-items: baseline; gap: 12px; border-bottom: 1px solid var(--border-soft); padding-bottom: 10px; margin-bottom: 6px; max-width: 780px; }
+  .wikititle { margin: 0; font-family: var(--serif); font-size: 26px; font-weight: 600; flex: 1; }
+  .wikimeta { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+  .wikihtml { max-width: 780px; font-size: 14.5px; line-height: 1.7; color: var(--text); }
+  .wikihtml :global(h2) { font-family: var(--serif); font-size: 18px; margin: 22px 0 8px; }
+  .wikihtml :global(h3) { font-family: var(--serif); font-size: 15px; margin: 18px 0 6px; }
+  .wikihtml :global(p) { margin: 8px 0; }
+  .wikihtml :global(a) { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent-soft2); }
+  .wikihtml :global(a[href^="#src-"]) {
+    font-size: 11px; vertical-align: 2px; border: none;
+    background: var(--accent-soft); border-radius: 4px; padding: 0 3px; margin: 0 1px;
+  }
+  .wikihtml :global(ul) { padding-left: 22px; }
+  .wikisources { max-width: 780px; margin-top: 26px; border-top: 1px solid var(--border-soft); padding-top: 12px; }
+  .wikisources h3 { font-family: var(--serif); font-size: 14px; margin: 0 0 8px; color: var(--dim); }
+  .wikisrc { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 3px 0; font-size: 13px; }
+  .wikisrc.unused { opacity: 0.55; }
+  .wikipages { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+  .wikiintro { max-width: 520px; margin: 0 auto; }
 
   /* "Riferimento senza PDF" panel */
   .refmodal { width: 560px; }

@@ -177,6 +177,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec USING vec0(
   chunk_id  INTEGER PRIMARY KEY,
   embedding float[1024] distance_metric=cosine
 );
+
+-- ===== Wiki della libreria: pagine concettuali generate dall'LLM locale =====
+-- content_md is stored raw; citation links / [[cross-links]] are woven at read
+-- time so they always reflect the pages that exist now.
+CREATE TABLE IF NOT EXISTS wiki_pages (
+  id            INTEGER PRIMARY KEY,
+  slug          TEXT NOT NULL UNIQUE,
+  concept       TEXT NOT NULL,
+  title         TEXT NOT NULL,
+  content_md    TEXT NOT NULL,
+  sources_json  TEXT NOT NULL DEFAULT '[]', -- [{n, document_id, title, year, claims:[{text,page}], used}]
+  doc_ids       TEXT NOT NULL DEFAULT '',   -- comma-joined ids used at generation (staleness check)
+  model         TEXT,
+  generated_at  TEXT DEFAULT (datetime('now'))
+);
 "#;
 
 /// Add a column if the table doesn't already have it (SQLite has no

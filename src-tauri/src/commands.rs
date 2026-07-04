@@ -15,6 +15,7 @@ use crate::rag;
 use crate::secret;
 use crate::table;
 use crate::term;
+use crate::wiki;
 use crate::model::{Annotation, Collection, Document, EditableMeta, ImportSummary, Tag};
 use crate::AppState;
 use zerocopy::IntoBytes;
@@ -5395,6 +5396,441 @@ pub fn term_resize(state: State<'_, term::TermState>, cols: u16, rows: u16) -> R
 pub fn term_close(state: State<'_, term::TermState>) -> Result<(), String> {
     term::close(state.inner());
     Ok(())
+}
+
+// ===== Wiki della libreria: pagine concettuali generate dall'LLM locale =====
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct WikiClaim {
+    pub text: String,
+    pub page: Option<i64>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct WikiSource {
+    pub n: usize,
+    pub document_id: i64,
+    pub title: String,
+    pub year: Option<i64>,
+    pub claims: Vec<WikiClaim>,
+    /// False when the final page does not cite this source (or it had no text).
+    pub used: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct WikiPageMeta {
+    pub slug: String,
+    pub concept: String,
+    pub title: String,
+    pub generated_at: Option<String>,
+    pub model: Option<String>,
+    pub n_sources: i64,
+    /// True when the page's concept matches a tag whose membership changed
+    /// since generation (the page is worth regenerating).
+    pub stale: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct WikiPage {
+    pub slug: String,
+    pub concept: String,
+    pub title: String,
+    pub html: String,
+    pub sources: Vec<WikiSource>,
+    pub generated_at: Option<String>,
+    pub model: Option<String>,
+}
+
+/// Current member ids (non-deleted) of the tag named like `concept`, if any.
+fn tag_member_ids(conn: &Connection, concept: &str) -> Option<Vec<i64>> {
+    let tag_id: i64 = conn
+        .query_row("SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE", params![concept], |r| r.get(0))
+        .optional()
+        .ok()??;
+    let mut s = conn
+        .prepare(
+            "SELECT dt.document_id FROM document_tags dt JOIN documents d ON d.id = dt.document_id
+             WHERE dt.tag_id = ?1 AND d.deleted_at IS NULL ORDER BY dt.document_id",
+        )
+        .ok()?;
+    let v = s
+        .query_map(params![tag_id], |r| r.get::<_, i64>(0))
+        .ok()?
+        .filter_map(Result::ok)
+        .collect();
+    Some(v)
+}
+
+#[tauri::command]
+pub fn wiki_list(state: State<'_, AppState>) -> Result<Vec<WikiPageMeta>, String> {
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT slug, concept, title, generated_at, model, sources_json, doc_ids
+             FROM wiki_pages ORDER BY title COLLATE NOCASE",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, String, Option<String>, Option<String>, String, String)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+    let mut out = Vec::with_capacity(rows.len());
+    for (slug, concept, title, generated_at, model, sources_json, doc_ids) in rows {
+        let n_sources = serde_json::from_str::<Vec<WikiSource>>(&sources_json)
+            .map(|v| v.len() as i64)
+            .unwrap_or(0);
+        let stale = tag_member_ids(&conn, &concept)
+            .map(|cur| {
+                cur.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",") != doc_ids
+            })
+            .unwrap_or(false);
+        out.push(WikiPageMeta { slug, concept, title, generated_at, model, n_sources, stale });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn wiki_get(state: State<'_, AppState>, slug: String) -> Result<WikiPage, String> {
+    let conn = state.db.lock();
+    let row = conn
+        .query_row(
+            "SELECT concept, title, content_md, sources_json, generated_at, model
+             FROM wiki_pages WHERE slug = ?1",
+            params![slug],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((concept, title, content_md, sources_json, generated_at, model)) = row else {
+        return Err("Pagina non trovata".into());
+    };
+    // Cross-links reflect the pages that exist NOW (raw markdown is stored).
+    let others: Vec<(String, String)> = {
+        let mut s = conn
+            .prepare("SELECT concept, slug FROM wiki_pages WHERE slug != ?1")
+            .map_err(|e| e.to_string())?;
+        let v: Vec<(String, String)> = s
+            .query_map(params![slug], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        v
+    };
+    let md = wiki::link_citations(&content_md);
+    let md = wiki::weave_links(&md, &others);
+    let html = wiki::render_html(&md);
+    let sources: Vec<WikiSource> = serde_json::from_str(&sources_json).unwrap_or_default();
+    Ok(WikiPage { slug, concept, title, html, sources, generated_at, model })
+}
+
+#[tauri::command]
+pub fn wiki_delete(state: State<'_, AppState>, slug: String) -> Result<(), String> {
+    let conn = state.db.lock();
+    conn.execute("DELETE FROM wiki_pages WHERE slug = ?1", params![slug])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn wiki_cancel(state: State<'_, AppState>) {
+    state.wiki_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn wiki_emit(app: &AppHandle, concept: &str, phase: &str, done: usize, total: usize) {
+    let _ = app.emit(
+        "wiki-progress",
+        serde_json::json!({ "phase": phase, "done": done, "total": total, "concept": concept }),
+    );
+}
+
+/// Material gathered for one source document (internal).
+struct WikiDocMaterial {
+    id: i64,
+    title: String,
+    year: Option<i64>,
+    material: String,
+}
+
+/// The top-`k` chunks of one document by cosine similarity to `qvec`.
+fn top_chunks(conn: &Connection, doc_id: i64, qvec: &[f32], k: usize) -> Vec<(String, Option<i64>)> {
+    let Ok(mut stmt) =
+        conn.prepare("SELECT id, text, page FROM doc_chunks WHERE document_id = ?1")
+    else {
+        return Vec::new();
+    };
+    let rows: Vec<(i64, String, Option<i64>)> = stmt
+        .query_map(params![doc_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map(|it| it.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    let mut scored: Vec<(f32, String, Option<i64>)> = Vec::new();
+    for (cid, text, page) in rows {
+        let emb: Option<Vec<u8>> = conn
+            .query_row("SELECT embedding FROM chunk_vec WHERE chunk_id = ?1", params![cid], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        if let Some(bytes) = emb {
+            scored.push((rag::cosine(qvec, &bytes_to_f32(&bytes)), text, page));
+        }
+    }
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().take(k).map(|(_, t, p)| (t, p)).collect()
+}
+
+/// Generate (or regenerate) the wiki page for `concept`: per-paper claim
+/// extraction → synthesis → source-coverage repair, all on the local LLM.
+/// Documents come from the tag with the same name (or `tag_id`), else from
+/// semantic search. Emits `wiki-progress` events; cancellable via [`wiki_cancel`].
+#[tauri::command]
+pub async fn wiki_generate(
+    app: AppHandle,
+    concept: String,
+    tag_id: Option<i64>,
+) -> Result<String, String> {
+    let concept = concept.trim().to_string();
+    if concept.is_empty() {
+        return Err("Scrivi un concetto (o usa il nome di un tag)".into());
+    }
+    let cache = embed_cache_dir(&app);
+    let (enabled, provider, url, model, gpu, ollama_url) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let c = ai_config(&conn);
+        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), c.embed_gpu, c.ollama_url.clone())
+    };
+    if !enabled {
+        return Err("Le funzioni AI sono disattivate (abilitale nelle Impostazioni)".into());
+    }
+    {
+        let state = app.state::<AppState>();
+        state.wiki_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    let cancelled = |app: &AppHandle| {
+        app.state::<AppState>().wiki_cancel.load(std::sync::atomic::Ordering::SeqCst)
+    };
+
+    // 1) Resolve the source documents and gather their material (CPU-bound).
+    let app2 = app.clone();
+    let concept2 = concept.clone();
+    let ollama2 = ollama_url.clone();
+    let materials: Vec<WikiDocMaterial> =
+        tauri::async_runtime::spawn_blocking(move || -> Result<Vec<WikiDocMaterial>, String> {
+            let qvec = embed_query_text(gpu, &ollama2, &cache, &concept2).map_err(|e| e.to_string())?;
+            let state = app2.state::<AppState>();
+            let conn = state.db.lock();
+            let mut ids: Vec<i64> = if let Some(tid) = tag_id {
+                let mut s = conn
+                    .prepare(
+                        "SELECT dt.document_id FROM document_tags dt
+                         JOIN documents d ON d.id = dt.document_id
+                         WHERE dt.tag_id = ?1 AND d.deleted_at IS NULL ORDER BY d.year, d.id",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let v: Vec<i64> = s
+                    .query_map(params![tid], |r| r.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?
+                    .filter_map(Result::ok)
+                    .collect();
+                v
+            } else if let Some(v) = tag_member_ids(&conn, &concept2) {
+                v
+            } else {
+                // Free concept: the most semantically related documents.
+                let mut s = conn
+                    .prepare(
+                        "SELECT v.document_id FROM doc_vec v
+                         JOIN documents d ON d.id = v.document_id
+                         WHERE v.embedding MATCH ?1 AND k = 8 AND d.deleted_at IS NULL
+                         ORDER BY distance",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let v: Vec<i64> = s
+                    .query_map(params![qvec.as_slice().as_bytes()], |r| r.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?
+                    .filter_map(Result::ok)
+                    .collect();
+                v
+            };
+            ids.truncate(8); // LLM-context budget
+            if ids.is_empty() {
+                return Err(
+                    "Nessun documento per questo concetto: usa il nome di un tag esistente o genera l'indice semantico".into(),
+                );
+            }
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                let Some((title, year, abstract_)) = conn
+                    .query_row(
+                        "SELECT COALESCE(title,'Senza titolo'), year, abstract FROM documents WHERE id = ?1",
+                        params![id],
+                        |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, Option<i64>>(1)?,
+                                r.get::<_, Option<String>>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?
+                else {
+                    continue;
+                };
+                let chunks = top_chunks(&conn, id, &qvec, 4);
+                let mut material = String::new();
+                if let Some(a) = abstract_.as_deref().filter(|a| !a.trim().is_empty()) {
+                    material.push_str(&ai::truncate(a, 900));
+                    material.push_str("\n\n");
+                }
+                material.push_str(
+                    &chunks
+                        .iter()
+                        .map(|(t, p)| match p {
+                            Some(p) => format!("[p. {p}] {}", ai::truncate(t, 1100)),
+                            None => ai::truncate(t, 1100),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n---\n"),
+                );
+                out.push(WikiDocMaterial { id, title, year, material });
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+    // 2) Per-paper claim extraction.
+    let client = ai::client().map_err(|e| e.to_string())?;
+    let total = materials.len() + 1;
+    let mut sources: Vec<WikiSource> = Vec::with_capacity(materials.len());
+    let mut blocks: Vec<String> = Vec::new();
+    for (i, m) in materials.iter().enumerate() {
+        if cancelled(&app) {
+            return Err("Generazione annullata".into());
+        }
+        wiki_emit(&app, &concept, "estrazione", i, total);
+        let mut claims: Vec<(String, Option<i64>)> = Vec::new();
+        if !m.material.trim().is_empty() {
+            let prompt = wiki::extraction_prompt(&concept, &m.title, m.year, &m.material);
+            let out = ai::generate(&client, &provider, &url, &model, &prompt, 420)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+            if !out.trim().eq_ignore_ascii_case("niente") {
+                claims = wiki::parse_claims(&out);
+            }
+        }
+        let n = i + 1;
+        if !claims.is_empty() {
+            let lines = claims
+                .iter()
+                .map(|(t, p)| match p {
+                    Some(p) => format!("- {t} (p. {p})"),
+                    None => format!("- {t}"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let year = m.year.map(|y| y.to_string()).unwrap_or_else(|| "s.d.".into());
+            blocks.push(format!("[{n}] {} ({year})\n{lines}", m.title));
+        }
+        sources.push(WikiSource {
+            n,
+            document_id: m.id,
+            title: m.title.clone(),
+            year: m.year,
+            claims: claims.into_iter().map(|(text, page)| WikiClaim { text, page }).collect(),
+            used: false, // set after synthesis, from the actual citations
+        });
+    }
+    if blocks.is_empty() {
+        return Err(
+            "Nessun contenuto pertinente trovato nei documenti. L'indice dei passaggi è costruito? (Chiedi alla libreria → Costruisci indice)".into(),
+        );
+    }
+
+    // 3) Synthesis.
+    if cancelled(&app) {
+        return Err("Generazione annullata".into());
+    }
+    wiki_emit(&app, &concept, "sintesi", materials.len(), total);
+    let mut page = ai::generate(&client, &provider, &url, &model, &wiki::synthesis_prompt(&concept, &blocks), 1100)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    // Belt & braces: drop a leading H1 the model may add despite instructions.
+    if page.trim_start().starts_with("# ") {
+        page = page.trim_start().splitn(2, '\n').nth(1).unwrap_or("").to_string();
+    }
+
+    // 4) Coverage: every source with claims must be cited, or explicitly parked.
+    let must: Vec<(usize, String)> = sources
+        .iter()
+        .filter(|s| !s.claims.is_empty())
+        .map(|s| (s.n, s.title.clone()))
+        .collect();
+    let missing: Vec<(usize, String)> = {
+        let cited = wiki::cited_ns(&page);
+        must.iter().filter(|(n, _)| !cited.contains(n)).cloned().collect()
+    };
+    if !missing.is_empty() && !cancelled(&app) {
+        wiki_emit(&app, &concept, "copertura", materials.len(), total);
+        let repaired = ai::generate(&client, &provider, &url, &model, &wiki::repair_prompt(&concept, &page, &missing), 1300)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        if repaired.len() > 200 && wiki::cited_ns(&repaired).len() >= wiki::cited_ns(&page).len() {
+            page = repaired;
+        }
+    }
+    // Whatever is still missing is declared, never silently dropped.
+    let cited = wiki::cited_ns(&page);
+    let still: Vec<(usize, String)> =
+        must.iter().filter(|(n, _)| !cited.contains(n)).cloned().collect();
+    if !still.is_empty() && !page.contains("## Fonti non") {
+        page.push_str("\n\n## Fonti non integrate\n");
+        for (n, t) in &still {
+            page.push_str(&format!("- [{n}] {t} — la sintesi non ha utilizzato questa fonte.\n"));
+        }
+    }
+    let cited = wiki::cited_ns(&page);
+    for s in &mut sources {
+        s.used = !s.claims.is_empty() && cited.contains(&s.n);
+    }
+
+    // 5) Store (regeneration replaces the page in place).
+    let slug = wiki::slugify(&concept);
+    let mut chars = concept.chars();
+    let title = chars
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_else(|| concept.clone());
+    let doc_ids = materials.iter().map(|m| m.id.to_string()).collect::<Vec<_>>().join(",");
+    let sources_json = serde_json::to_string(&sources).map_err(|e| e.to_string())?;
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        conn.execute(
+            "INSERT INTO wiki_pages (slug, concept, title, content_md, sources_json, doc_ids, model, generated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+             ON CONFLICT(slug) DO UPDATE SET concept = excluded.concept, title = excluded.title,
+               content_md = excluded.content_md, sources_json = excluded.sources_json,
+               doc_ids = excluded.doc_ids, model = excluded.model, generated_at = datetime('now')",
+            params![slug, concept, title, page, sources_json, doc_ids, model],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    wiki_emit(&app, &concept, "done", total, total);
+    Ok(slug)
 }
 
 #[cfg(test)]

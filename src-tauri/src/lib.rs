@@ -18,6 +18,7 @@ mod table;
 mod pdf;
 mod term;
 mod watch;
+mod wiki;
 
 use parking_lot::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -39,6 +40,8 @@ pub struct AppState {
     pub cancel_embed: AtomicBool,
     /// Set to request cancellation of an in-progress RAG indexing job.
     pub rag_cancel: AtomicBool,
+    /// Set to request cancellation of an in-progress wiki generation.
+    pub wiki_cancel: AtomicBool,
     /// The active watched-folder watcher (dropping it stops watching).
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
     /// The running browser-connector loopback server, if any (drop = stop).
@@ -64,6 +67,7 @@ pub fn run() {
                 pdfium_lock: Mutex::new(()),
                 cancel_embed: AtomicBool::new(false),
                 rag_cancel: AtomicBool::new(false),
+                wiki_cancel: AtomicBool::new(false),
                 watcher: Mutex::new(None),
                 connector: Mutex::new(None),
             });
@@ -191,6 +195,11 @@ pub fn run() {
             commands::summarize_document,
             commands::ai_explain,
             commands::autotag_document,
+            commands::wiki_list,
+            commands::wiki_get,
+            commands::wiki_generate,
+            commands::wiki_delete,
+            commands::wiki_cancel,
             commands::document_path,
             commands::copy_pdfs_to_clipboard,
             commands::open_external,
