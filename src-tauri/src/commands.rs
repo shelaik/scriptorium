@@ -3454,6 +3454,31 @@ fn prepare_import_big_stack(
     })
 }
 
+/// Normalize URLs that point at an HTML *viewer* of a PDF rather than at the
+/// file itself. Currently: GitHub blob pages (`github.com/{o}/{r}/blob/…`) →
+/// `raw.githubusercontent.com/{o}/{r}/…`, so both "Aggancia da URL" and the
+/// browser connector accept the link you actually have in the address bar
+/// (the blob page is HTML and would fail the `%PDF` gate). Path segments are
+/// kept percent-encoded as-is; anything unrecognized passes through untouched.
+fn normalize_pdf_url(url: &str) -> String {
+    if let Ok(u) = reqwest::Url::parse(url) {
+        let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+        if u.scheme() == "https" && (host == "github.com" || host == "www.github.com") {
+            let segs: Vec<&str> = u.path().trim_start_matches('/').split('/').collect();
+            // /{owner}/{repo}/blob/{branch}/{path…}
+            if segs.len() >= 5 && segs[2] == "blob" {
+                return format!(
+                    "https://raw.githubusercontent.com/{}/{}/{}",
+                    segs[0],
+                    segs[1],
+                    segs[3..].join("/")
+                );
+            }
+        }
+    }
+    url.to_string()
+}
+
 /// Shared engine for "aggancia da URL": SSRF-guarded download → import pipeline →
 /// best-effort metadata enrichment. Returns `"added"` | `"duplicate"` |
 /// `"not_pdf"`. Emits `library-changed` when a new document lands. Used by the
@@ -3463,6 +3488,7 @@ pub(crate) async fn import_from_url(app: &AppHandle, url: &str) -> Result<&'stat
     if url.is_empty() {
         return Err("URL vuoto".into());
     }
+    let url = &normalize_pdf_url(url);
     // The SSRF guard returns Ok(None) for non-https / internal / non-PDF / oversize.
     // Storage is content-addressed, so `saved` is shared by identical content and
     // must never be deleted here (an existing document row may reference it).
@@ -5297,6 +5323,38 @@ pub fn term_resize(state: State<'_, term::TermState>, cols: u16, rows: u16) -> R
 pub fn term_close(state: State<'_, term::TermState>) -> Result<(), String> {
     term::close(state.inner());
     Ok(())
+}
+
+#[cfg(test)]
+mod url_normalize_tests {
+    use super::normalize_pdf_url;
+
+    #[test]
+    fn rewrites_github_blob_to_raw() {
+        assert_eq!(
+            normalize_pdf_url("https://github.com/deepseek-ai/DeepSpec/blob/main/DSpark_paper.pdf"),
+            "https://raw.githubusercontent.com/deepseek-ai/DeepSpec/main/DSpark_paper.pdf"
+        );
+        // Nested folders and percent-encoded names survive as-is.
+        assert_eq!(
+            normalize_pdf_url("https://github.com/o/r/blob/dev/docs/My%20Paper.pdf"),
+            "https://raw.githubusercontent.com/o/r/dev/docs/My%20Paper.pdf"
+        );
+    }
+
+    #[test]
+    fn leaves_everything_else_untouched() {
+        for u in [
+            "https://arxiv.org/pdf/2401.00001.pdf",
+            "https://github.com/o/r/releases/download/v1/x.pdf", // already a file URL
+            "https://github.com/o/r",                            // too few segments
+            "https://raw.githubusercontent.com/o/r/main/x.pdf",
+            "http://github.com/o/r/blob/main/x.pdf", // non-https: the SSRF gate rejects later
+            "not a url",
+        ] {
+            assert_eq!(normalize_pdf_url(u), u);
+        }
+    }
 }
 
 #[cfg(test)]

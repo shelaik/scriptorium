@@ -374,7 +374,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.2.1";
+  const APP_VERSION = "0.2.2";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1156,6 +1156,70 @@
       status = "Errore connettore: " + e;
     }
   }
+
+  // ---- Appunti intelligenti: quando la finestra torna in primo piano e negli
+  // appunti c'è un link che sembra un PDF, proponi l'aggancio con un toast.
+  // Tutto locale: la lettura avviene solo al focus e non parte nulla finché
+  // l'utente non clicca. Interruttore in Impostazioni → Connettore.
+  let clipAssist = $state(
+    typeof localStorage === "undefined" || localStorage.getItem("scriptorium-clipassist") !== "off",
+  );
+  $effect(() => {
+    try {
+      localStorage.setItem("scriptorium-clipassist", clipAssist ? "on" : "off");
+    } catch {
+      /* ignore */
+    }
+  });
+  let clipOffer = $state<string | null>(null); // URL proposto nel toast
+  let clipBusy = $state(false);
+  let clipSeen = ""; // ultimo testo già proposto/gestito (una proposta per copia)
+
+  /** Il testo copiato sembra un link a un PDF agganciabile? */
+  function looksLikePdfUrl(t: string): boolean {
+    if (!/^https?:\/\/\S+$/i.test(t)) return false;
+    return /\.pdf(\?|#|$)/i.test(t) || /arxiv\.org\/(abs|pdf)\//i.test(t) || /openreview\.net\/pdf/i.test(t);
+  }
+
+  async function checkClipboard() {
+    if (!clipAssist || clipBusy || urlModal || openDoc) return;
+    let t = "";
+    try {
+      t = (await navigator.clipboard.readText()).trim();
+    } catch {
+      return; // appunti vuoti o non testuali: mai disturbare
+    }
+    if (!t || t === clipSeen || !looksLikePdfUrl(t)) return;
+    clipSeen = t;
+    // Le pagine arXiv /abs/ non sono il file: passa direttamente al PDF.
+    clipOffer = t.replace(/arxiv\.org\/abs\//i, "arxiv.org/pdf/");
+  }
+
+  async function clipGrab() {
+    if (!clipOffer || clipBusy) return;
+    const u = clipOffer;
+    clipBusy = true;
+    status = "Aggancio dagli appunti…";
+    try {
+      const r = await addFromUrl(u);
+      status =
+        r === "added"
+          ? "PDF agganciato dagli appunti ✓"
+          : r === "duplicate"
+            ? "Già presente in libreria"
+            : "Quel link non è un PDF diretto";
+      if (r === "added") {
+        await loadDocs();
+        await loadStatus();
+        await loadSidebar();
+      }
+    } catch (e) {
+      status = "Errore: " + e;
+    } finally {
+      clipBusy = false;
+      clipOffer = null;
+    }
+  }
   /** Build the one-line `javascript:` bookmarklet (ASCII-only) for the current port+token. */
   function buildBookmarklet(port: number, token: string): string {
     const js =
@@ -1175,7 +1239,15 @@
       "'}})" +
       ".then(function(r){return r.json()})" +
       ".then(function(j){t.textContent='Scriptorium: '+(L[j.status]||j.status)})" +
-      ".catch(function(){t.textContent='Scriptorium non risponde \\u2014 apri l\\'app'})" +
+      // Strict-CSP sites (e.g. GitHub) block the fetch to loopback: fall back to a
+      // top-level navigation to the connector's /grab page (not subject to
+      // connect-src). URL + token travel in the #fragment, never on the wire.
+      ".catch(function(){t.textContent='Scriptorium: il sito blocca il connettore, continuo in una scheda\\u2026';" +
+      "window.open('http://127.0.0.1:" +
+      port +
+      "/grab#u='+encodeURIComponent(p)+'&t=" +
+      token +
+      "')})" +
       ".finally(function(){setTimeout(function(){t.remove()},4000)});" +
       "})();";
     return "javascript:" + js;
@@ -1997,6 +2069,7 @@
     loadStatus();
     loadSidebar();
     loadConnector();
+    checkClipboard(); // magari l'app è stata aperta subito dopo aver copiato un link
     getWatchedFolder()
       .then((w) => (watchedFolder = w))
       .catch(() => {});
@@ -2574,6 +2647,7 @@
   onclick={() => { headerMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; }}
   onkeydown={onGlobalKey}
   oncontextmenu={onGlobalContext}
+  onfocus={checkClipboard}
 />
 
 {#snippet githubMark()}
@@ -3472,6 +3546,16 @@
   {/if}
 
   <div class="toasts" aria-live="polite">
+    {#if clipOffer}
+      <div class="toast clipoffer">
+        <div class="clipbody">
+          <span class="cliptitle">Link PDF negli appunti</span>
+          <span class="clipurl" title={clipOffer}>{clipOffer}</span>
+        </div>
+        <button class="ghost small" onclick={clipGrab} disabled={clipBusy}>{clipBusy ? "…" : "Aggancia"}</button>
+        <button class="ghost small clipx" onclick={() => (clipOffer = null)} title="Ignora questo link" aria-label="Ignora">✕</button>
+      </div>
+    {/if}
     {#if aiBatch}
       <div class="toast">
         <span>{aiBatch.kind === "summary" ? "Riassunto AI" : "Tag automatici AI"}: {aiBatch.done}/{aiBatch.total}</span>
@@ -3871,6 +3955,7 @@
           <h3>Libreria e organizzazione</h3>
           <ul>
             <li><strong>+ Aggiungi</strong> (in alto): PDF dal disco (anche trascinandoli), libreria <strong>Zotero/Mendeley</strong> via <em>.bib</em>, riferimenti per <em>identificatore</em> (DOI/arXiv/ISBN/PMID) o <em>da URL</em>.</li>
+            <li><strong>Aggancia dal browser</strong>, dal più semplice: (1) <strong>copia il link</strong> del PDF e torna su Scriptorium — compare da solo il suggerimento «Aggancia» (appunti intelligenti, interruttore in Impostazioni → Connettore); (2) il <strong>bookmarklet</strong> — sui siti che bloccano le richieste (es. GitHub) apre una scheda di conferma che completa l'aggancio; (3) punta la <strong>Cartella sorvegliata</strong> su Download e importa automaticamente ciò che scarichi. I link GitHub <code>…/blob/….pdf</code> vengono corretti da soli verso il file vero.</li>
             <li><strong>Tag</strong> colorati e <strong>Collezioni</strong> (anche “smart”, che si popolano da sole). In una collezione, tasto destro → Organizza → <em>Togli da…</em>.</li>
             <li><strong>Filtri</strong> rapidi nella sidebar: Tutti, Preferiti, Da leggere, <strong>Con codice (GitHub)</strong>, <strong>Peer-reviewed</strong>.</li>
             <li><strong>Badge</strong> su card/lista/risultati: <em>preprint</em> / <em>peer-reviewed</em> (e se per un preprint esiste la versione pubblicata, link diretto al DOI).</li>
@@ -4111,6 +4196,21 @@
                 da un <strong>token segreto</strong> incluso solo nel tuo bookmarklet: nessun altro sito può aggiungere
                 PDF. Il download passa dagli stessi controlli anti-abuso del resto dell'app (solo https, solo file PDF).
                 Se disattivi e riattivi il connettore, o cambia la porta, ri-trascina il bookmarklet aggiornato.
+              </p>
+              <p class="sethint">
+                Sui siti che bloccano le richieste dirette (es. <strong>GitHub</strong>), il bookmarklet apre una piccola
+                scheda di conferma di Scriptorium che completa l'aggancio. I link ai PDF nelle pagine GitHub
+                (<code>…/blob/…</code>) vengono riscritti automaticamente verso il file vero.
+              </p>
+
+              <h3 class="settitle">Appunti intelligenti</h3>
+              <label class="setrow" title="Quando torni su Scriptorium, se negli appunti c'è un link che sembra un PDF compare un suggerimento «Aggancia»">
+                <input type="checkbox" bind:checked={clipAssist} /> Suggerisci l'aggancio dei link PDF copiati
+              </label>
+              <p class="sethint">
+                Il metodo più semplice: <strong>copia il link</strong> del PDF nel browser e torna su Scriptorium —
+                comparirà il suggerimento in basso a destra. Gli appunti vengono letti solo quando l'app torna in primo
+                piano e non lasciano mai il tuo computer; non parte nulla finché non clicchi «Aggancia».
               </p>
             {:else if settingsTab === "backup"}
               <p class="dimtext">Salva una copia completa (database + PDF + miniature) in una cartella a tua scelta.</p>
@@ -4458,6 +4558,12 @@
   }
   @keyframes toastin { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
   @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+  /* "appunti intelligenti": the offered clipboard link */
+  .toast.clipoffer { border-color: var(--accent-soft2); }
+  .clipbody { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .cliptitle { font-weight: 700; color: var(--accent); font-size: 12px; }
+  .clipurl { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font-size: 11.5px; }
+  .clipx { color: var(--dim); }
 
   .body { flex: 1; display: flex; min-height: 0; }
   .sidebar {
@@ -5077,6 +5183,7 @@
 
   /* settings modal rows */
   .setrow { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); margin: 6px 0 14px; }
+  .settitle { margin: 18px 0 6px; font-size: 13.5px; font-weight: 700; font-family: var(--serif); color: var(--text); }
   .setlbl { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--dim); margin-bottom: 13px; }
   .setlbl input, .setlbl select { background: var(--field); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 8px 10px; font-size: 14px; outline: none; }
   .sethint { font-size: 11.5px; color: var(--faint); line-height: 1.45; margin-top: 5px; }

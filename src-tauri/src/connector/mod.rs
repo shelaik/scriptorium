@@ -3,10 +3,11 @@
 //!
 //! Security posture — this never does more than the in-app "Aggancia da URL":
 //! - Bound to `127.0.0.1` only, so it is unreachable from the LAN.
-//! - Every request (except the mandatory CORS/PNA preflight) must carry a
-//!   per-install secret token in the `X-Scriptorium-Token` header — kept OUT of
-//!   the URL so it can't leak through the Resource Timing API / logs / Referer.
-//!   A random web page doesn't have the token, so it can't drive imports.
+//! - Every request (except the mandatory CORS/PNA preflight and the static
+//!   `/grab` page below) must carry a per-install secret token in the
+//!   `X-Scriptorium-Token` header — kept OUT of the URL so it can't leak
+//!   through the Resource Timing API / logs / Referer. A random web page
+//!   doesn't have the token, so it can't drive imports.
 //! - The `Host` header must be loopback (defense-in-depth vs DNS-rebinding).
 //! - Unauthenticated requests get a bare `403` with no app identity and no CORS
 //!   headers (so a page can't read the body to fingerprint the install).
@@ -14,6 +15,17 @@
 //!   ([`crate::commands::import_from_url`] → `download_pdf`): https public hosts
 //!   only, `%PDF`-gated, size-capped. Each `/add` runs on its own thread so a
 //!   slow download can't wedge the accept loop.
+//!
+//! CSP fallback (`/grab`): sites with a strict `connect-src` (e.g. github.com)
+//! block the bookmarklet's `fetch` to loopback, so the bookmarklet falls back
+//! to `window.open("…/grab#u=<url>&t=<token>")` — top-level navigation is not
+//! subject to `connect-src`. The URL and token travel in the **fragment**,
+//! which never leaves the browser (not sent on the wire, no Referer), and the
+//! page immediately strips it via `history.replaceState`. `/grab` itself is a
+//! static, unauthenticated, CORS-less HTML page (nothing to read cross-origin;
+//! `X-Frame-Options: DENY` prevents embedding); the actual import still goes
+//! through the token-gated `/add` via a same-origin fetch from that page, so
+//! the authentication model is unchanged.
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -66,6 +78,64 @@ fn json(status: u16, body: &str) -> Response<Cursor<Vec<u8>>> {
 /// app identity — minimizing what an unauthorized caller can learn.
 fn deny(status: u16) -> Response<Cursor<Vec<u8>>> {
     Response::from_string(String::new()).with_status_code(status)
+}
+
+/// The static `/grab` page: reads `#u=<url>&t=<token>` from the fragment,
+/// strips it from the address bar, then performs the authenticated same-origin
+/// `/add` call and shows the outcome. Served without CORS and non-embeddable.
+const GRAB_PAGE: &str = r##"<!doctype html><html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Scriptorium — aggancio PDF</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#f6f2e9;color:#2c2e35;font:15px/1.5 system-ui,sans-serif}
+  .card{background:#fffdf8;border:1px solid #e2dccd;border-radius:16px;
+    box-shadow:0 22px 60px rgba(20,22,28,.18);padding:34px 40px;max-width:480px;text-align:center}
+  h1{font:600 20px/1.3 Georgia,'Times New Roman',serif;margin:0 0 6px;color:#2b4a78}
+  p{margin:6px 0;color:#63666e;font-size:13px}
+  .st{font-size:17px;font-weight:600;color:#2c2e35;margin:14px 0}
+  .ok{color:#1f7a45}.err{color:#b0322a}
+  .spin{display:inline-block;width:18px;height:18px;border:2.5px solid #d6e0ef;
+    border-top-color:#2b4a78;border-radius:50%;animation:r .8s linear infinite;vertical-align:-4px;margin-right:8px}
+  @keyframes r{to{transform:rotate(360deg)}}
+  .u{font-size:11.5px;color:#8c8f97;word-break:break-all;margin-top:14px}
+</style></head><body><div class="card">
+<h1>Scriptorium</h1>
+<div class="st" id="st"><span class="spin"></span>Scarico e importo il PDF…</div>
+<p>Il sito di partenza blocca le richieste dirette al connettore (CSP), quindi l'aggancio continua qui. A PDF importato puoi chiudere questa scheda.</p>
+<div class="u" id="u"></div>
+<script>
+(function(){
+  var h = location.hash.slice(1);
+  history.replaceState(null, "", location.pathname); // niente token nella barra o nello storico di sessione
+  var q = {};
+  h.split("&").forEach(function(kv){ var i = kv.indexOf("="); if (i > 0) q[kv.slice(0, i)] = decodeURIComponent(kv.slice(i + 1)); });
+  var st = document.getElementById("st"), u = document.getElementById("u");
+  function done(msg, cls, close){
+    st.className = "st " + cls; st.textContent = msg;
+    if (close) setTimeout(function(){ window.close(); }, 2500);
+  }
+  if (!q.u || !q.t) { done("Link non valido: riprova dal bookmarklet.", "err"); return; }
+  u.textContent = q.u;
+  var L = { added: "PDF agganciato ✓", duplicate: "Già in libreria", not_pdf: "Il link non è un PDF diretto", error: "Errore durante il download" };
+  fetch("/add?url=" + encodeURIComponent(q.u), { headers: { "X-Scriptorium-Token": q.t } })
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      var ok = j.status === "added" || j.status === "duplicate";
+      done(L[j.status] || j.status, ok ? "ok" : "err", j.status === "added");
+    })
+    .catch(function(){ done("Scriptorium non risponde: l'app è chiusa?", "err"); });
+})();
+</script></div></body></html>"##;
+
+fn grab_page() -> Response<Cursor<Vec<u8>>> {
+    Response::from_string(GRAB_PAGE.to_string())
+        .with_status_code(200)
+        .with_header(hdr("Content-Type", "text/html; charset=utf-8"))
+        .with_header(hdr("X-Frame-Options", "DENY"))
+        .with_header(hdr("Referrer-Policy", "no-referrer"))
+        .with_header(hdr("Cache-Control", "no-store"))
 }
 
 /// The value of the first header matching `name` (case-insensitive).
@@ -123,20 +193,17 @@ fn handle(app: &AppHandle, token: &Arc<String>, request: tiny_http::Request) {
         return;
     }
 
-    // --- Authenticate every real request FIRST (before routing) ---
     // Defense-in-depth vs DNS-rebinding: the Host must be loopback. (A rebinding
     // fetch to evil.com→127.0.0.1 still sends `Host: evil.com`; JS can't forge
-    // the Host header.)
+    // the Host header.) Enforced for EVERY route, /grab included — otherwise a
+    // rebound origin could read the static page and fingerprint the install.
     let host_ok = header_value(&request, "Host")
         .map(|h| {
             let h = h.to_ascii_lowercase();
             h.starts_with("127.0.0.1") || h.starts_with("localhost")
         })
         .unwrap_or(false);
-    let token_ok = header_value(&request, TOKEN_HEADER)
-        .map(|t| ct_eq(&t, token))
-        .unwrap_or(false);
-    if !host_ok || !token_ok {
+    if !host_ok {
         let _ = request.respond(deny(403));
         return;
     }
@@ -153,6 +220,22 @@ fn handle(app: &AppHandle, token: &Arc<String>, request: tiny_http::Request) {
                 target = v.into_owned();
             }
         }
+    }
+
+    // The CSP-fallback landing page: static, tokenless (credentials arrive in the
+    // URL fragment, which the browser never sends to us — the page itself makes
+    // the authenticated /add call). Everything else still requires the token.
+    if request.method() == &Method::Get && path == "/grab" {
+        let _ = request.respond(grab_page());
+        return;
+    }
+
+    let token_ok = header_value(&request, TOKEN_HEADER)
+        .map(|t| ct_eq(&t, token))
+        .unwrap_or(false);
+    if !token_ok {
+        let _ = request.respond(deny(403));
+        return;
     }
 
     if path == "/ping" {
