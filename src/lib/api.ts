@@ -699,3 +699,39 @@ export const wikiGenerate = (concept: string, tagId?: number | null) =>
 export const wikiDelete = (slug: string) => invoke<void>("wiki_delete", { slug });
 /** Ask the running generation to stop at the next step. */
 export const wikiCancel = () => invoke<void>("wiki_cancel");
+
+// ===== Sintesi sulla selezione + percorso di lettura =====
+export interface ReviewSource {
+  n: number;
+  document_id: number;
+  title: string;
+  year: number | null;
+  citekey: string | null;
+}
+export interface AiDocResult {
+  /** Markdown grezzo (citazioni come [n]). */
+  md: string;
+  /** HTML sanificato con le [n] linkate a #src-n. */
+  html: string;
+  sources: ReviewSource[];
+}
+/** Confronto strutturato di 2-3 paper (tabella + sintesi, AI locale). */
+export const compareDocuments = (ids: number[]) =>
+  invoke<AiDocResult>("compare_documents", { ids });
+/** Mini rassegna della letteratura sulla selezione (2-10 paper, AI locale). */
+export const generateReview = (ids: number[]) =>
+  invoke<AiDocResult>("generate_review", { ids });
+/** Raccoglie i risultati quantitativi dei paper in un'unica griglia confrontabile. */
+export const harvestResults = (ids: number[]) =>
+  invoke<string[][]>("harvest_results", { ids });
+
+export interface PathStep {
+  document_id: number | null;
+  title: string;
+  year: number | null;
+  reason: string;
+  in_library: boolean;
+  doi: string | null;
+}
+/** Cosa leggere prima per capire un paper (grafo citazioni + embedding, senza LLM). */
+export const readingPath = (id: number) => invoke<PathStep[]>("reading_path", { id });

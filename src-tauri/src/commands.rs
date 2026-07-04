@@ -5833,6 +5833,492 @@ pub async fn wiki_generate(
     Ok(slug)
 }
 
+// ===== Sintesi sulla selezione: confronto, rassegna, raccolta risultati =====
+// Tre workflow che riusano la meccanica della Wiki (estrazione ancorata per
+// documento → sintesi con citazioni [n]); condividono l'evento `wiki-progress`
+// e la cancellazione `wiki_cancel` (il frontend li serializza comunque).
+
+/// A document prepared for a synthesis call (internal).
+struct SynthDoc {
+    id: i64,
+    title: String,
+    year: Option<i64>,
+    citekey: Option<String>,
+    material: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct ReviewSource {
+    pub n: usize,
+    pub document_id: i64,
+    pub title: String,
+    pub year: Option<i64>,
+    pub citekey: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct AiDocResult {
+    /// The synthesized markdown (citations as plain [n]).
+    pub md: String,
+    /// Sanitized HTML with [n] linked to #src-n for the UI.
+    pub html: String,
+    pub sources: Vec<ReviewSource>,
+}
+
+/// Digit density of a string — crude but effective proxy for "results table".
+fn digit_density(s: &str) -> f32 {
+    if s.is_empty() {
+        return 0.0;
+    }
+    s.chars().filter(|c| c.is_ascii_digit()).count() as f32 / s.chars().count() as f32
+}
+
+/// Gather title/year/citekey + grounded material for each document.
+/// `digit_focus` ranks chunks by numeric density (for result harvesting)
+/// instead of taking the opening chunks (contributions/method).
+fn synth_docs(conn: &Connection, ids: &[i64], digit_focus: bool) -> Result<Vec<SynthDoc>, String> {
+    let mut out = Vec::with_capacity(ids.len());
+    for &id in ids {
+        let Some((title, year, citekey, abstract_, summary)) = conn
+            .query_row(
+                "SELECT COALESCE(title,'Senza titolo'), year, citekey, abstract, summary
+                 FROM documents WHERE id = ?1 AND deleted_at IS NULL",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<i64>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+        else {
+            continue;
+        };
+        let mut chunks: Vec<(i64, String, Option<i64>)> = {
+            let mut s = conn
+                .prepare("SELECT ord, text, page FROM doc_chunks WHERE document_id = ?1 ORDER BY ord")
+                .map_err(|e| e.to_string())?;
+            let v: Vec<(i64, String, Option<i64>)> = s
+                .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok)
+                .collect();
+            v
+        };
+        if digit_focus {
+            chunks.sort_by(|a, b| {
+                digit_density(&b.1)
+                    .partial_cmp(&digit_density(&a.1))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        chunks.truncate(3);
+        let mut material = String::new();
+        if let Some(a) = abstract_.as_deref().filter(|a| !a.trim().is_empty()) {
+            material.push_str(&ai::truncate(a, 700));
+            material.push_str("\n\n");
+        }
+        if let Some(s) = summary.as_deref().filter(|s| !s.trim().is_empty()) {
+            material.push_str(&ai::truncate(s, 500));
+            material.push_str("\n\n");
+        }
+        material.push_str(
+            &chunks
+                .iter()
+                .map(|(_, t, p)| match p {
+                    Some(p) => format!("[p. {p}] {}", ai::truncate(t, 1000)),
+                    None => ai::truncate(t, 1000),
+                })
+                .collect::<Vec<_>>()
+                .join("\n---\n"),
+        );
+        out.push(SynthDoc { id, title, year, citekey, material });
+    }
+    if out.is_empty() {
+        return Err("Nessun documento valido nella selezione".into());
+    }
+    Ok(out)
+}
+
+/// AI config + client, or the standard Italian "AI disabled" error.
+fn ai_ready(app: &AppHandle) -> Result<(reqwest::Client, String, String, String), String> {
+    let (enabled, provider, url, model) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let c = ai_config(&conn);
+        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone())
+    };
+    if !enabled {
+        return Err("Le funzioni AI sono disattivate (abilitale nelle Impostazioni)".into());
+    }
+    let client = ai::client().map_err(|e| e.to_string())?;
+    Ok((client, provider, url, model))
+}
+
+fn synth_sources(docs: &[SynthDoc]) -> Vec<ReviewSource> {
+    docs.iter()
+        .enumerate()
+        .map(|(i, d)| ReviewSource {
+            n: i + 1,
+            document_id: d.id,
+            title: d.title.clone(),
+            year: d.year,
+            citekey: d.citekey.clone(),
+        })
+        .collect()
+}
+
+fn ai_doc_result(md: String, docs: &[SynthDoc]) -> AiDocResult {
+    let html = wiki::render_html(&wiki::link_citations(&md));
+    AiDocResult { md, html, sources: synth_sources(docs) }
+}
+
+/// Structured comparison of 2-3 selected papers (one grounded LLM call).
+#[tauri::command]
+pub async fn compare_documents(app: AppHandle, ids: Vec<i64>) -> Result<AiDocResult, String> {
+    if !(2..=3).contains(&ids.len()) {
+        return Err("Seleziona 2 o 3 documenti da confrontare".into());
+    }
+    let (client, provider, url, model) = ai_ready(&app)?;
+    let docs = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        synth_docs(&conn, &ids, false)?
+    };
+    wiki_emit(&app, "Confronto", "sintesi", 0, 1);
+    let blocks = docs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let year = d.year.map(|y| y.to_string()).unwrap_or_else(|| "s.d.".into());
+            format!("[{}] «{}» ({year})\n{}", i + 1, d.title, d.material)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n=====\n\n");
+    let prompt = format!(
+        "Confronta in italiano i {n} paper qui sotto, usando SOLO il materiale fornito.\n\
+         Struttura richiesta (markdown):\n\
+         1. una tabella con colonna «Aspetto» e una colonna per paper (intestazioni [1], [2]…),\n\
+            righe: Obiettivo · Approccio/Metodo · Dati o dominio · Risultati chiave · Limiti;\n\
+            celle brevi (max ~15 parole); se il materiale non dice nulla scrivi \"—\";\n\
+         2. sezione \"## In sintesi\": 2-4 punti su cosa distingue ciascun paper e cosa aggiunge \
+            rispetto agli altri, citando [n];\n\
+         niente premesse, niente titolo iniziale, non inventare nulla.\n\n{blocks}",
+        n = docs.len()
+    );
+    let md = ai::generate(&client, &provider, &url, &model, &prompt, 900)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    wiki_emit(&app, "Confronto", "done", 1, 1);
+    Ok(ai_doc_result(md, &docs))
+}
+
+/// Mini literature review of the selection (per-paper claims → synthesis),
+/// with [n] citations mapped to citekeys for LaTeX/Pandoc export.
+#[tauri::command]
+pub async fn generate_review(app: AppHandle, ids: Vec<i64>) -> Result<AiDocResult, String> {
+    if !(2..=10).contains(&ids.len()) {
+        return Err("Servono da 2 a 10 documenti per una rassegna".into());
+    }
+    let (client, provider, url, model) = ai_ready(&app)?;
+    {
+        let state = app.state::<AppState>();
+        state.wiki_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    let docs = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        synth_docs(&conn, &ids, false)?
+    };
+    let total = docs.len() + 1;
+    let mut blocks = Vec::with_capacity(docs.len());
+    for (i, d) in docs.iter().enumerate() {
+        if app.state::<AppState>().wiki_cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Generazione annullata".into());
+        }
+        wiki_emit(&app, "Rassegna", "estrazione", i, total);
+        let year = d.year.map(|y| y.to_string()).unwrap_or_else(|| "s.d.".into());
+        let prompt = format!(
+            "Dal materiale del paper «{}» ({year}) estrai 4-6 affermazioni chiave su: contributo \
+             principale, metodo, risultati, limiti. Una per riga con \"- \", italiano, fattuali, \
+             SOLO dal materiale.\n\nMATERIALE:\n{}",
+            d.title, d.material
+        );
+        let out = ai::generate(&client, &provider, &url, &model, &prompt, 420)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        blocks.push(format!("[{}] {} ({year})\n{}", i + 1, d.title, out.trim()));
+    }
+    wiki_emit(&app, "Rassegna", "sintesi", docs.len(), total);
+    let prompt = format!(
+        "Scrivi in italiano una breve rassegna della letteratura (stile \"related work\", 300-500 \
+         parole) basata ESCLUSIVAMENTE sulle affermazioni per paper qui sotto.\n\
+         Regole: organizza per temi (non paper per paper); confronta gli approcci; evidenzia \
+         disaccordi e lacune aperte; cita OGNI paper almeno una volta con [n] subito dopo le \
+         affermazioni che ne derivano; niente titolo iniziale, comincia con \"## Panorama\"; \
+         chiudi con \"## Lacune aperte\" (2-3 punti). Non inventare nulla.\n\n{}",
+        blocks.join("\n\n")
+    );
+    let mut md = ai::generate(&client, &provider, &url, &model, &prompt, 1100)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    // Coverage, same policy as the wiki: nothing dropped silently.
+    let cited = wiki::cited_ns(&md);
+    let missing: Vec<String> = docs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !cited.contains(&(i + 1)))
+        .map(|(i, d)| format!("- [{}] {}", i + 1, d.title))
+        .collect();
+    if !missing.is_empty() {
+        md.push_str("\n\n## Fonti non integrate\n");
+        md.push_str(&missing.join("\n"));
+        md.push('\n');
+    }
+    wiki_emit(&app, "Rassegna", "done", total, total);
+    Ok(ai_doc_result(md, &docs))
+}
+
+/// Harvest quantitative results across the selection into one comparable grid
+/// (columns: Paper · Metodo · Dataset · Metrica · Valore). Per-paper grounded
+/// extraction; merging is deterministic.
+#[tauri::command]
+pub async fn harvest_results(app: AppHandle, ids: Vec<i64>) -> Result<Vec<Vec<String>>, String> {
+    if !(1..=8).contains(&ids.len()) {
+        return Err("Seleziona da 1 a 8 documenti".into());
+    }
+    let (client, provider, url, model) = ai_ready(&app)?;
+    {
+        let state = app.state::<AppState>();
+        state.wiki_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    let docs = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        synth_docs(&conn, &ids, true)?
+    };
+    let total = docs.len();
+    let mut grid: Vec<Vec<String>> = vec![vec![
+        "Paper".into(),
+        "Metodo".into(),
+        "Dataset".into(),
+        "Metrica".into(),
+        "Valore".into(),
+    ]];
+    for (i, d) in docs.iter().enumerate() {
+        if app.state::<AppState>().wiki_cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Generazione annullata".into());
+        }
+        wiki_emit(&app, "Risultati", "estrazione", i, total);
+        let prompt = format!(
+            "Dal materiale del paper «{}» estrai i risultati quantitativi principali (max 8).\n\
+             Formato: una riga per risultato, ESATTAMENTE 4 campi separati da \" | \":\n\
+             metodo | dataset o benchmark | metrica | valore\n\
+             Esempio: AlphaZero | Go | Elo | 5185\n\
+             Usa SOLO il materiale (valori testuali, non calcolare nulla); se non ci sono \
+             risultati quantitativi rispondi esattamente: NIENTE.\n\nMATERIALE:\n{}",
+            d.title, d.material
+        );
+        let out = ai::generate(&client, &provider, &url, &model, &prompt, 400)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        if out.trim().eq_ignore_ascii_case("niente") {
+            continue;
+        }
+        let short = if d.title.chars().count() > 40 {
+            format!("[{}] {}…", i + 1, d.title.chars().take(38).collect::<String>())
+        } else {
+            format!("[{}] {}", i + 1, d.title)
+        };
+        for line in out.lines() {
+            let line = line.trim().trim_start_matches("- ").trim_start_matches('|');
+            let cells: Vec<String> =
+                line.split('|').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
+            if cells.len() == 4 && !cells[0].eq_ignore_ascii_case("metodo") {
+                grid.push(vec![
+                    short.clone(),
+                    cells[0].clone(),
+                    cells[1].clone(),
+                    cells[2].clone(),
+                    cells[3].clone(),
+                ]);
+            }
+        }
+    }
+    if grid.len() == 1 {
+        return Err("Nessun risultato quantitativo trovato nei documenti selezionati".into());
+    }
+    wiki_emit(&app, "Risultati", "done", total, total);
+    Ok(grid)
+}
+
+// ===== Percorso di lettura: prerequisiti per capire un paper =====
+
+#[derive(serde::Serialize)]
+pub struct PathStep {
+    pub document_id: Option<i64>,
+    pub title: String,
+    pub year: Option<i64>,
+    pub reason: String,
+    pub in_library: bool,
+    pub doi: Option<String>,
+}
+
+/// What to read before a paper: its in-library references (declared
+/// foundations), semantically close but earlier documents, and its most
+/// frequently-cited references you don't own yet. No LLM involved.
+#[tauri::command]
+pub fn reading_path(state: State<'_, AppState>, id: i64) -> Result<Vec<PathStep>, String> {
+    let conn = state.db.lock();
+    let (year, _title): (Option<i64>, String) = conn
+        .query_row(
+            "SELECT year, COALESCE(title,'') FROM documents WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "documento non trovato".to_string())?;
+
+    let mut steps: Vec<PathStep> = Vec::new();
+    let mut seen: std::collections::HashSet<i64> = std::iter::once(id).collect();
+
+    // 1) In-library references: the paper's declared foundations.
+    {
+        let mut s = conn
+            .prepare(
+                "SELECT DISTINCT d.id, COALESCE(d.title,'Senza titolo'), d.year, d.doi
+                 FROM document_references dr
+                 JOIN documents d ON LOWER(d.doi) = LOWER(dr.ref_doi)
+                 WHERE dr.document_id = ?1 AND d.deleted_at IS NULL AND d.id != ?1
+                 ORDER BY d.year",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<(i64, String, Option<i64>, Option<String>)> = s
+            .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        for (did, title, y, doi) in rows.into_iter().take(6) {
+            seen.insert(did);
+            steps.push(PathStep {
+                document_id: Some(did),
+                title,
+                year: y,
+                reason: "Citato direttamente dal paper: è un suo fondamento dichiarato".into(),
+                in_library: true,
+                doi,
+            });
+        }
+    }
+
+    // 2) Semantically close and earlier documents you already own.
+    let emb: Option<Vec<u8>> = conn
+        .query_row("SELECT embedding FROM doc_vec WHERE document_id = ?1", params![id], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(e) = emb {
+        let mut s = conn
+            .prepare(
+                "SELECT v.document_id FROM doc_vec v JOIN documents d ON d.id = v.document_id
+                 WHERE v.embedding MATCH ?1 AND k = 12 AND d.deleted_at IS NULL ORDER BY distance",
+            )
+            .map_err(|e| e.to_string())?;
+        let cand: Vec<i64> = s
+            .query_map(params![e], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        let mut added = 0;
+        for did in cand {
+            if added >= 4 || seen.contains(&did) {
+                continue;
+            }
+            let row = conn
+                .query_row(
+                    "SELECT COALESCE(title,'Senza titolo'), year, doi FROM documents WHERE id = ?1",
+                    params![did],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<String>>(2)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if let Some((title, y, doi)) = row {
+                // "earlier" only when both years are known; otherwise still useful.
+                if let (Some(ty), Some(cy)) = (year, y) {
+                    if cy > ty {
+                        continue;
+                    }
+                }
+                seen.insert(did);
+                added += 1;
+                steps.push(PathStep {
+                    document_id: Some(did),
+                    title,
+                    year: y,
+                    reason: "Molto vicino per contenuti e precedente: prepara il contesto".into(),
+                    in_library: true,
+                    doi,
+                });
+            }
+        }
+    }
+
+    // In-library steps in reading order: oldest first.
+    steps.sort_by_key(|s| s.year.unwrap_or(i64::MAX));
+
+    // 3) References you don't own, ranked by how often your library cites them.
+    {
+        let mut s = conn
+            .prepare(
+                "SELECT dr.ref_doi, MAX(COALESCE(dr.raw,'')),
+                        (SELECT COUNT(DISTINCT dr2.document_id) FROM document_references dr2
+                         WHERE LOWER(dr2.ref_doi) = LOWER(dr.ref_doi)) AS freq
+                 FROM document_references dr
+                 WHERE dr.document_id = ?1 AND dr.ref_doi IS NOT NULL AND dr.ref_doi != ''
+                   AND NOT EXISTS (SELECT 1 FROM documents d WHERE LOWER(d.doi) = LOWER(dr.ref_doi)
+                                   AND d.deleted_at IS NULL)
+                 GROUP BY LOWER(dr.ref_doi) ORDER BY freq DESC LIMIT 4",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<(String, String, i64)> = s
+            .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        for (doi, raw, freq) in rows {
+            let title = if raw.trim().is_empty() {
+                doi.clone()
+            } else {
+                ai::truncate(raw.trim(), 110)
+            };
+            steps.push(PathStep {
+                document_id: None,
+                title,
+                year: None,
+                reason: if freq > 1 {
+                    format!("Riferimento non in libreria, citato da {freq} tuoi documenti")
+                } else {
+                    "Riferimento del paper non ancora in libreria".into()
+                },
+                in_library: false,
+                doi: Some(doi),
+            });
+        }
+    }
+
+    if steps.is_empty() {
+        return Err(
+            "Nessun prerequisito trovato: servono i riferimenti (chip «✦ senza metadati» in alto) o l'indice semantico".into(),
+        );
+    }
+    Ok(steps)
+}
+
 #[cfg(test)]
 mod url_normalize_tests {
     use super::normalize_pdf_url;

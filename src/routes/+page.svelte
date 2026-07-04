@@ -112,9 +112,16 @@
     wikiGenerate,
     wikiDelete,
     wikiCancel,
+    compareDocuments,
+    generateReview,
+    harvestResults,
+    readingPath,
+    exportTable,
     type SimilarityGraph,
     type WikiPageMeta,
     type WikiPage,
+    type AiDocResult,
+    type PathStep,
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
   import MetaEditor from "$lib/MetaEditor.svelte";
@@ -382,7 +389,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.3.0";
+  const APP_VERSION = "0.4.0";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2379,6 +2386,7 @@
       { id: "ai-tag", label: "Tag automatici", hint: "Suggerisce e assegna tag tematici", disabled: !aiStat?.enabled || aiBusyAny, action: () => autotagDoc(d) },
       { id: "ai-ask", label: "Chiedi al documento", hint: "Domande in linguaggio naturale su questo PDF", disabled: !aiStat?.enabled, action: () => askAboutDoc(d) },
       { id: "ai-rel", label: "Correlati", icon: I.near, hint: "I documenti più vicini per significato (indice semantico)", action: () => setFilter({ kind: "related", id: d.id, label: d.title ?? "documento" }) },
+      { id: "ai-path", label: "Percorso di lettura", icon: I.map, hint: "Cosa leggere prima per capirlo: fondamenti citati + vicini precedenti (senza LLM)", action: () => openReadingPath(d) },
     ];
     const orgKids: RadialItem[] = [
       { id: "or-meta", label: "Modifica metadati", icon: I.edit, action: () => (editingId = d.id) },
@@ -2424,6 +2432,11 @@
     if (aiEnabled) {
       items.push({ id: "s-sum", label: "Riassumi (AI)", icon: I.ai, disabled: aiBusyAny, hint: "Un riassunto per ogni selezionato", action: () => runBatchAi("summary") });
       items.push({ id: "s-tags", label: "Tag automatici (AI)", icon: I.tag, disabled: aiBusyAny, action: () => runBatchAi("tags") });
+      if (ids.length >= 2 && ids.length <= 3)
+        items.push({ id: "s-cmp", label: "Confronta (AI)", icon: I.near, disabled: aiBusyAny || wikiBusy, hint: "Tabella: obiettivo, metodo, dati, risultati, limiti — e cosa aggiunge ciascuno", action: () => runCompare() });
+      if (ids.length >= 2)
+        items.push({ id: "s-rev", label: "Rassegna (AI)", icon: I.quote, disabled: aiBusyAny || wikiBusy, hint: "Mini related-work per temi, con citazioni [n] e citekey pronti", action: () => runReview() });
+      items.push({ id: "s-res", label: "Tabella risultati (AI)", icon: I.grid, disabled: aiBusyAny || wikiBusy, hint: "Raccogli metriche e numeri dei paper in un'unica tabella (CSV/Excel)", action: () => runHarvest() });
     }
     if (tagKids.length) items.push({ id: "s-tag", label: "Aggiungi tag", icon: I.tag, children: tagKids });
     if (collKids.length) items.push({ id: "s-coll", label: "In collezione", icon: I.folder, children: collKids });
@@ -2498,6 +2511,7 @@
         hint: "Manutenzione e diagnostica",
         children: [
           { id: "gt-meta", label: "Recupera metadati", badge: needsMeta > 0 ? String(needsMeta) : undefined, disabled: enriching || docs.length === 0, hint: "Da Crossref via DOI: autori, anno, rivista, riferimenti", action: () => enrichMeta() },
+          { id: "gt-rev", label: "Rassegna della vista (AI)", disabled: displayed.length < 2 || wikiBusy, hint: "Mini related-work dei documenti mostrati (max 10)", action: () => runReview(displayed.map((d) => d.id)) },
           { id: "gt-health", label: "Salute libreria", icon: I.heal, hint: "File mancanti, PDF senza testo, duplicati…", action: () => openHealth() },
           { id: "gt-gaps", label: "Gap di citazioni", hint: "I DOI più citati dai tuoi paper che ancora non possiedi", action: () => openGaps() },
           { id: "gt-dup", label: "Duplicati", action: () => setFilter({ kind: "duplicates" }) },
@@ -2807,6 +2821,157 @@
         node.removeEventListener("click", handler);
       },
     };
+  }
+
+  // ---- Sintesi sulla selezione (confronto / rassegna / tabella risultati) ----
+  let aiDoc = $state<(AiDocResult & { kind: string; title: string }) | null>(null);
+  let resultsGrid = $state<string[][] | null>(null);
+  let pathModal = $state<{ doc: DocumentItem; steps: PathStep[] } | null>(null);
+
+  async function runCompare() {
+    const ids = selected.slice(0, 3);
+    if (ids.length < 2) {
+      status = "Seleziona 2 o 3 documenti da confrontare";
+      return;
+    }
+    if (wikiBusy) return;
+    wikiBusy = true;
+    try {
+      const r = await compareDocuments(ids);
+      aiDoc = { ...r, kind: "Confronto", title: `Confronto di ${ids.length} paper` };
+    } catch (e) {
+      status = "Confronto: " + e;
+    } finally {
+      wikiBusy = false;
+      wikiProg = null;
+    }
+  }
+  async function runReview(onlyIds?: number[]) {
+    const ids = (onlyIds ?? (selected.length ? selected : displayed.map((d) => d.id))).slice(0, 10);
+    if (ids.length < 2) {
+      status = "Servono almeno 2 documenti per una rassegna";
+      return;
+    }
+    if (wikiBusy) return;
+    wikiBusy = true;
+    try {
+      const r = await generateReview(ids);
+      aiDoc = { ...r, kind: "Rassegna", title: `Rassegna di ${ids.length} paper` };
+    } catch (e) {
+      status = "Rassegna: " + e;
+    } finally {
+      wikiBusy = false;
+      wikiProg = null;
+    }
+  }
+  async function runHarvest() {
+    const ids = selected.slice(0, 8);
+    if (!ids.length) {
+      status = "Seleziona i documenti da cui raccogliere i risultati";
+      return;
+    }
+    if (wikiBusy) return;
+    wikiBusy = true;
+    try {
+      resultsGrid = await harvestResults(ids);
+    } catch (e) {
+      status = "Risultati: " + e;
+    } finally {
+      wikiBusy = false;
+      wikiProg = null;
+    }
+  }
+  /** Copy the synthesis as markdown, or with [n] rewritten to \cite{} / [@key]. */
+  async function copyAiDoc(fmt: "md" | "latex" | "pandoc") {
+    if (!aiDoc) return;
+    let text = aiDoc.md;
+    if (fmt !== "md") {
+      for (const s of aiDoc.sources) {
+        const key = s.citekey ?? `doc${s.document_id}`;
+        const rep = fmt === "latex" ? `\\cite{${key}}` : `[@${key}]`;
+        text = text.split(`[${s.n}]`).join(rep);
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      status = fmt === "md" ? "Markdown copiato" : fmt === "latex" ? "Copiato con \\cite{…}" : "Copiato con [@citekey]";
+    } catch {
+      status = "Impossibile copiare negli appunti";
+    }
+  }
+  async function saveAiDoc() {
+    if (!aiDoc) return;
+    const path = await save({
+      defaultPath: aiDoc.kind === "Rassegna" ? "rassegna.md" : "confronto.md",
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (!path) return;
+    try {
+      const sources = aiDoc.sources
+        .map((s) => `[${s.n}] ${s.title}${s.year ? ` (${s.year})` : ""}${s.citekey ? ` — @${s.citekey}` : ""}`)
+        .join("\n");
+      await writeTextFile(path, `${aiDoc.md}\n\n---\n### Fonti\n${sources}\n`);
+      status = "Salvato ✓";
+    } catch (e) {
+      status = "Errore salvataggio: " + e;
+    }
+  }
+  /** [n] links inside the synthesis open the source document. */
+  function aiDocLinksAction(node: HTMLElement) {
+    const handler = (e: MouseEvent) => {
+      const a = (e.target as HTMLElement).closest("a");
+      if (!a) return;
+      const href = a.getAttribute("href") ?? "";
+      if (href.startsWith("#src-")) {
+        e.preventDefault();
+        const s = aiDoc?.sources.find((x) => x.n === parseInt(href.slice(5), 10));
+        if (s) openById(s.document_id);
+      } else if (/^https?:/i.test(href)) {
+        e.preventDefault();
+        openInBrowser(href);
+      }
+    };
+    node.addEventListener("click", handler);
+    return {
+      destroy() {
+        node.removeEventListener("click", handler);
+      },
+    };
+  }
+  async function exportResults(fmt: "csv" | "md" | "xlsx") {
+    if (!resultsGrid) return;
+    const path = await save({
+      defaultPath: `risultati.${fmt}`,
+      filters: [{ name: fmt.toUpperCase(), extensions: [fmt] }],
+    });
+    if (!path) return;
+    try {
+      await exportTable(resultsGrid, fmt, path);
+      status = "Tabella esportata ✓";
+    } catch (e) {
+      status = "Errore export: " + e;
+    }
+  }
+
+  // ---- Percorso di lettura (grafo citazioni + embedding, senza LLM) ----
+  async function openReadingPath(d: DocumentItem) {
+    try {
+      pathModal = { doc: d, steps: await readingPath(d.id) };
+    } catch (e) {
+      status = "Percorso di lettura: " + e;
+    }
+  }
+  async function addPathStep(step: PathStep) {
+    if (!step.doi) return;
+    try {
+      await addByIdentifiers([step.doi]);
+      status = "Riferimento aggiunto alla libreria ✓ (usa «Allega PDF…» o Trova PDF per il file)";
+      await loadDocs();
+      await loadSidebar();
+      if (pathModal) pathModal = { doc: pathModal.doc, steps: await readingPath(pathModal.doc.id) };
+    } catch (e) {
+      status = "Errore: " + e;
+    }
   }
 
   // Status messages surface as a quiet toast that fades on its own.
@@ -3788,6 +3953,88 @@
     </div>
   {/if}
 
+  {#if aiDoc}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) aiDoc = null; }} role="presentation">
+      <div class="idmodal aidocmodal" role="dialog" tabindex="-1" aria-label={aiDoc.title} onclick={(e) => e.stopPropagation()}>
+        <h2>{aiDoc.title}</h2>
+        <article class="wikihtml aidochtml" use:aiDocLinksAction>
+          <!-- HTML sanificato dal backend (ammonia) -->
+          {@html aiDoc.html}
+        </article>
+        <div class="aidocsrc">
+          {#each aiDoc.sources as s (s.n)}
+            <button class="hflink small" onclick={() => openById(s.document_id)} title="Apri il documento">[{s.n}] {s.title}{s.year ? ` (${s.year})` : ""}</button>
+          {/each}
+        </div>
+        <div class="modactions">
+          <button class="ghost small" onclick={() => copyAiDoc("md")}>Copia Markdown</button>
+          {#if aiDoc.kind === "Rassegna"}
+            <button class="ghost small" onclick={() => copyAiDoc("latex")} title={"Le [n] diventano \\cite{citekey}"}>Copia per LaTeX</button>
+            <button class="ghost small" onclick={() => copyAiDoc("pandoc")} title="Le [n] diventano [@citekey]">Copia per Pandoc</button>
+          {/if}
+          <button class="ghost small" onclick={saveAiDoc}>Salva .md…</button>
+          <button class="primary" onclick={() => (aiDoc = null)}>Chiudi</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if resultsGrid}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) resultsGrid = null; }} role="presentation">
+      <div class="idmodal gridmodal" role="dialog" tabindex="-1" aria-label="Tabella risultati" onclick={(e) => e.stopPropagation()}>
+        <h2>Risultati raccolti dai paper</h2>
+        <p class="dimtext">Valori estratti testualmente dai documenti selezionati (verifica sempre sul PDF: clic sul paper per aprirlo).</p>
+        <div class="gridwrap">
+          <table class="resgrid">
+            <thead><tr>{#each resultsGrid[0] as h, hi (hi)}<th>{h}</th>{/each}</tr></thead>
+            <tbody>
+              {#each resultsGrid.slice(1) as row, ri (ri)}
+                <tr>{#each row as cell, ci (ci)}<td>{cell}</td>{/each}</tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        <div class="modactions">
+          <button class="ghost small" onclick={() => exportResults("csv")}>CSV…</button>
+          <button class="ghost small" onclick={() => exportResults("md")}>Markdown…</button>
+          <button class="ghost small" onclick={() => exportResults("xlsx")}>Excel…</button>
+          <button class="primary" onclick={() => (resultsGrid = null)}>Chiudi</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if pathModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) pathModal = null; }} role="presentation">
+      <div class="idmodal pathmodal" role="dialog" tabindex="-1" aria-label="Percorso di lettura" onclick={(e) => e.stopPropagation()}>
+        <h2>Percorso di lettura</h2>
+        <p class="dimtext">Per capire «{pathModal.doc.title ?? "questo paper"}», in ordine consigliato: prima i fondamenti che cita, poi i vicini di contenuto già tuoi, infine i riferimenti che ancora non possiedi.</p>
+        <ol class="pathlist">
+          {#each pathModal.steps as step, si (si)}
+            <li class="pathstep" class:ext={!step.in_library}>
+              <div class="pathmain">
+                {#if step.document_id != null}
+                  <button class="hflink" onclick={() => openById(step.document_id!)} title="Apri il documento">{step.title}{step.year ? ` (${step.year})` : ""}</button>
+                {:else}
+                  <span class="pathtitle">{step.title}</span>
+                  {#if step.doi}
+                    <button class="hflink small" onclick={() => openInBrowser(`https://doi.org/${step.doi}`)} title="Apri il DOI nel browser">DOI ↗</button>
+                    <button class="ghost small" onclick={() => addPathStep(step)} title="Aggiungi come riferimento alla libreria">+ Aggiungi</button>
+                  {/if}
+                {/if}
+              </div>
+              <span class="pathwhy">{step.reason}</span>
+            </li>
+          {/each}
+        </ol>
+        <div class="modactions"><button class="primary" onclick={() => (pathModal = null)}>Chiudi</button></div>
+      </div>
+    </div>
+  {/if}
+
   {#if refPanel}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget && !refPanel!.busy) refPanel = null; }} role="presentation">
@@ -3847,6 +4094,13 @@
   {/if}
 
   <div class="toasts" aria-live="polite">
+    {#if wikiProg && filter.kind !== "wiki"}
+      <div class="toast">
+        <span>{wikiProg.concept}: {wikiProg.phase === "estrazione" ? `leggo le fonti ${wikiProg.done + 1}/${Math.max(wikiProg.total - 1, 1)}` : wikiProg.phase === "sintesi" ? "scrivo…" : "controllo le fonti…"}</span>
+        <div class="bar"><div class="fill" style="width:{wikiProg.total ? (wikiProg.done / wikiProg.total) * 100 : 6}%"></div></div>
+        <button class="ghost small" onclick={stopWiki} title="Ferma al prossimo passaggio">Stop</button>
+      </div>
+    {/if}
     {#if clipOffer}
       <div class="toast clipoffer">
         <div class="clipbody">
@@ -4322,6 +4576,16 @@
             <li>Le citazioni <strong>[n]</strong> nel testo aprono il PDF <strong>alla pagina giusta</strong>; i concetti citati in altre pagine diventano <strong>link</strong> tra pagine; in fondo trovi le fonti con i passaggi usati (chip «p. N»).</li>
             <li>Ogni fonte <em>deve</em> comparire nella pagina: se la sintesi non la usa, viene dichiarata in «Fonti non integrate» — mai omessa in silenzio. Il pallino <strong>●</strong> sull'elenco segnala che la libreria è cambiata e conviene rigenerare.</li>
             <li>Richiede l'AI locale attiva e l'indice dei passaggi (Chiedi alla libreria → Costruisci indice). Consiglio: un modello ≥ 8B (es. <code>gemma3:27b</code>) per una prosa all'altezza.</li>
+          </ul>
+        </div>
+
+        <div class="helpsec">
+          <h3>Strumenti di sintesi sulla selezione</h3>
+          <ul>
+            <li><strong>Confronta (AI)</strong>: seleziona 2-3 paper → tasto destro → <em>Confronta</em>: tabella obiettivo/metodo/dati/risultati/limiti + cosa aggiunge ciascuno.</li>
+            <li><strong>Rassegna (AI)</strong>: da una selezione (2-10 paper) o dall'intera vista (radiale → Strumenti → <em>Rassegna della vista</em>): mini related-work organizzata per temi, con citazioni [n] cliccabili e copia pronta per <strong>LaTeX</strong> (<code>\cite&#123;citekey&#125;</code>) o <strong>Pandoc</strong> (<code>[@citekey]</code>).</li>
+            <li><strong>Tabella risultati (AI)</strong>: raccoglie i numeri (metodo · dataset · metrica · valore) dei paper selezionati in un'unica tabella esportabile in CSV/Markdown/Excel. I valori sono estratti testualmente: verifica sempre sul PDF.</li>
+            <li><strong>Percorso di lettura</strong> (tasto destro → AI): per capire un paper, cosa leggere prima — i fondamenti che cita (già tuoi), i vicini di contenuto precedenti, e i riferimenti mancanti da aggiungere con un click. Funziona <em>senza</em> LLM.</li>
           </ul>
         </div>
 
@@ -5629,6 +5893,26 @@
   .wikisrc.unused { opacity: 0.55; }
   .wikipages { display: inline-flex; gap: 4px; flex-wrap: wrap; }
   .wikiintro { max-width: 520px; margin: 0 auto; }
+
+  /* ===== Sintesi sulla selezione + percorso di lettura ===== */
+  .aidocmodal { width: 760px; }
+  .aidochtml { max-height: 52vh; overflow: auto; padding-right: 6px; }
+  .aidochtml :global(table) { border-collapse: collapse; font-size: 12.5px; margin: 8px 0; }
+  .aidochtml :global(th), .aidochtml :global(td) { border: 1px solid var(--border); padding: 5px 9px; text-align: left; vertical-align: top; }
+  .aidochtml :global(th) { background: var(--panel); font-weight: 600; }
+  .aidocsrc { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; margin-top: 10px; border-top: 1px solid var(--border-soft); padding-top: 8px; }
+  .gridmodal { width: 780px; }
+  .gridwrap { max-height: 54vh; overflow: auto; border: 1px solid var(--border-soft); border-radius: var(--r-sm); }
+  .resgrid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .resgrid th, .resgrid td { border-bottom: 1px solid var(--border-soft); padding: 6px 10px; text-align: left; }
+  .resgrid th { position: sticky; top: 0; background: var(--panel); font-weight: 600; }
+  .resgrid tbody tr:nth-child(odd) { background: var(--zebra); }
+  .pathmodal { width: 640px; }
+  .pathlist { margin: 12px 0 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; }
+  .pathstep.ext { opacity: 0.9; }
+  .pathmain { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .pathtitle { font-size: 13px; color: var(--text); }
+  .pathwhy { display: block; font-size: 11.5px; color: var(--faint); margin-top: 1px; }
 
   /* "Riferimento senza PDF" panel */
   .refmodal { width: 560px; }
