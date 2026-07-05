@@ -1765,6 +1765,35 @@ pub fn list_tags(state: State<'_, AppState>) -> Result<Vec<Tag>, String> {
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
+/// Rename and/or recolor a tag (name stays library-unique, case-insensitive).
+#[tauri::command]
+pub fn update_tag(
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+    color: Option<String>,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Il nome del tag non può essere vuoto".into());
+    }
+    let conn = state.db.lock();
+    let clash: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE AND id != ?2",
+            params![name, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if clash.is_some() {
+        return Err(format!("Esiste già un tag «{name}»"));
+    }
+    conn.execute("UPDATE tags SET name = ?1, color = ?2 WHERE id = ?3", params![name, color, id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Create a tag (or return the existing one with that name), setting its color.
 #[tauri::command]
 pub fn create_tag(state: State<'_, AppState>, name: String, color: Option<String>) -> Result<Tag, String> {

@@ -141,6 +141,7 @@ pub fn run() {
             commands::set_document_notes,
             commands::list_tags,
             commands::create_tag,
+            commands::update_tag,
             commands::delete_tag,
             commands::set_document_tags,
             commands::list_collections,

@@ -107,6 +107,7 @@
     removeFromCollection,
     getDocumentMeta,
     attachFromUrl,
+    updateTag,
     wikiList,
     wikiGet,
     wikiGenerate,
@@ -152,6 +153,60 @@
   // Whole-library counts behind the sidebar filters; refreshed by loadDocs().
   let facets = $state<LibraryFacets>({ all: 0, favorite: 0, unread: 0, github: 0, peerreviewed: 0 });
   let recentDocs = $state<DocumentItem[]>([]); // "Continue reading" shelf
+
+  // ----- Coach mark una-tantum: al primo avvio spiega destro + Ctrl+K -----
+  let showCoach = $state(false);
+  try {
+    showCoach = !localStorage.getItem("scriptorium-coach-seen");
+  } catch {
+    /* localStorage assente: non insistere col suggerimento */
+  }
+  function dismissCoach() {
+    showCoach = false;
+    try {
+      localStorage.setItem("scriptorium-coach-seen", "1");
+    } catch {
+      /* ignora */
+    }
+  }
+
+  // ----- Home leggera (vista «Tutti»): contatori + riscopri del giorno -----
+  let homeCollapsed = $state(false);
+  let rediscoverTick = $state(0);
+  try {
+    homeCollapsed = localStorage.getItem("scriptorium-home-collapsed") === "1";
+  } catch {
+    /* localStorage non disponibile: mostra la home */
+  }
+  function toggleHome() {
+    homeCollapsed = !homeCollapsed;
+    try {
+      localStorage.setItem("scriptorium-home-collapsed", homeCollapsed ? "1" : "0");
+    } catch {
+      /* ignora */
+    }
+  }
+  const unreadCount = $derived(docs.filter((d) => d.has_file && !d.is_read).length);
+  const readingCount = $derived(docs.filter((d) => d.has_file && !d.is_read && (d.last_page ?? 0) > 1).length);
+  const addedThisMonth = $derived.by(() => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth();
+    return docs.filter((d) => {
+      if (!d.added_at) return false;
+      const t = new Date(d.added_at);
+      return t.getFullYear() === y && t.getMonth() === m;
+    }).length;
+  });
+  // Un paper da riscoprire, stabile nell'arco della giornata (rinfrescabile con ↻):
+  // preferisce i non letti, altrimenti pesca da tutta la libreria con PDF.
+  const rediscoverPick = $derived.by(() => {
+    const unread = docs.filter((d) => d.has_file && !d.is_read);
+    const pool = unread.length ? unread : docs.filter((d) => d.has_file);
+    if (!pool.length) return null;
+    const day = Math.floor(Date.now() / 86400000);
+    return pool[(day + rediscoverTick) % pool.length];
+  });
   let results = $state<DocumentItem[]>([]);
   let thumbs = $state<Record<number, string>>({});
   let rebuildingThumbs = $state(false);
@@ -391,7 +446,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.5.0";
+  const APP_VERSION = "0.5.1";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1886,26 +1941,36 @@
     }
   }
 
-  // ----- Library health (maintenance scan) -----
-  let healthModal = $state(false);
+  // ----- "Cura della libreria": salute + gap di citazioni + duplicati, a schede -----
+  let careModal = $state(false);
+  let careTab = $state<"salute" | "gap" | "duplicati">("salute");
   let health = $state<LibraryHealth | null>(null);
   let healthLoading = $state(false);
+  /** Open the care surface on a tab, loading its data. */
+  function openCare(tab: "salute" | "gap" | "duplicati") {
+    careModal = true;
+    careTab = tab;
+    if (tab === "salute") openHealth();
+    else if (tab === "gap") openGaps();
+    else loadDuplicates();
+  }
   async function openHealth() {
     if (healthLoading) return; // re-entry guard: don't run two scans at once
-    healthModal = true;
+    careModal = true;
+    careTab = "salute";
     healthLoading = true;
     health = null;
     try {
       health = await libraryHealth();
     } catch (e) {
       status = "Errore salute libreria: " + e;
-      healthModal = false;
+      careModal = false;
     } finally {
       healthLoading = false;
     }
   }
   function openHealthRow(id: number) {
-    healthModal = false;
+    careModal = false;
     openById(id);
   }
   // OCR a scanned PDF (Windows OCR engine), then refresh the health scan so the
@@ -1920,7 +1985,7 @@
         ? `OCR: ${res.chars.toLocaleString()} caratteri dalle prime ${res.pages} di ${res.total_pages} pagine (limite) ✓`
         : `OCR completato: ${res.chars.toLocaleString()} caratteri da ${res.pages} pagine ✓`;
       await loadDocs();
-      if (healthModal) await openHealth();
+      if (careModal && careTab === "salute") await openHealth();
     } catch (e) {
       status = "Errore OCR: " + e;
     } finally {
@@ -1929,24 +1994,24 @@
   }
 
   // ----- Citation gap-finder -----
-  let gapModal = $state(false);
   let gaps = $state<GapItem[]>([]);
   let gapsLoading = $state(false);
   async function openGaps() {
-    gapModal = true;
+    careModal = true;
+    careTab = "gap";
     gapsLoading = true;
     gaps = [];
     try {
       gaps = await citationGaps(60);
     } catch (e) {
       status = "Errore gap citazioni: " + e;
-      gapModal = false;
+      careModal = false;
     } finally {
       gapsLoading = false;
     }
   }
   function gapSearchOnline(doi: string) {
-    gapModal = false;
+    careModal = false;
     discoverQuery = doi;
     setFilter({ kind: "discover" });
     runDiscover();
@@ -2058,6 +2123,20 @@
     if (tagPanel) {
       const d = docs.find((x) => x.id === docId);
       tagPanel = d ? { ...tagPanel, doc: d } : null;
+    }
+  }
+
+  // ----- Tag: rinomina / ricolora (matitina nella barra laterale) -----
+  let tagEdit = $state<{ id: number; name: string; color: string | null; x: number; y: number } | null>(null);
+  async function saveTagEdit() {
+    if (!tagEdit || !tagEdit.name.trim()) return;
+    try {
+      await updateTag(tagEdit.id, tagEdit.name.trim(), tagEdit.color);
+      tagEdit = null;
+      await loadSidebar();
+      await loadDocs(); // i chip sulle card cambiano nome/colore
+    } catch (e) {
+      status = "" + e;
     }
   }
 
@@ -2598,9 +2677,17 @@
         children: [
           { id: "gt-meta", label: "Recupera metadati", badge: needsMeta > 0 ? String(needsMeta) : undefined, disabled: enriching || docs.length === 0, hint: "Da Crossref via DOI: autori, anno, rivista, riferimenti", action: () => enrichMeta() },
           { id: "gt-rev", label: "Rassegna della vista (AI)", disabled: displayed.length < 2 || wikiBusy, hint: "Mini related-work dei documenti mostrati (max 10)", action: () => runReview(displayed.map((d) => d.id)) },
-          { id: "gt-health", label: "Salute libreria", icon: I.heal, hint: "File mancanti, PDF senza testo, duplicati…", action: () => openHealth() },
-          { id: "gt-gaps", label: "Gap di citazioni", hint: "I DOI più citati dai tuoi paper che ancora non possiedi", action: () => openGaps() },
-          { id: "gt-dup", label: "Duplicati", action: () => setFilter({ kind: "duplicates" }) },
+          {
+            id: "gt-care",
+            label: "Cura della libreria",
+            icon: I.heal,
+            hint: "Salute, gap di citazioni e duplicati in un posto solo",
+            children: [
+              { id: "gc-health", label: "Salute libreria", hint: "File mancanti, PDF senza testo, metadati incompleti…", action: () => openCare("salute") },
+              { id: "gc-gaps", label: "Gap di citazioni", hint: "I DOI più citati dai tuoi paper che ancora non possiedi", action: () => openCare("gap") },
+              { id: "gc-dup", label: "Duplicati", hint: "Trova e unisci le copie dello stesso lavoro", action: () => openCare("duplicati") },
+            ],
+          },
           { id: "gt-thumb", label: "Rigenera anteprime", disabled: rebuildingThumbs, action: () => rebuildThumbs() },
           { id: "gt-emb", label: "Indice semantico", hint: `${emb.embedded}/${emb.total} documenti indicizzati`, disabled: generating || emb.embedded >= emb.total || emb.total === 0, action: () => generateIndex() },
           { id: "gt-backup", label: "Backup libreria…", action: () => doBackup() },
@@ -3152,7 +3239,7 @@
 </script>
 
 <svelte:window
-  onclick={() => { headerMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; mapPop = null; }}
+  onclick={() => { headerMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; mapPop = null; tagEdit = null; }}
   onkeydown={onGlobalKey}
   oncontextmenu={onGlobalContext}
   onfocus={checkClipboard}
@@ -3385,6 +3472,7 @@
                 <span class="navcount">{t.count}</span>
                 {#if tagFilter.includes(t.id)}<span class="navcheck">✓</span>{/if}
               </button>
+              <button class="x edit" title="Rinomina o cambia colore" aria-label={`Modifica il tag ${t.name}`} onclick={(e) => { e.stopPropagation(); tagEdit = { id: t.id, name: t.name, color: t.color ?? PALETTE[0], x: (e.currentTarget as HTMLElement).getBoundingClientRect().left, y: (e.currentTarget as HTMLElement).getBoundingClientRect().bottom + 4 }; }}>✎</button>
               <button class="x" title="Elimina questo tag (lo rimuove da tutti i documenti)" onclick={() => removeTag(t)}>×</button>
             </div>
           {/each}
@@ -3441,7 +3529,7 @@
       <button class="navitem" class:active={filter.kind === "ask"} onclick={() => { setFilter({ kind: "ask" }); loadRagStatus(); }} title="Fai domande alla tua libreria: risposte con citazioni dai tuoi documenti (AI locale)">Chiedi alla libreria</button>
       <button class="navitem" class:active={filter.kind === "wiki"} onclick={openWikiView} title="La tua enciclopedia privata: pagine per concetto generate dall'AI locale dai tuoi paper, con fonti che aprono il PDF alla pagina giusta">Wiki della libreria</button>
       <button class="navitem" class:active={filter.kind === "discover"} onclick={() => setFilter({ kind: "discover" })} title="Cerca paper online (arXiv / OpenAlex / ADS) e aggiungili alla libreria">Scopri online</button>
-      <button class="navitem" class:active={filter.kind === "duplicates"} onclick={() => setFilter({ kind: "duplicates" })} title="Trova e unisci documenti duplicati (per DOI o titolo+anno)">Duplicati</button>
+      <button class="navitem" class:active={careModal} onclick={() => openCare("salute")} title="Salute della libreria, gap di citazioni e duplicati — in un posto solo">Cura della libreria</button>
       <button class="navitem" class:active={filter.kind === "trash"} onclick={() => setFilter({ kind: "trash" })} title="Documenti eliminati: ripristina o elimina definitivamente">Cestino</button>
       <button class="navitem" class:active={filter.kind === "terminal"} onclick={() => { terminalOpened = true; setFilter({ kind: "terminal" }); }} title="Terminale integrato: usa claude code o altri strumenti a riga di comando sui tuoi PDF">Terminale</button>
       <p class="sidehint" title="Aggancia da URL, Aggiungi per ID, Salute libreria, Gap di citazioni e tutto il resto vivono nel menu radiale (tasto destro) e nella palette (Ctrl+K)">Tasto destro: menu radiale · Ctrl+K: palette</p>
@@ -3885,6 +3973,47 @@
           </div>
         {/if}
         </div>
+        {#if filter.kind === "all" && view !== "map" && !query.trim() && !tagFilter.length && docs.length}
+          <section class="home" class:collapsed={homeCollapsed}>
+            <div class="homehead">
+              <button class="homefold" onclick={toggleHome} title={homeCollapsed ? "Mostra la home" : "Comprimi la home"} aria-expanded={!homeCollapsed}>
+                <span class="homechev">{homeCollapsed ? "▸" : "▾"}</span> Panoramica
+              </button>
+              {#if !homeCollapsed}
+                <div class="homestats">
+                  <button class="hstat" onclick={() => setFilter({ kind: "unread" })} title="Vai ai documenti da leggere">
+                    <span class="hnum">{unreadCount}</span><span class="hlab">da leggere</span>
+                  </button>
+                  <span class="hstat" title="Documenti aperti ma non ancora finiti">
+                    <span class="hnum">{readingCount}</span><span class="hlab">in lettura</span>
+                  </span>
+                  <span class="hstat" title="Aggiunti alla libreria questo mese">
+                    <span class="hnum">{addedThisMonth}</span><span class="hlab">questo mese</span>
+                  </span>
+                </div>
+              {/if}
+            </div>
+            {#if !homeCollapsed && rediscoverPick}
+              {@const rd = rediscoverPick}
+              <div class="rediscover">
+                <div class="rdlabel">
+                  Riscopri
+                  <button class="rdshuffle" onclick={() => (rediscoverTick += 1)} title="Un altro paper a caso" aria-label="Un altro">↻</button>
+                </div>
+                <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                <div class="rdcard" role="button" tabindex="0" title={rd.title ?? "Senza titolo"} onclick={() => openDocument(rd)} oncontextmenu={(e) => onContext(e, rd)} onkeydown={(e) => { if (e.key === "Enter") openDocument(rd); }}>
+                  <div class="rdthumb">
+                    {#if thumbs[rd.id]}<img src={thumbs[rd.id]} alt="" />{:else}<div class="thumb-placeholder">PDF</div>{/if}
+                  </div>
+                  <div class="rdmeta">
+                    <span class="rdtitle">{rd.title ?? "Senza titolo"}</span>
+                    <span class="rdsub">{[authorLine(rd), rd.year].filter(Boolean).join(" · ")}</span>
+                  </div>
+                </div>
+              </div>
+            {/if}
+          </section>
+        {/if}
         {#if filter.kind === "all" && view !== "map" && !query.trim() && !tagFilter.length && recentDocs.length}
           <section class="recentshelf">
             <h2 class="shelfh">Continua a leggere</h2>
@@ -4056,6 +4185,22 @@
   </div>
 
   {#if dragOver}<div class="dropmask"><span>Rilascia i PDF per importarli</span></div>{/if}
+
+  {#if showCoach}
+    <div class="coach" role="dialog" aria-label="Suggerimento iniziale">
+      <div class="coachh">Benvenuto in Scriptorium</div>
+      <p class="coachp">Due gesti aprono tutto:</p>
+      <ul class="coachlist">
+        <li><strong>Tasto destro</strong> su un documento (o nel vuoto) → menu <strong>radiale</strong> con ogni azione.</li>
+        <li><kbd>Ctrl</kbd>+<kbd>K</kbd> → la <strong>palette</strong>: cerca qualsiasi comando scrivendo.</li>
+        <li><strong>Un click</strong> apre il pannello di dettaglio, <strong>doppio click</strong> legge.</li>
+      </ul>
+      <div class="coachact">
+        <button class="ghost small" onclick={() => { dismissCoach(); helpModal = true; }}>Guida completa</button>
+        <button class="primary small" onclick={dismissCoach}>Ho capito</button>
+      </div>
+    </div>
+  {/if}
 
   {#if openDoc}
     <Viewer
@@ -4581,11 +4726,45 @@
     </div>
   {/if}
 
-  {#if healthModal}
+  {#if tagEdit}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) healthModal = false; }} role="presentation">
+    <div class="menu tagedit" role="menu" tabindex="-1" use:clamp={{ x: tagEdit.x, y: tagEdit.y }} onclick={(e) => e.stopPropagation()}>
+      <input
+        class="teinput"
+        bind:value={tagEdit.name}
+        placeholder="nome del tag"
+        aria-label="Nome del tag"
+        onkeydown={(e) => { if (e.key === "Enter") saveTagEdit(); else if (e.key === "Escape") tagEdit = null; }}
+      />
+      <div class="teswatches">
+        {#each PALETTE as c (c)}
+          <button
+            class="teswatch"
+            class:on={tagEdit.color === c}
+            style="background:{c}"
+            aria-label={`Colore ${c}`}
+            onclick={() => { if (tagEdit) tagEdit = { ...tagEdit, color: c }; }}
+          ></button>
+        {/each}
+      </div>
+      <div class="teact">
+        <button class="ghost small" onclick={() => (tagEdit = null)}>Annulla</button>
+        <button class="primary small" disabled={!tagEdit.name.trim()} onclick={saveTagEdit}>Salva</button>
+      </div>
+    </div>
+  {/if}
+
+  {#if careModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) careModal = false; }} role="presentation">
       <div class="idmodal hfwide" role="dialog" tabindex="-1">
-        <h2>Salute della libreria</h2>
+        <h2>Cura della libreria</h2>
+        <div class="seg caretabs" role="group" aria-label="Sezioni">
+          <button class="segbtn wide" class:active={careTab === "salute"} onclick={() => openCare("salute")}>Salute</button>
+          <button class="segbtn wide" class:active={careTab === "gap"} onclick={() => openCare("gap")}>Gap di citazioni</button>
+          <button class="segbtn wide" class:active={careTab === "duplicati"} onclick={() => openCare("duplicati")}>Duplicati</button>
+        </div>
+        {#if careTab === "salute"}
         {#if healthLoading}
           <p class="dimtext">Analisi in corso…</p>
         {:else if health}
@@ -4625,20 +4804,12 @@
                   </li>
                 {/each}
               </ul>
-              <p class="dimtext">Unisci i duplicati dallo strumento <strong>Duplicati</strong>.</p>
+              <p class="dimtext">Unisci i duplicati dalla scheda <strong>Duplicati</strong> qui sopra.</p>
             {:else}<p class="dimtext">Nessun duplicato ✓</p>{/if}
           </div>
         {/if}
-        <div class="modactions"><button class="ghost" onclick={() => (healthModal = false)}>Chiudi</button></div>
-      </div>
-    </div>
-  {/if}
 
-  {#if gapModal}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) gapModal = false; }} role="presentation">
-      <div class="idmodal hfwide" role="dialog" tabindex="-1">
-        <h2>Gap di citazioni</h2>
+        {:else if careTab === "gap"}
         <p class="dimtext">I DOI che la tua libreria cita di più ma che non possiedi ancora. Si basa sui riferimenti estratti — recupera i <strong>Metadati</strong> dei tuoi paper (Crossref) per arricchirli.</p>
         {#if gapsLoading}
           <p class="dimtext">Calcolo in corso…</p>
@@ -4657,7 +4828,32 @@
         {:else}
           <p class="dimtext">Nessun gap rilevato. Servono riferimenti con DOI: apri un documento → <strong>Riferimenti e citazioni</strong>, oppure recupera i <strong>Metadati</strong> da Crossref.</p>
         {/if}
-        <div class="modactions"><button class="ghost" onclick={() => (gapModal = false)}>Chiudi</button></div>
+
+        {:else}
+        <p class="dimtext">Copie dello stesso lavoro (per DOI o titolo+anno). «Unisci» tiene la prima e vi trasferisce tag, collezioni e annotazioni; le altre finiscono nel cestino.</p>
+        {#if dupGroups.length === 0}
+          <p class="dimtext">Nessun duplicato ✓</p>
+        {:else}
+          <div class="dupwrap inmodal">
+            {#each dupGroups as g, gi (gi)}
+              <div class="dupgroup">
+                <div class="duphead">
+                  <span>{g.length} copie</span>
+                  <button class="ghost small" onclick={() => doMerge(g)} title="Unisci nel primo: sposta tag/collezioni/annotazioni, gli altri finiscono nel cestino">Unisci</button>
+                </div>
+                {#each g as id, i (id)}
+                  <div class="duprow">
+                    <span class="badge">{i === 0 ? "master" : "↳"}</span>
+                    <span class="dt" title={dupMap[id]?.title ?? ""}>{dupMap[id]?.title ?? "#" + id}</span>
+                    <span class="dim">{dupMap[id] ? [dupMap[id].venue, dupMap[id].year].filter(Boolean).join(" · ") : ""}</span>
+                  </div>
+                {/each}
+              </div>
+            {/each}
+          </div>
+        {/if}
+        {/if}
+        <div class="modactions"><button class="ghost" onclick={() => (careModal = false)}>Chiudi</button></div>
       </div>
     </div>
   {/if}
@@ -4766,7 +4962,9 @@
             <li><strong>Viste</strong>: griglia (copertine ridimensionabili con − ▭ +), lista a colonne, e <strong>Costellazione</strong> — la libreria come mappa semantica: ogni stella un documento, i legami sono la somiglianza di significato. Clic per aprire, tasto destro per il menu, Ctrl+clic per selezionare.</li>
             <li><strong>Continua a leggere</strong>: in “Tutti” trovi in alto gli ultimi PDF aperti. Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
             <li><strong>Riscopri</strong> (menu radiale o palette): ti ripesca un documento dimenticato o mai letto.</li>
-            <li><strong>Duplicati</strong> (unione) e <strong>Cestino</strong> tra gli Strumenti; <strong>Salute libreria</strong> e <strong>Gap di citazioni</strong> dal menu radiale → Strumenti.</li>
+            <li><strong>Cura della libreria</strong> (sidebar o radiale → Strumenti) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi) e <strong>Duplicati</strong> (unione). Il <strong>Cestino</strong> resta tra gli Strumenti.</li>
+            <li><strong>Tag</strong>: la <strong>matitina ✎</strong> accanto a un tag nella barra laterale lo <strong>rinomina o ricolora</strong>; la <strong>×</strong> lo elimina. Dal pannello di dettaglio aggiungi/togli tag al volo.</li>
+            <li>Nella vista <strong>Tutti</strong>, la <strong>Panoramica</strong> in alto (comprimibile) mostra quanti documenti hai da leggere, in lettura e aggiunti questo mese, e ti propone un paper da <strong>riscoprire</strong> ogni giorno.</li>
           </ul>
         </div>
 
@@ -6157,6 +6355,93 @@
   .exlegend { font-size: 11px; color: var(--faint); display: inline-flex; align-items: center; gap: 6px; }
   .menu.mappop { width: 270px; }
   .mapmeta { font-size: 11px; color: var(--faint); margin: 0 4px 6px; }
+
+  /* ===== 0.5.1: tag editor, home leggera, coach mark, care tabs ===== */
+  button.primary.small { margin-left: 0; padding: 5px 12px; font-size: 12px; }
+
+  /* tag: matitina + popover di modifica */
+  .x.edit { font-size: 12px; }
+  .menu.tagedit { width: 210px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .teinput {
+    width: 100%; background: var(--field); border: 1px solid var(--border); color: var(--text);
+    border-radius: var(--r-sm); padding: 6px 9px; font-size: 13px; outline: none;
+  }
+  .teinput:focus { border-color: var(--accent); }
+  .teswatches { display: flex; flex-wrap: wrap; gap: 6px; }
+  .teswatch {
+    width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0;
+  }
+  .teswatch.on { border-color: var(--text); box-shadow: 0 0 0 2px var(--surface) inset; }
+  .teact { display: flex; justify-content: flex-end; gap: 8px; }
+
+  /* care: schede a tutta larghezza nel modal */
+  .caretabs { margin: 4px 0 14px; }
+  .segbtn.wide { width: auto; padding: 0 16px; height: 30px; font-size: 12.5px; font-weight: 600; }
+  .dupwrap.inmodal { padding: 0; max-height: 52vh; overflow-y: auto; }
+
+  /* home leggera (vista «Tutti») */
+  .home { padding: 14px 22px 2px; }
+  .homehead { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .homefold {
+    background: none; border: none; color: var(--dim); cursor: pointer; padding: 0;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .homefold:hover { color: var(--accent); }
+  .homechev { font-size: 10px; }
+  .homestats { display: flex; align-items: stretch; gap: 10px; }
+  .hstat {
+    display: inline-flex; flex-direction: column; align-items: flex-start; gap: 1px;
+    background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--r-md);
+    padding: 5px 12px; text-align: left;
+  }
+  button.hstat { cursor: pointer; transition: border-color var(--ease), background var(--ease); }
+  button.hstat:hover { border-color: var(--accent); background: var(--accent-soft); }
+  .hnum { font-size: 17px; font-weight: 700; color: var(--text); font-family: var(--serif); line-height: 1.1; }
+  .hlab { font-size: 10.5px; color: var(--faint); }
+  .rediscover { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .rdlabel {
+    display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--faint);
+  }
+  .rdshuffle {
+    background: none; border: 1px solid var(--border); color: var(--dim);
+    border-radius: 50%; width: 22px; height: 22px; cursor: pointer; font-size: 12px; line-height: 1;
+  }
+  .rdshuffle:hover { color: var(--accent); border-color: var(--accent); }
+  .rdcard {
+    display: flex; align-items: center; gap: 10px; cursor: pointer;
+    background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--r-md);
+    padding: 6px 12px 6px 6px; max-width: 420px; transition: border-color var(--ease), transform var(--ease);
+  }
+  .rdcard:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .rdthumb {
+    width: 34px; height: 46px; flex: 0 0 auto; border-radius: 3px; overflow: hidden;
+    background: var(--thumb-bg); display: flex; align-items: center; justify-content: center;
+  }
+  .rdthumb img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+  .rdmeta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .rdtitle {
+    font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.3;
+    display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .rdsub { font-size: 11px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* coach mark una-tantum */
+  .coach {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); z-index: 80;
+    width: min(440px, calc(100vw - 40px));
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+    box-shadow: var(--shadow-lg); padding: 16px 18px;
+    animation: coachup 0.24s cubic-bezier(0.2, 0.9, 0.3, 1);
+  }
+  @keyframes coachup { from { opacity: 0; transform: translate(-50%, 12px); } }
+  @media (prefers-reduced-motion: reduce) { .coach { animation: none; } }
+  .coachh { font-family: var(--serif); font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+  .coachp { font-size: 12.5px; color: var(--dim); margin: 0 0 8px; }
+  .coachlist { margin: 0 0 12px; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
+  .coachlist li { font-size: 12.5px; color: var(--text); line-height: 1.4; }
+  .coachact { display: flex; justify-content: flex-end; gap: 8px; }
 
   /* keyboard/click focus cursor on the library (detail panel target) */
   .card { user-select: none; } /* il doppio click apre il lettore, non seleziona testo */

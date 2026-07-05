@@ -146,6 +146,9 @@ export const backupLibrary = (dest: string) => invoke<string>("backup_library", 
 export const listTags = () => invoke<Tag[]>("list_tags");
 export const createTag = (name: string, color: string | null) =>
   invoke<Tag>("create_tag", { name, color });
+/** Rename and/or recolor a tag (errors if the name is taken by another tag). */
+export const updateTag = (id: number, name: string, color: string | null) =>
+  invoke<void>("update_tag", { id, name, color });
 export const deleteTag = (id: number) => invoke<void>("delete_tag", { id });
 export const setDocumentTags = (documentId: number, tagIds: number[]) =>
   invoke<void>("set_document_tags", { documentId, tagIds });
