@@ -22,6 +22,8 @@
   import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, aiExplain } from "$lib/api";
   import { save } from "@tauri-apps/plugin-dialog";
   import ShareMenu from "$lib/ShareMenu.svelte";
+  import RadialMenu from "$lib/RadialMenu.svelte";
+  import type { RadialItem } from "$lib/radial";
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -40,6 +42,53 @@
     initialPage?: number | null;
     onClose: () => void;
   } = $props();
+
+  // ----- Zoom memory: remember the last used scale per document (localStorage) -----
+  const ZOOM_KEY = "scriptorium-viewer-zoom";
+  let zoomSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let zoomDirty = false;
+
+  /** Saved zoom for this document, clamped to the viewer's range; null if absent or corrupt. */
+  function loadSavedZoom(): number | null {
+    try {
+      const raw = localStorage.getItem(ZOOM_KEY);
+      if (!raw) return null;
+      const map: unknown = JSON.parse(raw);
+      if (!map || typeof map !== "object" || Array.isArray(map)) return null;
+      const v = Number((map as Record<string, unknown>)[String(id)]);
+      return Number.isFinite(v) ? Math.min(4, Math.max(0.4, v)) : null;
+    } catch {
+      return null; // a corrupt store must never break opening the viewer
+    }
+  }
+  function writeZoomNow() {
+    zoomDirty = false;
+    try {
+      let map: Record<string, number> = {};
+      try {
+        const parsed: unknown = JSON.parse(localStorage.getItem(ZOOM_KEY) ?? "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          map = parsed as Record<string, number>;
+        }
+      } catch {
+        /* corrupt store: start a fresh map */
+      }
+      map[String(id)] = scale;
+      // Cap the map at 200 entries, dropping from the front of the key order.
+      const keys = Object.keys(map);
+      if (keys.length > 200) {
+        for (const k of keys.slice(0, keys.length - 200)) delete map[k];
+      }
+      localStorage.setItem(ZOOM_KEY, JSON.stringify(map));
+    } catch {
+      /* quota/serialization errors are non-fatal */
+    }
+  }
+  function saveZoomSoon() {
+    zoomDirty = true;
+    clearTimeout(zoomSaveTimer);
+    zoomSaveTimer = setTimeout(writeZoomNow, 500);
+  }
 
   const HL_COLOR = "#ffd54a";
 
@@ -75,7 +124,8 @@
   let editingNote = $state("");
 
   let pagesEl: HTMLDivElement;
-  let scale = $state(1.3);
+  let overlayEl: HTMLDivElement;
+  let scale = $state(loadSavedZoom() ?? 1.3);
   let loading = $state(true);
   let error = $state("");
   let annos = $state<Annotation[]>([]);
@@ -758,6 +808,7 @@
 
   function zoom(delta: number) {
     scale = Math.min(4, Math.max(0.4, +(scale + delta).toFixed(2)));
+    saveZoomSoon();
     clearSelection();
     popover = null;
     // Debounce the (raster) re-render so wheel-zoom stays smooth.
@@ -775,6 +826,7 @@
   /** Set an absolute zoom and re-render (used by the fit presets / reset). */
   function setScale(s: number) {
     scale = Math.min(4, Math.max(0.4, +s.toFixed(2)));
+    saveZoomSoon();
     clearSelection();
     popover = null;
     clearTimeout(renderTimer);
@@ -1183,6 +1235,109 @@
     setNotice("Aggiunto alle note");
   }
 
+  // ----- "⋯ Altro": overflow menu for the regrouped toolbar -----
+  let moreOpen = $state<{ x: number; y: number } | null>(null);
+
+  function toggleMore(e: MouseEvent) {
+    e.stopPropagation(); // the window-level click handler would close it right away
+    if (moreOpen) {
+      moreOpen = null;
+      return;
+    }
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const w = 232; // keep in sync with .morepop width
+    moreOpen = { x: Math.max(8, Math.min(r.left, window.innerWidth - w - 8)), y: r.bottom + 6 };
+  }
+  /** Run an overflow-menu action and close the menu (handlers reused verbatim). */
+  function moreDo(fn: () => void) {
+    moreOpen = null;
+    fn();
+  }
+
+  // ----- Auto-hiding chrome (lettura immersiva) -----
+  const CHROME_IDLE_MS = 2500;
+  let chromeHidden = $state(false);
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Any engaged surface pins the toolbar: it must never hide underneath the user.
+  let chromePinned = $derived(
+    findOpen ||
+      panel !== "none" ||
+      showToc ||
+      showHelp ||
+      tableModal ||
+      textModal ||
+      tableMode ||
+      textMode ||
+      noteMode ||
+      popover !== null ||
+      lens !== null ||
+      selBtn !== null ||
+      moreOpen !== null ||
+      printing,
+  );
+  $effect(() => {
+    if (chromePinned && chromeHidden) chromeHidden = false;
+  });
+
+  function armIdle() {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (!chromePinned) chromeHidden = true;
+    }, CHROME_IDLE_MS);
+  }
+  /** Single mousemove listener on the viewer root: any movement reveals the bar;
+   *  parking the pointer within 60px of the top edge keeps it visible. */
+  function onViewerMove(e: MouseEvent) {
+    if (chromeHidden) chromeHidden = false;
+    if (e.clientY <= 60) {
+      clearTimeout(idleTimer); // near the top edge: never re-hide while parked there
+      return;
+    }
+    armIdle();
+  }
+
+  // ----- Right-click radial menu (coerenza con il resto dell'app) -----
+  let viewerRadial = $state<{ x: number; y: number; items: RadialItem[] } | null>(null);
+
+  function buildViewerRadial(): RadialItem[] {
+    return [
+      { id: "fitw", label: "Adatta larghezza", hint: "Larghezza pagina = finestra (W)", action: fitWidth },
+      { id: "fith", label: "Adatta pagina", hint: "Pagina intera nella finestra (H)", action: fitPage },
+      { id: "spread", label: "Due pagine", checked: spread, hint: "Vista a due pagine (2)", action: toggleSpread },
+      { id: "night", label: "Notte", checked: night, hint: "Inverti i colori (I)", action: () => (night = !night) },
+      { id: "find", label: "Cerca", hint: "Cerca nel documento (Ctrl+F)", action: () => { openFind(); } },
+      { id: "toc", label: "Indice", disabled: !outline.length, checked: showToc, hint: "Indice del documento", action: () => (showToc = !showToc) },
+      { id: "annos", label: "Annotazioni", checked: panel === "annos", hint: "Pannello delle annotazioni (A)", action: () => (panel = panel === "annos" ? "none" : "annos") },
+      { id: "notes", label: "Note", checked: panel === "notes", hint: "Note libere sul documento (E)", action: () => (panel = panel === "notes" ? "none" : "notes") },
+      {
+        id: "tools",
+        label: "Strumenti",
+        hint: "Nota puntuale, estrazione, rotazione…",
+        children: [
+          { id: "note", label: "Nota puntuale", checked: noteMode, action: toggleNote },
+          { id: "table", label: "Estrai tabella", checked: tableMode, action: toggleTable },
+          { id: "text", label: "Estrai testo", checked: textMode, action: toggleText },
+          { id: "rotl", label: "Ruota sx", action: () => rotate(-90) },
+          { id: "rotr", label: "Ruota dx", action: () => rotate(90) },
+          { id: "reveal", label: "Posizione", action: doReveal },
+          { id: "print", label: "Stampa", action: doPrint },
+        ],
+      },
+      { id: "close", label: "Chiudi lettore", danger: true, hint: "Torna alla libreria (Esc)", action: onClose },
+    ];
+  }
+
+  function onViewerContext(e: MouseEvent) {
+    if (viewerRadial) return; // the open radial owns its own right-clicks
+    // Drag-to-extract and note placement keep the default flow untouched.
+    if (tableMode || textMode || noteMode) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest(".hlpalette, .lenscard, .popover, .findbar, .morepop, .sharemenu, input, textarea")) return;
+    e.preventDefault();
+    viewerRadial = { x: e.clientX, y: e.clientY, items: buildViewerRadial() };
+  }
+
   function onKey(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
       e.preventDefault();
@@ -1190,7 +1345,12 @@
       return;
     }
     if (e.key === "Escape") {
-      if (showHelp) showHelp = false;
+      // Already consumed by a focused inner surface (the radial handles its own
+      // Esc on its element and preventDefaults it before this window listener).
+      if (e.defaultPrevented) return;
+      if (viewerRadial) viewerRadial = null;
+      else if (moreOpen) moreOpen = null;
+      else if (showHelp) showHelp = false;
       else if (tableModal) tableModal = false;
       else if (textModal) textModal = false;
       else if (tableMode) tableMode = false;
@@ -1206,6 +1366,7 @@
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.defaultPrevented || viewerRadial) return; // the radial owns plain keys (filter mode)
     switch (e.key) {
       case "+":
       case "=": zoom(0.2); break;
@@ -1237,6 +1398,10 @@
     load();
     // Non-passive so Ctrl+wheel zoom can preventDefault the page scroll/zoom.
     pagesEl?.addEventListener("wheel", onWheel, { passive: false });
+    // Immersive chrome + right-click radial: single listeners on the viewer root.
+    overlayEl?.addEventListener("mousemove", onViewerMove);
+    overlayEl?.addEventListener("contextmenu", onViewerContext);
+    armIdle();
     // Lente AI: stream tokens into the open card while a request is in flight.
     // Each event echoes the request id, so stale streams are dropped on the floor.
     let unmounted = false;
@@ -1251,56 +1416,67 @@
     return () => {
       unmounted = true;
       pagesEl?.removeEventListener("wheel", onWheel);
+      overlayEl?.removeEventListener("mousemove", onViewerMove);
+      overlayEl?.removeEventListener("contextmenu", onViewerContext);
       unlistenExplain?.();
       clearTimeout(noticeTimer);
       clearTimeout(findTimer);
       clearTimeout(notesTimer);
+      clearTimeout(idleTimer);
+      clearTimeout(zoomSaveTimer);
+      if (zoomDirty) writeZoomNow(); // don't lose a zoom made within the debounce window
       if (!notesSaved) flushNotes();
       if (currentPage > 0) setLastPage(id, currentPage, pdf?.numPages ?? undefined).catch(() => {});
     };
   });
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} onclick={() => (moreOpen = null)} />
 
-<div class="overlay">
-  <div class="bar">
+<div class="overlay" bind:this={overlayEl}>
+  <div class="bar" class:hidden={chromeHidden}>
     <span class="title" title={title}>{title}</span>
     <span class="acount">{annos.length} evidenziazioni</span>
     <div class="ctrl">
       <button onclick={() => zoom(-0.2)} title="Riduci (−)">−</button>
       <span class="pct">{Math.round(scale * 100)}%</span>
       <button onclick={() => zoom(0.2)} title="Ingrandisci (+, oppure Ctrl + rotella)">+</button>
+      <span class="tsep"></span>
       <button onclick={fitWidth} title="Adatta alla larghezza (W)">↔</button>
       <button onclick={fitPage} title="Adatta alla pagina (H)">⤢</button>
-      <button onclick={() => rotate(-90)} title="Ruota a sinistra 90° ([)">⟲</button>
-      <button onclick={() => rotate(90)} title="Ruota a destra 90° (])">⟳</button>
-      <button class:active={spread} onclick={toggleSpread} title="Vista a due pagine (2)">▥</button>
-      <button class:active={noteMode} onclick={toggleNote} title="Aggiungi una nota a un punto della pagina (N)" aria-label="Aggiungi nota">
-        <svg class="tbicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8A8.5 8.5 0 0 1 12.5 3a8.5 8.5 0 0 1 8.5 8.5z"/></svg>
-      </button>
-      <button class:active={night} onclick={() => (night = !night)} title="Modalità notte: inverti i colori (I)" aria-label="Modalità notte">
-        <svg class="tbicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>
-      </button>
-      <button class:active={tableMode} onclick={toggleTable} title="Estrai una tabella: trascina un rettangolo attorno alla tabella" aria-label="Estrai tabella">
-        <svg class="tbicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>
-      </button>
-      <button class:active={textMode} onclick={toggleText} title="Estrai testo: trascina un rettangolo attorno al testo" aria-label="Estrai testo">
-        <svg class="tbicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7V5h16v2M9 5v14M7 19h4M14 12h6M16 12v7M15 19h2"/></svg>
-      </button>
+      <span class="tsep"></span>
+      <button class:active={findOpen} onclick={openFind} title="Cerca nel documento (Ctrl+F)">Cerca</button>
       {#if outline.length}
         <button class:active={showToc} onclick={() => (showToc = !showToc)} title="Mostra/nascondi l'indice del documento">Indice</button>
       {/if}
       <button class:active={panel === "annos"} onclick={() => (panel = panel === "annos" ? "none" : "annos")} title="Indice delle annotazioni di questo documento (A)">Annotazioni</button>
       <button class:active={panel === "notes"} onclick={() => (panel = panel === "notes" ? "none" : "notes")} title="Note libere su questo documento (E)">Note{#if !notesSaved}<span class="dot" aria-label="non salvate">•</span>{/if}</button>
-      <button class:active={findOpen} onclick={openFind} title="Cerca nel documento (Ctrl+F)">Cerca</button>
-      <button onclick={doReveal} title="Apri la posizione del PDF in Esplora risorse">Posizione</button>
-      <button onclick={doPrint} disabled={printing} title="Stampa questo documento">{printing ? "…" : "Stampa"}</button>
-      <ShareMenu ids={[id]} label={title} {link} onstatus={setNotice} />
-      <button onclick={() => (showHelp = !showHelp)} title="Scorciatoie da tastiera (?)">?</button>
+      <span class="tsep"></span>
+      <button class:active={!!moreOpen} onclick={toggleMore} title="Altri strumenti: rotazione, estrazione, stampa, condivisione…">⋯ Altro</button>
+      <span class="tsep"></span>
       <button class="close" onclick={onClose} title="Chiudi il lettore (Esc)">Chiudi</button>
     </div>
   </div>
+
+  {#if moreOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
+    <div class="morepop" style="left:{moreOpen.x}px; top:{moreOpen.y}px" role="menu" tabindex="-1" aria-label="Altri strumenti" onclick={(e) => e.stopPropagation()}>
+      <button class="mitem" onclick={() => moreDo(() => rotate(-90))} title="Ruota a sinistra 90° ([)"><span class="mck"></span>⟲ Ruota sinistra</button>
+      <button class="mitem" onclick={() => moreDo(() => rotate(90))} title="Ruota a destra 90° (])"><span class="mck"></span>⟳ Ruota destra</button>
+      <div class="msep"></div>
+      <button class="mitem" onclick={() => moreDo(toggleSpread)} title="Vista a due pagine (2)"><span class="mck">{spread ? "✓" : ""}</span>▥ Due pagine</button>
+      <button class="mitem" onclick={() => moreDo(toggleNote)} title="Aggiungi una nota a un punto della pagina (N)"><span class="mck">{noteMode ? "✓" : ""}</span>Nota puntuale</button>
+      <button class="mitem" onclick={() => moreDo(() => (night = !night))} title="Modalità notte: inverti i colori (I)"><span class="mck">{night ? "✓" : ""}</span>Notte</button>
+      <button class="mitem" onclick={() => moreDo(toggleTable)} title="Estrai una tabella: trascina un rettangolo attorno alla tabella"><span class="mck">{tableMode ? "✓" : ""}</span>Estrai tabella</button>
+      <button class="mitem" onclick={() => moreDo(toggleText)} title="Estrai testo: trascina un rettangolo attorno al testo"><span class="mck">{textMode ? "✓" : ""}</span>Estrai testo</button>
+      <div class="msep"></div>
+      <button class="mitem" onclick={() => moreDo(doReveal)} title="Apri la posizione del PDF in Esplora risorse"><span class="mck"></span>Posizione</button>
+      <button class="mitem" onclick={() => moreDo(doPrint)} disabled={printing} title="Stampa questo documento"><span class="mck"></span>{printing ? "Stampa…" : "Stampa"}</button>
+      <ShareMenu ids={[id]} label={title} {link} variant="menuitem" onstatus={setNotice} onclose={() => (moreOpen = null)} />
+      <div class="msep"></div>
+      <button class="mitem" onclick={() => moreDo(() => (showHelp = true))} title="Scorciatoie da tastiera (?)"><span class="mck"></span>? Aiuto</button>
+    </div>
+  {/if}
 
   <div class="viewbody">
     {#if showToc && outline.length}
@@ -1546,6 +1722,9 @@
           <li><kbd>I</kbd> <span>Modalità notte</span></li>
           <li><kbd>[</kbd> / <kbd>]</kbd> <span>Ruota</span></li>
           <li>Selezione testo <span>Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)</span></li>
+          <li>⋯ Altro <span>Rotazione, note, estrazione, stampa, condivisione</span></li>
+          <li>Tasto destro <span>Menu radiale con i comandi di lettura</span></li>
+          <li>Mouse fermo <span>La barra si nasconde; muovi il mouse per mostrarla</span></li>
           <li><kbd>Esc</kbd> <span>Chiudi / annulla</span></li>
           <li><kbd>?</kbd> <span>Mostra questo aiuto</span></li>
         </ul>
@@ -1619,6 +1798,19 @@
       </div>
     </div>
   {/if}
+
+  {#if viewerRadial}
+    {#key viewerRadial}
+      <RadialMenu
+        x={viewerRadial.x}
+        y={viewerRadial.y}
+        items={viewerRadial.items}
+        title={title}
+        thumb={null}
+        onclose={() => (viewerRadial = null)}
+      />
+    {/key}
+  {/if}
 </div>
 
 <style>
@@ -1637,6 +1829,17 @@
     padding: 10px 18px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+    transition: opacity 0.25s ease, transform 0.25s ease;
+  }
+  /* immersive reading: the chrome fades away while the mouse is idle */
+  .bar.hidden {
+    opacity: 0;
+    transform: translateY(-6px);
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bar { transition: opacity 0.25s ease; }
+    .bar.hidden { transform: none; }
   }
   .title {
     font-size: 15px;
@@ -1662,8 +1865,24 @@
   .ctrl button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
   .ctrl button:disabled { opacity: 0.55; cursor: default; }
   .pct { font-size: 12px; color: var(--dim); min-width: 42px; text-align: center; }
-  .tbicon { width: 15px; height: 15px; vertical-align: -3px; }
   .ctrl button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .tsep { flex: 0 0 1px; width: 1px; height: 18px; background: var(--border); }
+  /* "⋯ Altro" overflow menu */
+  .morepop {
+    position: fixed; z-index: 70; width: 232px; max-height: 70vh; overflow: auto;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--r-md, 10px); padding: 6px;
+    box-shadow: var(--shadow-lg, 0 10px 30px rgba(44, 46, 53, 0.2));
+  }
+  .mitem {
+    display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+    background: transparent; border: none; color: var(--text);
+    padding: 7px 8px; font-size: 13px; cursor: pointer; border-radius: 6px;
+  }
+  .mitem:hover:not(:disabled) { background: var(--accent-soft); }
+  .mitem:disabled { opacity: 0.55; cursor: default; }
+  .mck { flex: 0 0 14px; text-align: center; color: var(--accent); font-weight: 700; font-size: 12px; }
+  .msep { height: 1px; background: var(--border); margin: 5px 4px; }
   .viewbody { flex: 1; display: flex; min-height: 0; }
   .toc {
     width: 250px; flex: 0 0 250px; overflow: auto;

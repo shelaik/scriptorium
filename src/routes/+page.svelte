@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onMount, untrack, tick } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { listen } from "@tauri-apps/api/event";
   import { open, save } from "@tauri-apps/plugin-dialog";
@@ -135,6 +135,7 @@
   import type { PaletteEntry } from "$lib/palette";
   import Constellation from "$lib/Constellation.svelte";
   import CitationMap from "$lib/CitationMap.svelte";
+  import DetailPanel from "$lib/DetailPanel.svelte";
 
   type Filter = {
     kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki";
@@ -390,7 +391,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.4.4";
+  const APP_VERSION = "0.5.0";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -494,6 +495,33 @@
     const i = sortChain.findIndex((s) => s.key === k);
     return i === -1 ? 0 : i + 1;
   }
+  // ---- Pannello dettaglio + cursore tastiera sulla libreria ----
+  // Un click sulla card mette a fuoco il documento (pannello a destra);
+  // doppio click / Invio aprono il lettore. Le frecce muovono il fuoco.
+  let focusId = $state<number | null>(null);
+  const panelDoc = $derived(
+    focusId == null
+      ? null
+      : (displayed.find((d) => d.id === focusId) ?? docs.find((d) => d.id === focusId) ?? null),
+  );
+  function focusCard(d: DocumentItem) {
+    focusId = focusId === d.id ? focusId : d.id;
+  }
+  /** Colonne correnti della griglia (per ↑/↓), misurate dal layout reale. */
+  function gridColumns(): number {
+    const el = document.querySelector(".grid");
+    if (!el) return 1;
+    return Math.max(1, getComputedStyle(el).gridTemplateColumns.split(" ").length);
+  }
+  function moveFocus(delta: number) {
+    if (!displayed.length) return;
+    const i = focusId == null ? -1 : displayed.findIndex((d) => d.id === focusId);
+    const next = i === -1 ? 0 : Math.min(displayed.length - 1, Math.max(0, i + delta));
+    focusId = displayed[next].id;
+    ensureThumbs([displayed[next]]);
+    tick().then(() => document.querySelector(".kfocus")?.scrollIntoView({ block: "nearest" }));
+  }
+
   function clearSort() {
     sortChain = [];
   }
@@ -2699,9 +2727,50 @@
       searchEl?.focus();
       return;
     }
-    if (e.key === "Escape" && (sortPop || indexPop)) {
-      sortPop = false;
-      indexPop = false;
+    // ---- Navigazione della libreria da tastiera (griglia e lista) ----
+    const docsView =
+      filter.kind === "all" || filter.kind === "favorite" || filter.kind === "unread" ||
+      filter.kind === "collection" || filter.kind === "related" || filter.kind === "author" ||
+      filter.kind === "github" || filter.kind === "peerreviewed";
+    const uiBusy =
+      paletteOpen || !!radial || editingId !== null || !!document.querySelector(".modalback, .back");
+    if (!typing && !uiBusy && docsView && view !== "map" && displayed.length) {
+      const k = e.key;
+      if (k === "ArrowRight" || k === "ArrowLeft" || k === "ArrowDown" || k === "ArrowUp") {
+        e.preventDefault();
+        const cols = view === "grid" ? gridColumns() : 1;
+        moveFocus(k === "ArrowRight" ? 1 : k === "ArrowLeft" ? -1 : k === "ArrowDown" ? cols : -cols);
+        return;
+      }
+      // Invio apre il lettore (le card a fuoco DOM hanno già il proprio handler).
+      if (k === "Enter" && panelDoc && !t?.closest(".card, tr, button, a")) {
+        e.preventDefault();
+        openDocument(panelDoc);
+        return;
+      }
+      if (k === " " && !t?.closest("button, a, input, select, textarea")) {
+        e.preventDefault();
+        focusId = focusId != null ? null : displayed[0].id;
+        return;
+      }
+      if ((k === "x" || k === "X") && focusId != null) {
+        e.preventDefault();
+        toggleSelect(focusId);
+        return;
+      }
+      if ((k === "f" || k === "F") && panelDoc) {
+        e.preventDefault();
+        toggleFavorite(panelDoc);
+        return;
+      }
+    }
+    if (e.key === "Escape") {
+      if (sortPop || indexPop) {
+        sortPop = false;
+        indexPop = false;
+      } else if (focusId != null) {
+        focusId = null; // chiude il pannello dettaglio
+      }
     }
   }
 
@@ -3872,7 +3941,7 @@
         {:else if view === "grid"}
           <div class="grid" style="--grid-min: {gridSize}px">
             {#each displayed as d (d.id)}
-              <article class="card" class:selcard={selected.includes(d.id)} role="button" tabindex="0" onclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} onkeydown={(e) => { if (e.key === "Enter") openDocument(d); }}>
+              <article class="card" class:selcard={selected.includes(d.id)} class:kfocus={focusId === d.id} role="button" tabindex="0" onclick={() => focusCard(d)} ondblclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} onkeydown={(e) => { if (e.key === "Enter") openDocument(d); }}>
                 <button class="dots" title="Altre azioni (anche col tasto destro)" onclick={(e) => openCardMenu(e, d)}>⋯</button>
                 <button class="cardsel" class:on={selected.includes(d.id)} title="Seleziona per azioni multiple" aria-label="Seleziona" onclick={(e) => { e.stopPropagation(); toggleSelect(d.id); }}>{selected.includes(d.id) ? "✓" : ""}</button>
                 <button class="starbtn" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>
@@ -3938,7 +4007,7 @@
               <tbody>
                 {#each displayed as d (d.id)}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <tr onclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selected.includes(d.id)}>
+                  <tr onclick={() => focusCard(d)} ondblclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selected.includes(d.id)} class:kfocus={focusId === d.id}>
                     <td class="sel"><input type="checkbox" checked={selected.includes(d.id)} onclick={(e) => e.stopPropagation()} onchange={() => toggleSelect(d.id)} title="Seleziona" /></td>
                     <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if d.citekey && !isBare(d)}<button type="button" class="ckey-inline" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}{#if d.has_summary}<span class="aisum inline" title="Riassunto AI già presente (il batch AI salta questo documento)">✦</span>{/if}{#if isBare(d)}<span class="metamiss-inline" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ</span>{/if}</td>
                     <td class="dim" title={authorLine(d)}>{#if authorLine(d)}<button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button>{:else}—{/if}</td>
@@ -3960,6 +4029,30 @@
         {/if}
       {/if}
     </main>
+
+    {#if panelDoc}
+      <DetailPanel
+        doc={panelDoc}
+        {tags}
+        aiEnabled={!!aiStat?.enabled}
+        aiBusy={aiBusyAny}
+        thumb={thumbs[panelDoc.id] ?? null}
+        tagColors={PALETTE}
+        onOpen={() => openDocument(panelDoc!)}
+        onClose={() => (focusId = null)}
+        onRadial={(e) => openRadialDoc(e, panelDoc!)}
+        onAuthor={(name) => showAuthor(name)}
+        onFavorite={() => toggleFavorite(panelDoc!)}
+        onRead={() => toggleRead(panelDoc!)}
+        onCitations={() => openCitations(panelDoc!)}
+        onAttach={() => (refPanel = { doc: panelDoc!, url: "", busy: false })}
+        onSummarize={() => summarizeDoc(panelDoc!)}
+        onChanged={async () => {
+          await loadDocs();
+          await loadSidebar();
+        }}
+      />
+    {/if}
   </div>
 
   {#if dragOver}<div class="dropmask"><span>Rilascia i PDF per importarli</span></div>{/if}
@@ -4655,6 +4748,8 @@
             <li><strong>Tasto destro</strong> su un documento → il <strong>menu radiale</strong>: le azioni disposte ad anello attorno al cursore, organizzate in orbite (Cita, AI, Organizza, Condividi…). Tasto destro sullo <strong>spazio vuoto</strong> → il menu radiale globale (Importa, Vista, Aspetto, Strumenti…).</li>
             <li><strong>Come si naviga</strong>: muovi il mouse verso un petalo (basta la direzione, non serve arrivarci) e clicca; oppure <strong>secondo clic destro</strong> per entrare nei sottomenu senza spostarti; <strong>rotella</strong> per ruotare la selezione; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; frecce + Invio da tastiera. <kbd>Esc</kbd> chiude, il centro torna indietro.</li>
             <li><kbd>Ctrl</kbd>+<kbd>K</kbd> → la <strong>palette comandi</strong>: ogni azione, documento, filtro e tema, digitando. <kbd>/</kbd> va alla ricerca, <kbd>Ctrl</kbd>+<kbd>B</kbd> mostra/nasconde la barra laterale.</li>
+            <li><strong>Un click</strong> su una scheda apre il <strong>pannello di dettaglio</strong> a destra (abstract, riassunto AI, tag modificabili, citazioni, note); <strong>doppio click</strong> o <kbd>Invio</kbd> aprono il lettore. Da tastiera: <kbd>frecce</kbd> per muoverti tra le schede, <kbd>Spazio</kbd> apre/chiude il pannello, <kbd>X</kbd> seleziona, <kbd>F</kbd> preferito, <kbd>Esc</kbd> chiude.</li>
+            <li>Nel <strong>lettore</strong>: la barra degli strumenti <strong>svanisce</strong> mentre leggi (torna muovendo il mouse); gli strumenti meno frequenti sono sotto <strong>⋯ Altro</strong>; il tasto destro apre il menu radiale di lettura; lo zoom viene ricordato per documento.</li>
             <li>Con più documenti <strong>selezionati</strong>, il tasto destro su uno di essi apre il radiale della <strong>selezione</strong> (stampa, condivisione, AI, tag, collezioni in blocco).</li>
           </ul>
         </div>
@@ -6062,6 +6157,11 @@
   .exlegend { font-size: 11px; color: var(--faint); display: inline-flex; align-items: center; gap: 6px; }
   .menu.mappop { width: 270px; }
   .mapmeta { font-size: 11px; color: var(--faint); margin: 0 4px 6px; }
+
+  /* keyboard/click focus cursor on the library (detail panel target) */
+  .card { user-select: none; } /* il doppio click apre il lettore, non seleziona testo */
+  .card.kfocus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring), var(--shadow-sm); }
+  .list tbody tr.kfocus { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   /* AI-summary indicator: this document already has a cached summary */
   .aisum {
