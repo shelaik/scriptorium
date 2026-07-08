@@ -14,6 +14,19 @@ edition = "2021"
 name = "pdfmanage_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Gates the headless CLI companion binary. Off by default so `tauri build`
+# (the GUI release) never compiles it — build it explicitly with
+# `cargo build --release --bin scriptorium-cli --features cli`.
+cli = []
+
+# Headless, read-only terminal access to the library (see src/bin/cli.rs).
+# Links only rusqlite + serde_json, so it is small and fast to build.
+[[bin]]
+name = "scriptorium-cli"
+path = "src/bin/cli.rs"
+required-features = ["cli"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
