@@ -259,6 +259,9 @@
   let status = $state("");
   let openDoc = $state<DocumentItem | null>(null);
   let headerMenu = $state<{ kind: "import" | "export"; x: number; y: number } | null>(null);
+  // Compact tool bar: which global-radial group's dropdown is open (items are
+  // derived live from buildGlobalRadial() at render, so disabled/badge stay fresh).
+  let toolMenu = $state<{ id: string; x: number; y: number } | null>(null);
   let watchedFolder = $state<string | null>(null);
   let view = $state<"grid" | "list" | "map">("grid");
   // ----- Orbita layer: radial menu, command palette, popovers, map, spotlight -----
@@ -474,7 +477,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.2";
+  const APP_VERSION = "0.8.3";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2396,12 +2399,39 @@
   /** Open the header Importa/Esporta dropdown anchored under its button. */
   function openHeaderMenu(e: MouseEvent, kind: "import" | "export") {
     e.stopPropagation();
+    toolMenu = null;
     if (headerMenu?.kind === kind) {
       headerMenu = null;
       return;
     }
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     headerMenu = { kind, x: r.left, y: r.bottom + 6 };
+  }
+
+  /** Tool-bar icon click: open the group's dropdown, or run it if it's a leaf. */
+  function openTool(e: MouseEvent, g: RadialItem) {
+    e.stopPropagation();
+    headerMenu = null;
+    sortPop = false;
+    indexPop = false;
+    if (g.children && g.children.length) {
+      if (toolMenu?.id === g.id) {
+        toolMenu = null;
+        return;
+      }
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      toolMenu = { id: g.id, x: r.left, y: r.bottom + 6 };
+    } else {
+      toolMenu = null;
+      g.action?.();
+    }
+  }
+
+  /** Run a tool-menu entry (ignoring disabled ones) and close the menu. */
+  function runTool(it: RadialItem) {
+    if (it.disabled) return;
+    toolMenu = null;
+    it.action?.();
   }
 
   let dragP: Promise<() => void> | undefined;
@@ -3059,7 +3089,9 @@
       }
     }
     if (e.key === "Escape") {
-      if (sortPop || indexPop) {
+      if (toolMenu || headerMenu || sortPop || indexPop) {
+        toolMenu = null;
+        headerMenu = null;
         sortPop = false;
         indexPop = false;
       } else if (focusId != null) {
@@ -3632,7 +3664,7 @@
 </script>
 
 <svelte:window
-  onclick={() => { headerMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; mapPop = null; tagEdit = null; }}
+  onclick={() => { headerMenu = null; toolMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; mapPop = null; tagEdit = null; }}
   onkeydown={onGlobalKey}
   oncontextmenu={onGlobalContext}
   onfocus={checkClipboard}
@@ -3703,7 +3735,7 @@
         class:busy={!!embedProgress && embedProgress.phase !== "done" && embedProgress.phase !== "cancelled"}
         title="Indice semantico: abilita ricerca per significato, correlati e costellazione"
         aria-label="Indice semantico"
-        onclick={(e) => { e.stopPropagation(); indexPop = !indexPop; sortPop = false; }}
+        onclick={(e) => { e.stopPropagation(); indexPop = !indexPop; sortPop = false; toolMenu = null; headerMenu = null; }}
       >
         <span class="aidot"></span>◈ {emb.embedded}/{emb.total}
       </button>
@@ -3746,6 +3778,20 @@
     </button>
   </header>
 
+  <nav class="toolbar" aria-label="Strumenti">
+    {#each buildGlobalRadial() as g (g.id)}
+      <button
+        class="iconbtn"
+        class:menuopen={toolMenu?.id === g.id}
+        title={g.hint ? g.label + " — " + g.hint : g.label}
+        aria-label={g.label}
+        onclick={(e) => openTool(e, g)}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d={g.icon} /></svg>
+      </button>
+    {/each}
+  </nav>
+
   {#if embedProgress && embedProgress.phase !== "done" && embedProgress.phase !== "cancelled"}
     <div class="headprog" title={embedProgress.phase === "model" ? "Carico il modello bge-m3…" : `Indicizzo ${embedProgress.done}/${embedProgress.total}`}>
       <div class="fill" style="width:{embedProgress.total ? (embedProgress.done / embedProgress.total) * 100 : 8}%"></div>
@@ -3777,7 +3823,7 @@
       <div class="stripright">
         {#if displayed.length && view !== "map"}
           <button class="chipbtn" onclick={toggleSelectAll} title="Seleziona o deseleziona tutti i documenti mostrati (per le azioni multiple)">{allSelected ? "Deseleziona tutti" : "Seleziona tutti"}</button>
-          <button class="chipbtn" class:on={sortChain.length > 0} onclick={(e) => { e.stopPropagation(); sortPop = !sortPop; indexPop = false; }} title="Ordina i documenti (più criteri combinabili)">
+          <button class="chipbtn" class:on={sortChain.length > 0} onclick={(e) => { e.stopPropagation(); sortPop = !sortPop; indexPop = false; toolMenu = null; headerMenu = null; }} title="Ordina i documenti (più criteri combinabili)">
             Ordina{#if sortChain.length}: {SORT_LABELS[sortChain[0].key]} {sortArrow(sortChain[0].key)}{#if sortChain.length > 1} +{sortChain.length - 1}{/if}{/if} ▾
           </button>
         {/if}
@@ -4777,6 +4823,31 @@
       <button class="medit" onclick={() => { headerMenu = null; importBibtexDialog(); }}>Da BibTeX (.bib) — Zotero/Mendeley…</button>
       <button class="medit" onclick={() => { headerMenu = null; idModal = true; }} title="Incolla DOI / arXiv / ISBN / PMID (crea voci anche senza PDF)">Per identificatore…</button>
       <button class="medit" onclick={() => { headerMenu = null; openUrlModal(); }} title="Scarica un PDF incollando il link (o col bookmarklet dal browser)">Da URL…</button>
+    </div>
+  {/if}
+
+  {#if toolMenu}
+    {@const grp = buildGlobalRadial().find((g) => g.id === toolMenu?.id)}
+    <div class="menu toolmenu" use:clamp={{ x: toolMenu.x, y: toolMenu.y }}>
+      {#if grp}<div class="mtitle">{grp.label}</div>{/if}
+      {#each grp?.children ?? [] as it (it.id)}
+        {#if it.children && it.children.length}
+          <div class="menusec">{it.label}</div>
+          {#each it.children as ch (ch.id)}
+            <button class="medit sub" class:danger={ch.danger} disabled={ch.disabled} title={ch.hint ?? null} onclick={() => runTool(ch)}>
+              <span>{ch.label}</span>
+              {#if ch.checked}<span class="mtick">✓</span>{/if}
+              {#if ch.badge}<span class="mbadge">{ch.badge}</span>{/if}
+            </button>
+          {/each}
+        {:else}
+          <button class="medit" class:danger={it.danger} disabled={it.disabled} title={it.hint ?? null} onclick={() => runTool(it)}>
+            <span>{it.label}</span>
+            {#if it.checked}<span class="mtick">✓</span>{/if}
+            {#if it.badge}<span class="mbadge">{it.badge}</span>{/if}
+          </button>
+        {/if}
+      {/each}
     </div>
   {/if}
 
@@ -6858,6 +6929,32 @@
     border-bottom: 1px solid var(--border-soft); margin-bottom: 6px;
   }
   .medit:hover { background: var(--accent-soft); }
+  /* Compact tool bar — global-radial groups surfaced as always-visible icons */
+  .toolbar {
+    display: flex; align-items: center; gap: 4px;
+    padding: 4px 18px; background: var(--surface);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .toolbar .iconbtn { width: 36px; height: 32px; }
+  .toolmenu { width: 250px; }
+  .menusec {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--faint); margin: 8px 6px 3px; padding-top: 5px; border-top: 1px solid var(--border-soft);
+  }
+  .toolmenu .medit {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    border-bottom: none; margin-bottom: 1px; padding: 6px 8px;
+  }
+  .toolmenu .menusec:first-child { margin-top: 2px; padding-top: 0; border-top: none; }
+  .medit.sub { padding-left: 16px; }
+  .medit:disabled { color: var(--faint); cursor: default; opacity: 0.55; }
+  .medit:disabled:hover { background: transparent; }
+  .medit.danger { color: #c0392b; }
+  .mtick { color: var(--accent); font-size: 12px; flex: 0 0 auto; }
+  .mbadge {
+    flex: 0 0 auto; font-size: 10px; color: var(--dim);
+    background: var(--hover); border-radius: var(--r-pill); padding: 1px 6px; min-width: 14px; text-align: center;
+  }
   .dropmask {
     position: fixed; inset: 0; background: rgba(43, 74, 120, 0.1); border: 3px dashed var(--accent);
     display: flex; align-items: center; justify-content: center; font-size: 22px; color: var(--accent); z-index: 20; pointer-events: none;
