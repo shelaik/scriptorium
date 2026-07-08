@@ -488,7 +488,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.4";
+  const APP_VERSION = "0.8.5";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2607,7 +2607,7 @@
     theme: "M12 2a10 10 0 0 0 0 20 2 2 0 0 0 2-2v-1a2 2 0 0 1 2-2h1a5 5 0 0 0 5-5A10 10 0 0 0 12 2zM7 10h.01M12 6h.01M17 10h.01",
     tools: "M14.7 6.3a4.5 4.5 0 0 0-6.4 5.6L3 17.2V21h3.8l5.3-5.3a4.5 4.5 0 0 0 5.6-6.4l-2.9 2.9-2.1-2.1z",
     compass: "M12 2a10 10 0 1 0 .01 0M16 8l-2.5 5.5L8 16l2.5-5.5z",
-    gear: "M12 8a4 4 0 1 0 .01 0M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
+    gear: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z",
     tag: "M20.6 13.4l-8-8A2 2 0 0 0 11.2 5H5a2 2 0 0 0-2 2v6.2a2 2 0 0 0 .6 1.4l8 8a2 2 0 0 0 2.8 0l6.2-6.2a2 2 0 0 0 0-2.8zM7.5 9.5h.01",
     print: "M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z",
     reveal: "M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v1H5zM3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7",
@@ -4798,8 +4798,9 @@
   {#if showCoach}
     <div class="coach" role="dialog" aria-label="Suggerimento iniziale">
       <div class="coachh">Benvenuto in Scriptorium</div>
-      <p class="coachp">Due gesti aprono tutto:</p>
+      <p class="coachp">Tre modi per arrivare a tutto:</p>
       <ul class="coachlist">
+        <li>La <strong>barra in alto</strong>: un'icona per ogni gruppo di funzioni (Importa, Cerca, Novità, Strumenti, Aspetto, Sistema…).</li>
         <li><strong>Tasto destro</strong> su un documento (o nel vuoto) → menu <strong>radiale</strong> con ogni azione.</li>
         <li><kbd>Ctrl</kbd>+<kbd>K</kbd> → la <strong>palette</strong>: cerca qualsiasi comando scrivendo.</li>
         <li><strong>Un click</strong> apre il pannello di dettaglio, <strong>doppio click</strong> legge.</li>
@@ -5573,9 +5574,10 @@
         <p class="dimtext">Gestore di PDF e riferimenti, locale e veloce. Tutto resta sul tuo computer; le funzioni di rete e AI sono opzionali e disattivabili.</p>
 
         <div class="helpsec">
-          <h3>Menu radiale e palette — l'interfaccia in due gesti</h3>
+          <h3>Barra strumenti, menu radiale e palette — l'interfaccia</h3>
           <ul>
-            <li><strong>Tasto destro</strong> su un documento → il <strong>menu radiale</strong>: le azioni disposte ad anello attorno al cursore, organizzate in orbite (Cita, AI, Organizza, Condividi…). Tasto destro sullo <strong>spazio vuoto</strong> → il menu radiale globale (Importa, Vista, Aspetto, Strumenti…).</li>
+            <li><strong>Barra strumenti</strong> (in alto, sotto il titolo): un'icona per ogni gruppo di funzioni — <strong>Importa</strong>, <strong>Vista</strong>, <strong>Cerca</strong> (Chiedi alla libreria, Wiki, Note, Scopri online), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔, con il conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Strumenti</strong> (Cura della libreria, Cestino, Terminale, Backup, indice semantico…), <strong>Aspetto</strong> e <strong>Sistema</strong> (Impostazioni, Aiuto, Informazioni). Clic su un'icona → menu con le sue azioni; l'icona si evidenzia quando sei nella vista corrispondente. La <strong>barra laterale</strong> resta per la navigazione: filtri, tag, collezioni, ricerche salvate, cartella sorvegliata.</li>
+            <li><strong>Tasto destro</strong> su un documento → il <strong>menu radiale</strong>: le azioni disposte ad anello attorno al cursore, organizzate in orbite (Cita, AI, Organizza, Condividi…). Tasto destro sullo <strong>spazio vuoto</strong> → il menu radiale globale (gli stessi gruppi della barra). La barra, il radiale e la palette pescano dallo <strong>stesso registro</strong>: nessuna funzione è esclusiva di una sola.</li>
             <li><strong>Come si naviga</strong>: muovi il mouse verso un petalo (basta la direzione, non serve arrivarci) e clicca; oppure <strong>secondo clic destro</strong> per entrare nei sottomenu senza spostarti; <strong>rotella</strong> per ruotare la selezione; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; frecce + Invio da tastiera. <kbd>Esc</kbd> chiude, il centro torna indietro.</li>
             <li><kbd>Ctrl</kbd>+<kbd>K</kbd> → la <strong>palette comandi</strong>: ogni azione, documento, filtro e tema, digitando. <kbd>/</kbd> va alla ricerca, <kbd>Ctrl</kbd>+<kbd>B</kbd> mostra/nasconde la barra laterale.</li>
             <li><strong>Un click</strong> su una scheda apre il <strong>pannello di dettaglio</strong> a destra (abstract, riassunto AI, tag modificabili, citazioni, note); <strong>doppio click</strong> o <kbd>Invio</kbd> aprono il lettore. Da tastiera: <kbd>frecce</kbd> per muoverti tra le schede, <kbd>Spazio</kbd> apre/chiude il pannello, <kbd>X</kbd> seleziona, <kbd>F</kbd> preferito, <kbd>Esc</kbd> chiude.</li>
@@ -5587,7 +5589,7 @@
         <div class="helpsec">
           <h3>Libreria e organizzazione</h3>
           <ul>
-            <li><strong>+ Aggiungi</strong> (in alto): PDF dal disco (anche trascinandoli), libreria <strong>Zotero/Mendeley</strong> via <em>.bib</em>, riferimenti per <em>identificatore</em> (DOI/arXiv/ISBN/PMID) o <em>da URL</em>.</li>
+            <li><strong>+ Aggiungi</strong> (in alto): PDF dal disco (anche trascinandoli), libreria <strong>Zotero/Mendeley</strong> via <em>.bib</em>, riferimenti per <em>identificatore</em> (DOI/arXiv/ISBN/PMID) o <em>da URL</em>. Dal menu <strong>Importa</strong> della barra anche un <strong>progetto LaTeX (.zip)</strong> — i tuoi PDF con la loro bibliografia, marcati come «Il mio lavoro» — e la <strong>Cartella sorvegliata</strong>.</li>
             <li><strong>Aggancia dal browser</strong>, dal più semplice: (1) <strong>copia il link</strong> del PDF e torna su Scriptorium — compare da solo il suggerimento «Aggancia» (appunti intelligenti, interruttore in Impostazioni → Connettore); (2) il <strong>bookmarklet</strong> — sui siti che bloccano le richieste (es. GitHub) apre una scheda di conferma che completa l'aggancio; (3) punta la <strong>Cartella sorvegliata</strong> su Download e importa automaticamente ciò che scarichi. I link GitHub <code>…/blob/….pdf</code> vengono corretti da soli verso il file vero.</li>
             <li><strong>Tag</strong> colorati e <strong>Collezioni</strong> (anche “smart”, che si popolano da sole). In una collezione, tasto destro → Organizza → <em>Togli da…</em>.</li>
             <li><strong>Filtri</strong> rapidi nella sidebar: Tutti, Preferiti, Da leggere, <strong>Con codice (GitHub)</strong>, <strong>Peer-reviewed</strong>.</li>
@@ -5595,7 +5597,7 @@
             <li><strong>Ordinamento</strong> combinabile (chip «Ordina ▾» sopra la griglia): clic per attivare/invertire/togliere, i numeri indicano la priorità.</li>
             <li><strong>Viste</strong>: griglia (copertine ridimensionabili con − ▭ +), lista a colonne, e <strong>Costellazione</strong> — la libreria come mappa semantica: ogni stella un documento, i legami sono la somiglianza di significato. Clic per aprire, tasto destro per il menu, Ctrl+clic per selezionare.</li>
             <li><strong>Continua a leggere</strong>: in “Tutti” trovi in alto gli ultimi PDF aperti. Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
-            <li><strong>Riscopri</strong> (menu radiale o palette): ti ripesca un documento dimenticato o mai letto.</li>
+            <li><strong>Riscopri</strong> (barra <em>Riscopri</em>, radiale o palette): ti ripesca un documento dimenticato o mai letto.</li>
             <li><strong>Cura della libreria</strong> (barra strumenti in alto o radiale → Strumenti) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi) e <strong>Duplicati</strong> (unione). Il <strong>Cestino</strong> resta tra gli Strumenti.</li>
             <li><strong>Tag</strong>: la <strong>matitina ✎</strong> accanto a un tag nella barra laterale lo <strong>rinomina o ricolora</strong>; la <strong>×</strong> lo elimina. Dal pannello di dettaglio aggiungi/togli tag al volo.</li>
             <li>Nella vista <strong>Tutti</strong>, la <strong>Panoramica</strong> in alto (comprimibile) mostra quanti documenti hai da leggere, in lettura e aggiunti questo mese, e ti propone un paper da <strong>riscoprire</strong> ogni giorno.</li>
@@ -5607,7 +5609,7 @@
           <ul>
             <li><strong>Locale</strong>: barra in alto, modalità <em>Testo</em>, <em>Semantica</em> (per significato) o <em>Ibrida</em>. Cerca anche nelle tue <strong>note e annotazioni</strong>.</li>
             <li><strong>Online</strong> (<em>Scopri online</em>): arXiv, OpenAlex, ADS, Semantic Scholar, Europe PMC, CORE, DOAJ, <strong>HF Papers</strong> (il successore di Papers with Code: cerca nell'indice e mostra il repo GitHub di ogni paper). Filtri anno/autore/solo-OA e, sui risultati, chip <strong>Con codice</strong> / <strong>Peer-reviewed</strong> / <strong>Preprint</strong> (con conteggi) oltre alle colonne ordinabili. I PDF Open Access si scaricano, gli altri si aggiungono come riferimento.</li>
-            <li><strong>Ricerche salvate</strong>: dopo una ricerca premi <em>★ Salva</em> → compare nella sidebar; cliccandola la rilancia e marca con <strong>“novità”</strong> i risultati nuovi dall'ultima volta.</li>
+            <li><strong>Ricerche salvate</strong>: dopo una ricerca premi <em>★ Salva</em> → compare nella sidebar; cliccandola la rilancia. I risultati nuovi dall'ultima volta si raccolgono nella campana <strong>Novità</strong> (🔔 in alto, con il conteggio), ricontrollata a ogni avvio.</li>
             <li><strong>Riferimenti senza PDF</strong>: le voci aggiunte come sola citazione (da Scopri online, Esplora citazioni, BibTeX o per ID) mostrano «Riferimento — senza PDF» sulla copertina. Aprendole compare il pannello per allegare il file: <strong>Trova PDF</strong> (Open Access via Unpaywall/arXiv) oppure <strong>Allega</strong> da un link — il PDF si aggancia alla stessa voce, senza duplicati. Lo trovi anche nel radiale → Organizza → «Allega PDF…».</li>
           </ul>
         </div>
@@ -5618,7 +5620,7 @@
             <li>I paper che citano un repo mostrano l'icona <strong>GitHub</strong> (card, lista, risultati online): cliccala per aprire il repository.</li>
             <li>Tasto destro → <strong>Codice & repo</strong>: anteprima del <strong>README</strong> nell'app, più i modelli/dataset collegati su <strong>Hugging Face</strong>.</li>
             <li>Filtro <strong>“Con codice (GitHub)”</strong> nella sidebar per vedere solo i paper con codice disponibile.</li>
-            <li>Tasto destro → Cita → <strong>Riferimenti e citazioni</strong>: la bibliografia del paper (con i riferimenti già nella tua libreria cliccabili) e i documenti che lo <strong>citano</strong>. Lì trovi anche <strong>Copia APA / IEEE / BibTeX / citekey / \cite / [@…]</strong>.</li>
+            <li>Tasto destro → Cita → <strong>Riferimenti e citazioni</strong>: la bibliografia del paper (con i riferimenti già nella tua libreria cliccabili) e i documenti che lo <strong>citano</strong>. Lì trovi anche <strong>Copia APA / IEEE / BibTeX / citekey / \cite / [@…]</strong>. Con più paper <strong>selezionati</strong>, tasto destro → Cita copia un solo <code>\cite&#123;k1,k2&#125;</code> o tutte le voci BibTeX insieme (per LaTeX/Pandoc).</li>
             <li><strong>Esplora citazioni (online)</strong> si apre sulla <strong>Mappa</strong>: riferimenti a sinistra (il passato su cui si fonda), citazioni a destra (il futuro), in ordine di anno; pallino <strong>pieno</strong> = già in libreria, <strong>tratteggiato</strong> = mancante, nodo più grande = paper più citato. Clic su un nodo → aggiungi / apri / <em>esplora da qui</em> (la mappa si ricentra, «← Indietro» per tornare). La <strong>Lista</strong> con tutte le azioni (+ PDF, salva) resta a un click.</li>
           </ul>
         </div>
@@ -5661,6 +5663,15 @@
         </div>
 
         <div class="helpsec">
+          <h3>Note</h3>
+          <ul>
+            <li>Appunti in <strong>Markdown</strong> salvati come <strong>file .md veri</strong> nella cartella dell'app: li puoi aprire e modificare anche da un editor esterno o dal terminale. Aprili dalla barra: <strong>Cerca → Note</strong>.</li>
+            <li><strong>[[Collegamenti]]</strong> in stile wiki: <code>[[Titolo di un'altra nota]]</code> collega una nota; <code>[[@citekey]]</code> o <code>[[Titolo di un paper]]</code> collegano un documento della libreria (clic → apre la nota o il PDF). In fondo trovi i <strong>backlink</strong> (le note che rimandano a questa).</li>
+            <li>Editor con <strong>anteprima</strong> e salvataggio automatico. <strong>Rinomina</strong> (o doppio clic sul titolo) cambia il titolo <em>e</em> il nome del file .md; sotto il titolo vedi il <strong>percorso</strong> del file, la data di creazione e l'ultima modifica.</li>
+          </ul>
+        </div>
+
+        <div class="helpsec">
           <h3>Strumenti di sintesi sulla selezione</h3>
           <ul>
             <li><strong>Confronta (AI)</strong>: seleziona 2-3 paper → tasto destro → <em>Confronta</em>: tabella obiettivo/metodo/dati/risultati/limiti + cosa aggiunge ciascuno.</li>
@@ -5682,10 +5693,10 @@
         <div class="helpsec">
           <h3>Funzioni opzionali</h3>
           <ul>
-            <li><strong>Esporta</strong> (radiale → Esporta, o Ctrl+K): <em>Citazioni</em> (BibTeX / RIS / CSL) dei documenti mostrati, oppure <em>In Obsidian</em> (note Markdown nel tuo vault).</li>
+            <li><strong>Esporta</strong> (barra <em>Esporta</em>, radiale o Ctrl+K): <em>Citazioni</em> (BibTeX / RIS / CSL) dei documenti mostrati, oppure <em>In Obsidian</em> (note Markdown nel tuo vault).</li>
             <li><strong>AI locale</strong> (Ollama / LM Studio): riassunti, tag automatici, lente di lettura — opzionali, mai automatici, disattivabili. Impostazioni → AI locale.</li>
             <li>Le schede con un <strong>riassunto AI</strong> mostrano il bollino <strong>✦ AI</strong>; nel menu radiale le voci AI indicano ✓ ciò che c'è già. Il <strong>batch</strong> sulla selezione <strong>salta</strong> chi ha già riassunto/tag (te lo dice: «N saltati»); per rigenerare un riassunto usa il tasto destro sul singolo documento.</li>
-            <li><strong>Terminale</strong> integrato (es. per <code>claude code</code>), <strong>Backup</strong> completo, e <strong>11 temi</strong> dell'interfaccia (radiale → Aspetto, o palette).</li>
+            <li><strong>Terminale</strong> integrato (es. per <code>claude code</code>) e <strong>Backup</strong> completo (barra → <em>Strumenti</em>); <strong>11 temi</strong> dell'interfaccia (barra → <em>Aspetto</em>, radiale o palette).</li>
             <li>Suggerimento: le finestre si <strong>ridimensionano</strong> trascinando l'angolo in basso a destra.</li>
           </ul>
         </div>
