@@ -770,6 +770,11 @@ export interface NoteView {
   /** Sanitized HTML with [[wikilinks]] woven to #note-<slug> / #doc-<id>. */
   html: string;
   backlinks: NoteLink[];
+  /** Absolute path of the .md file on disk. */
+  path: string;
+  /** Creation / last-modified time as epoch milliseconds. */
+  created_at: number | null;
+  updated_at: number | null;
 }
 /** All notes (metadata only), newest first. */
 export const listNotes = () => invoke<NoteMeta[]>("list_notes");
@@ -780,6 +785,9 @@ export const createNote = (title: string) => invoke<string>("create_note", { tit
 /** Overwrite a note's body; returns refreshed metadata. */
 export const saveNote = (slug: string, contentMd: string) =>
   invoke<NoteMeta>("save_note", { slug, contentMd });
+/** Rename a note (new title + renamed .md file); returns the new slug. */
+export const renameNote = (slug: string, newTitle: string) =>
+  invoke<string>("rename_note", { slug, newTitle });
 export const deleteNote = (slug: string) => invoke<void>("delete_note", { slug });
 /** Open the notes vault folder in the file explorer. */
 export const revealNotesDir = () => invoke<void>("reveal_notes_dir");

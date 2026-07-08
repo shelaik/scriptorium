@@ -126,6 +126,7 @@
     getNote,
     createNote,
     saveNote,
+    renameNote,
     deleteNote,
     revealNotesDir,
     type NoteMeta,
@@ -473,7 +474,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.1";
+  const APP_VERSION = "0.8.2";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3144,6 +3145,8 @@
   let noteSaved = $state(true); // false while an autosave is pending/failed
   let noteSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let noteFlush: Promise<void> | null = null; // in-flight save (single-flight guard)
+  let noteRenaming = $state(false);
+  let noteRenameValue = $state("");
 
   async function openNotesView() {
     setFilter({ kind: "notes" });
@@ -3236,6 +3239,47 @@
       }
     }
   }
+  function startRename() {
+    if (!noteView) return;
+    noteRenameValue = noteView.title;
+    noteRenaming = true;
+  }
+  /** Abandon an in-progress rename (Escape or click-away), keeping the title. */
+  function cancelRename() {
+    noteRenaming = false;
+  }
+  /** Commit a title rename: rewrites the title line AND renames the .md file.
+   *  Only reached from Enter, so no click is racing us for the focus. */
+  async function commitRename() {
+    if (!noteRenaming || !noteView) return;
+    const target = noteView.slug; // the note we're renaming
+    const t = noteRenameValue.trim();
+    noteRenaming = false;
+    if (!t || t === noteView.title) return;
+    await flushNote(); // persist body edits so the rename reads the latest content
+    if (!noteSaved) {
+      status = "Salvataggio non riuscito: riprova prima di rinominare";
+      return;
+    }
+    try {
+      const newSlug = await renameNote(target, t);
+      await loadNotes();
+      // Follow the rename only if we're still viewing that same note.
+      if (noteView?.slug === target) await openNote(newSlug);
+      status = "Nota rinominata ✓";
+    } catch (e) {
+      status = "Errore rinomina: " + e;
+    }
+  }
+  /** Format a note's epoch-ms timestamp for the info line. */
+  function fmtNoteDate(ms: number | null): string {
+    if (!ms) return "—";
+    try {
+      return new Date(ms).toLocaleString("it-IT", { dateStyle: "medium", timeStyle: "short" });
+    } catch {
+      return "—";
+    }
+  }
   async function removeNote(slug: string) {
     if (noteView && noteView.slug !== slug) await flushNote(); // persist a different open note first
     const n = notesList.find((x) => x.slug === slug);
@@ -3250,6 +3294,11 @@
     } catch (e) {
       status = "Errore: " + e;
     }
+  }
+  /** Focus (and select) an input as soon as it mounts — for the rename field. */
+  function focusOnMount(node: HTMLElement) {
+    node.focus();
+    if (node instanceof HTMLInputElement) node.select();
   }
   /** Intercept clicks on woven note links: #note-<slug>, #doc-<id>, external. */
   function noteLinksAction(node: HTMLElement) {
@@ -4137,13 +4186,30 @@
           <section class="wikibody">
             {#if noteView}
               <header class="wikihead notehead">
-                <h2 class="wikititle">{noteView.title}</h2>
+                {#if noteRenaming}
+                  <input
+                    class="noterename"
+                    bind:value={noteRenameValue}
+                    onkeydown={(e) => { if (e.key === "Enter") commitRename(); else if (e.key === "Escape") cancelRename(); }}
+                    onblur={cancelRename}
+                    title="Nuovo titolo — Invio per confermare, Esc o clic fuori per annullare (rinomina anche il file .md)"
+                    use:focusOnMount
+                  />
+                {:else}
+                  <h2 class="wikititle notetitleh" ondblclick={startRename} title="Doppio clic per rinominare">{noteView.title}</h2>
+                  <button class="ghost small" onclick={startRename} title="Rinomina la nota: cambia il titolo e il nome del file">Rinomina</button>
+                {/if}
                 <span class="notesaved" class:pending={!noteSaved}>{noteSaved ? "Salvato ✓" : "Salvo…"}</span>
                 <div class="notemodes">
                   <button class="ghost small" class:on={noteMode === "edit"} onclick={() => (noteMode = "edit")} title="Modifica il Markdown">Modifica</button>
                   <button class="ghost small" class:on={noteMode === "preview"} onclick={() => { noteMode = "preview"; refreshNotePreview(); }} title="Anteprima resa (ricalcola i collegamenti)">Anteprima</button>
                 </div>
               </header>
+              <div class="noteinfo">
+                <button class="noteinfopath" onclick={revealNotesDir} title={"Apri la cartella — " + noteView.path}>📁 {noteView.path}</button>
+                <span class="noteinfodate" title="Data di creazione del file">creata {fmtNoteDate(noteView.created_at)}</span>
+                <span class="noteinfodate" title="Ultima modifica">· modificata {fmtNoteDate(noteView.updated_at)}</span>
+              </div>
               {#if noteMode === "edit"}
                 <textarea
                   class="noteeditor"
@@ -6917,6 +6983,19 @@
   .notehtml { margin-top: 14px; }
   .notebacklinks { max-width: 780px; margin-top: 28px; border-top: 1px solid var(--border-soft); padding-top: 12px; }
   .notebacklinks h3 { font-family: var(--serif); font-size: 14px; margin: 0 0 8px; color: var(--dim); }
+  .notetitleh { cursor: text; }
+  .noterename {
+    flex: 1; min-width: 0; font-family: var(--serif); font-size: 24px; font-weight: 600;
+    background: var(--field); border: 1px solid var(--accent); border-radius: var(--r-sm);
+    color: var(--text); padding: 2px 8px; outline: none;
+  }
+  .noteinfo { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; max-width: 820px; margin: 4px 0 2px; font-size: 11.5px; color: var(--faint); }
+  .noteinfopath {
+    max-width: 62ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    background: none; border: none; color: var(--faint); cursor: pointer; padding: 0; font: inherit;
+  }
+  .noteinfopath:hover { color: var(--accent); text-decoration: underline; }
+  .noteinfodate { white-space: nowrap; }
   .wikiintro code { background: var(--accent-soft); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
 
   /* ===== Esplora citazioni: mappa a due ali + indicatore in-libreria ===== */

@@ -5975,6 +5975,17 @@ pub struct NoteView {
     pub html: String,
     /// Other notes that link to this one.
     pub backlinks: Vec<NoteLink>,
+    /// Absolute path of the .md file on disk.
+    pub path: String,
+    /// File creation / last-modified time as epoch milliseconds.
+    pub created_at: Option<i64>,
+    pub updated_at: Option<i64>,
+}
+
+fn systime_ms(t: std::io::Result<std::time::SystemTime>) -> Option<i64> {
+    t.ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
 }
 
 /// Read every `.md` file in the vault into (slug, raw content, mtime-millis).
@@ -6100,13 +6111,57 @@ pub fn get_note(app: AppHandle, slug: String) -> Result<NoteView, String> {
     }
     backlinks.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
 
+    let (created_at, updated_at) = match std::fs::metadata(&path) {
+        Ok(m) => (systime_ms(m.created()), systime_ms(m.modified())),
+        Err(_) => (None, None),
+    };
     Ok(NoteView {
         title: notes::note_title(&content),
         slug,
         content_md: content,
         html,
         backlinks,
+        path: path.to_string_lossy().into_owned(),
+        created_at,
+        updated_at,
     })
+}
+
+/// Rename a note: set a new title (rewriting the body's title line) and rename
+/// the .md file to a slug derived from it. Returns the new slug.
+#[tauri::command]
+pub fn rename_note(app: AppHandle, slug: String, new_title: String) -> Result<String, String> {
+    let dir = notes_dir(&app);
+    let old_path = note_path(&dir, &slug)?;
+    let title = new_title.trim();
+    if title.is_empty() {
+        return Err("Il titolo non può essere vuoto".into());
+    }
+    let content = std::fs::read_to_string(&old_path).map_err(|e| format!("Lettura nota: {e}"))?;
+    let new_content = notes::set_title_line(&content, title);
+
+    // A unique new slug. Skip disambiguation against the note's OWN file: on a
+    // case-insensitive filesystem an all-lowercase slug would otherwise "collide"
+    // with the note's own uppercase/accented filename and mint a spurious "-2".
+    let base = wiki::slugify(title);
+    let mut new_slug = base.clone();
+    let mut n = 2;
+    while new_slug != slug
+        && !new_slug.eq_ignore_ascii_case(&slug)
+        && dir.join(format!("{new_slug}.md")).exists()
+    {
+        new_slug = format!("{base}-{n}");
+        n += 1;
+    }
+    let new_path = dir.join(format!("{new_slug}.md"));
+    // Move the file first (a rename preserves the OS creation timestamp, so the
+    // "creata" date survives), then rewrite its body. If the write fails the note
+    // still exists intact at the new name — nothing is lost.
+    if new_slug != slug {
+        std::fs::rename(&old_path, &new_path).map_err(|e| format!("Rinomina file: {e}"))?;
+    }
+    std::fs::write(&new_path, &new_content).map_err(|e| format!("Scrittura nota: {e}"))?;
+    Ok(new_slug)
 }
 
 /// Create a new note from a title; returns its slug. Body seeded with `# title`.

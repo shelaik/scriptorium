@@ -145,6 +145,44 @@ pub fn link_targets(md: &str) -> Vec<String> {
     out
 }
 
+/// Replace the note's title line (the first non-empty, non-fenced line) with
+/// `# new_title`. Used by rename. If the note has no content line, the heading
+/// is prepended.
+pub fn set_title_line(md: &str, new_title: &str) -> String {
+    let heading = format!("# {}", new_title.trim());
+    // Preserve the note's dominant newline so a hand-authored CRLF file isn't
+    // silently converted to LF on rename.
+    let nl = if md.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut fence: Option<char> = None;
+    let mut done = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in md.lines() {
+        if done {
+            out.push(line.to_string());
+            continue;
+        }
+        let t = line.trim();
+        if track_fence(t, &mut fence) || fence.is_some() || t.is_empty() {
+            out.push(line.to_string());
+            continue;
+        }
+        out.push(heading.clone()); // first content line = the title
+        done = true;
+    }
+    if !done {
+        return if md.trim().is_empty() {
+            format!("{heading}{nl}{nl}")
+        } else {
+            format!("{heading}{nl}{nl}{md}")
+        };
+    }
+    let mut joined = out.join(nl);
+    if md.ends_with('\n') {
+        joined.push_str(nl);
+    }
+    joined
+}
+
 /// Keep a link label from breaking the surrounding `[..](..)` markdown.
 fn clean_label(s: &str) -> String {
     s.replace('[', "(").replace(']', ")")
@@ -211,6 +249,19 @@ mod tests {
             Some(("X".into(), "#note-x".into()))
         });
         assert_eq!(out, "[[X](#note-x)]");
+    }
+
+    #[test]
+    fn set_title_replaces_first_content_line() {
+        assert_eq!(set_title_line("# Vecchio\n\ncorpo", "Nuovo"), "# Nuovo\n\ncorpo");
+        // First line is plain text → becomes a heading.
+        assert_eq!(set_title_line("vecchio titolo\naltro", "Nuovo"), "# Nuovo\naltro");
+        // Leading blank/fence lines are preserved; the first real line is the title.
+        assert_eq!(set_title_line("\n```\nx\n```\n# T\n", "Nuovo"), "\n```\nx\n```\n# Nuovo\n");
+        // Empty note → heading prepended.
+        assert_eq!(set_title_line("   \n", "Nuovo"), "# Nuovo\n\n");
+        // CRLF notes keep their line endings.
+        assert_eq!(set_title_line("# Old\r\ncorpo\r\n", "Nuovo"), "# Nuovo\r\ncorpo\r\n");
     }
 
     #[test]

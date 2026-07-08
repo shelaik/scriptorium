@@ -195,6 +195,7 @@ pub fn run() {
             commands::get_note,
             commands::create_note,
             commands::save_note,
+            commands::rename_note,
             commands::delete_note,
             commands::reveal_notes_dir,
             commands::find_pdf,
