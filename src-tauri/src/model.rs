@@ -46,6 +46,8 @@ pub struct Document {
     /// Last viewed page (1-based) and total pages, for the reading-progress bar.
     pub last_page: Option<i64>,
     pub page_count: Option<i64>,
+    /// The user's own work (imported from a LaTeX project .zip).
+    pub is_own: bool,
 }
 
 /// Full editable metadata for one document (used by the manual editor).

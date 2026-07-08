@@ -69,6 +69,7 @@
     setConnectorEnabled,
     type ConnectorInfo,
     importBibtex,
+    importLatexZip,
     findPdf,
     hfResources,
     type HfResources,
@@ -147,7 +148,7 @@
   import DetailPanel from "$lib/DetailPanel.svelte";
 
   type Filter = {
-    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita";
+    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita" | "mywork";
     id?: number;
     label?: string;
   };
@@ -159,7 +160,7 @@
 
   let docs = $state<DocumentItem[]>([]);
   // Whole-library counts behind the sidebar filters; refreshed by loadDocs().
-  let facets = $state<LibraryFacets>({ all: 0, favorite: 0, unread: 0, github: 0, peerreviewed: 0 });
+  let facets = $state<LibraryFacets>({ all: 0, favorite: 0, unread: 0, github: 0, peerreviewed: 0, own: 0 });
   let recentDocs = $state<DocumentItem[]>([]); // "Continue reading" shelf
 
   // ----- Coach mark una-tantum: al primo avvio spiega destro + Ctrl+K -----
@@ -464,7 +465,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.6.0";
+  const APP_VERSION = "0.7.0";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -669,6 +670,7 @@
     if (filter.kind === "unread") return { flag: "unread" as const };
     if (filter.kind === "github") return { flag: "github" as const };
     if (filter.kind === "peerreviewed") return { flag: "peerreviewed" as const };
+    if (filter.kind === "mywork") return { flag: "mywork" as const };
     return undefined;
   }
 
@@ -732,6 +734,9 @@
       filter.kind === "all" ||
       filter.kind === "favorite" ||
       filter.kind === "unread" ||
+      filter.kind === "github" ||
+      filter.kind === "peerreviewed" ||
+      filter.kind === "mywork" ||
       filter.kind === "collection";
     if (!docsView) {
       // From trash/discover/duplicates/related, jump back to the full library first.
@@ -1001,6 +1006,29 @@
       await loadSidebar();
     } catch (e) {
       status = "Errore import BibTeX: " + e;
+    }
+  }
+
+  async function importLatexDialog() {
+    const file = await open({
+      multiple: false,
+      filters: [{ name: "Progetto LaTeX (.zip)", extensions: ["zip"] }],
+    });
+    if (typeof file !== "string") return;
+    status = "Importo il progetto LaTeX…";
+    try {
+      const res = await importLatexZip(file);
+      const parts: string[] = [];
+      if (res.imported) parts.push(`${res.imported} tuoi paper aggiunti`);
+      if (res.duplicates) parts.push(`${res.duplicates} già presenti`);
+      if (res.references_linked) parts.push(`${res.references_linked} riferimenti collegati`);
+      if (!res.pdfs_found) parts.push("nessun PDF nel .zip");
+      if (res.errors.length) parts.push(`${res.errors.length} errori`);
+      status = "LaTeX: " + (parts.length ? parts.join(" · ") : "niente da importare");
+      await loadDocs();
+      await loadSidebar();
+    } catch (e) {
+      status = "Errore import LaTeX: " + e;
     }
   }
 
@@ -2756,6 +2784,7 @@
         children: [
           { id: "gi-pdf", label: "PDF dal disco…", action: () => importViaDialog() },
           { id: "gi-bib", label: "Da BibTeX (.bib)…", hint: "Libreria Zotero/Mendeley", action: () => importBibtexDialog() },
+          { id: "gi-tex", label: "Progetto LaTeX (.zip)…", hint: "I tuoi paper: PDF + bibliografia", action: () => importLatexDialog() },
           { id: "gi-id", label: "Per identificatore…", hint: "DOI / arXiv / ISBN / PMID", action: () => (idModal = true) },
           { id: "gi-url", label: "Da URL…", hint: "Scarica un PDF da un link", action: () => openUrlModal() },
           { id: "gi-watch", label: "Cartella sorvegliata…", hint: "Importa automaticamente i PDF che aggiungi", action: () => pickWatchedFolder() },
@@ -2903,6 +2932,7 @@
       ["Da leggere", "", () => setFilter({ kind: "unread" })],
       ["Con codice (GitHub)", "", () => setFilter({ kind: "github" })],
       ["Peer-reviewed", "", () => setFilter({ kind: "peerreviewed" })],
+      ...(facets.own ? [["Il mio lavoro", "", () => setFilter({ kind: "mywork" })] as [string, string, () => void]] : []),
       ["Cestino", "", () => setFilter({ kind: "trash" })],
     ];
     for (const [label, hint, run] of nav) out.push({ id: "nav-" + label, title: label, hint, section: "Vai a", run });
@@ -2952,7 +2982,7 @@
     const docsView =
       filter.kind === "all" || filter.kind === "favorite" || filter.kind === "unread" ||
       filter.kind === "collection" || filter.kind === "related" || filter.kind === "author" ||
-      filter.kind === "github" || filter.kind === "peerreviewed";
+      filter.kind === "github" || filter.kind === "peerreviewed" || filter.kind === "mywork";
     const uiBusy =
       paletteOpen || !!radial || editingId !== null || !!document.querySelector(".modalback, .back");
     if (!typing && !uiBusy && docsView && view !== "map" && displayed.length) {
@@ -3583,6 +3613,11 @@
       <button class="navitem" class:active={filter.kind === "peerreviewed"} onclick={() => setFilter({ kind: "peerreviewed" })} title="Solo gli articoli peer-reviewed (pubblicati), esclusi i preprint">
         Peer-reviewed{#if facets.peerreviewed}<span class="navcount">{facets.peerreviewed}</span>{/if}
       </button>
+      {#if facets.own}
+        <button class="navitem" class:active={filter.kind === "mywork"} onclick={() => setFilter({ kind: "mywork" })} title="I tuoi lavori, importati da progetti LaTeX (.zip)">
+          Il mio lavoro<span class="navcount">{facets.own}</span>
+        </button>
+      {/if}
 
       <div class="sec tagsec">
         <button class="seclabel" onclick={() => (tagsCollapsed = !tagsCollapsed)} title="Comprimi o espandi i tag">
@@ -4117,7 +4152,9 @@
                         ? "Con codice (GitHub)"
                         : filter.kind === "peerreviewed"
                           ? "Peer-reviewed"
-                          : "Da leggere"}{filter.label ? ": " : ""}<strong>{filter.label ?? ""}</strong>
+                          : filter.kind === "mywork"
+                            ? "Il mio lavoro"
+                            : "Da leggere"}{filter.label ? ": " : ""}<strong>{filter.label ?? ""}</strong>
             </span>
             <button onclick={() => setFilter({ kind: "all" })} title="Rimuovi il filtro e mostra tutto">Mostra tutti</button>
           </div>

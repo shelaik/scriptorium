@@ -40,6 +40,8 @@ export interface DocumentItem {
   /** Last viewed page (1-based) and total pages, for the reading-progress bar. */
   last_page: number | null;
   page_count: number | null;
+  /** The user's own work (imported from a LaTeX project .zip). */
+  is_own: boolean;
 }
 
 export interface ImportSummary {
@@ -63,6 +65,20 @@ export const documentsByAuthor = (name: string) =>
 /** Import a BibTeX (.bib) file as reference-only items. Returns add/skip/error counts. */
 export const importBibtex = (path: string) =>
   invoke<{ added: number; skipped: number; errors: string[] }>("import_bibtex", { path });
+
+export interface LatexImportSummary {
+  imported: number;
+  duplicates: number;
+  pdfs_found: number;
+  bib_entries: number;
+  references_linked: number;
+  refs_without_doi: number;
+  errors: string[];
+}
+/** Import a LaTeX project .zip: add its compiled PDF(s) as own work and link the
+ *  .bib bibliography as the paper's citation graph. Entirely local. */
+export const importLatexZip = (path: string) =>
+  invoke<LatexImportSummary>("import_latex_zip", { path });
 /** Try to attach an Open-Access PDF to a reference-only doc. "attached"|"already"|"not_found". */
 export const findPdf = (id: number) => invoke<string>("find_pdf", { id });
 /** Attach the PDF at `url` to an EXISTING reference-only doc (no new entry).
@@ -123,7 +139,7 @@ export const writeTextFile = (path: string, content: string) =>
 export const listDocuments = (filter?: {
   tagId?: number;
   collectionId?: number;
-  flag?: "favorite" | "unread" | "github" | "peerreviewed";
+  flag?: "favorite" | "unread" | "github" | "peerreviewed" | "mywork";
 }) =>
   invoke<DocumentItem[]>("list_documents", {
     tagId: filter?.tagId ?? null,
@@ -518,6 +534,7 @@ export interface LibraryFacets {
   unread: number;
   github: number;
   peerreviewed: number;
+  own: number;
 }
 /** Per-filter document counts over the whole library, for the sidebar badges. */
 export const libraryFacets = () => invoke<LibraryFacets>("library_facets");

@@ -258,6 +258,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "documents", "citekey", "TEXT")?;
     // Total page count, for the reading-progress bar (set on import / first open).
     add_column_if_missing(conn, "documents", "page_count", "INTEGER")?;
+    // Marks the user's own work (set when importing a LaTeX project .zip), so it
+    // can seed "my work" views and citation-gap analysis.
+    add_column_if_missing(conn, "documents", "is_own", "INTEGER NOT NULL DEFAULT 0")?;
     // RAG: page number a passage was taken from (NULL for older chunks / non-PDF refs).
     add_column_if_missing(conn, "doc_chunks", "page", "INTEGER")?;
     // Saved search participates in the on-launch "Novità" sweep (default: yes).

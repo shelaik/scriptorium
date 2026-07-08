@@ -1,9 +1,11 @@
 [package]
 name = "pdfmanage"
-version = "0.6.0"
+version = "0.7.0"
 description = "Lean, fast, local-first PDF & reference manager"
 authors = ["you"]
 edition = "2021"
+# Disambiguate the app binary for `tauri build` (there is also a gated CLI bin).
+default-run = "pdfmanage"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -20,11 +22,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # `cargo build --release --bin scriptorium-cli --features cli`.
 cli = []
 
-# Headless, read-only terminal access to the library (see src/bin/cli.rs).
-# Links only rusqlite + serde_json, so it is small and fast to build.
+# Headless, read-only terminal access to the library (see src/cli_main.rs).
+# Kept OUT of src/bin/ so cargo does not auto-detect it as a second app binary
+# (which confuses the tauri bundler). Links only rusqlite + serde_json.
 [[bin]]
 name = "scriptorium-cli"
-path = "src/bin/cli.rs"
+path = "src/cli_main.rs"
 required-features = ["cli"]
 
 [build-dependencies]
@@ -76,6 +79,10 @@ parking_lot = "0.12"
 
 # --- Watched-folder import ---
 notify = "8"
+
+# --- LaTeX project (.zip) intake: read the compiled PDF + .bib bibliography.
+#     deflate-only (miniz_oxide, pure Rust) avoids the bzip2/zstd C build burden. ---
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # --- Embedded terminal (PTY for the in-app terminal tab) ---
 portable-pty = "0.8"

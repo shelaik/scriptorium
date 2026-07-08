@@ -189,6 +189,7 @@ pub fn run() {
             commands::get_connector_info,
             commands::set_connector_enabled,
             commands::import_bibtex,
+            commands::import_latex_zip,
             commands::find_pdf,
             commands::attach_from_url,
             commands::hf_resources,

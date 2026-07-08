@@ -1755,9 +1755,9 @@ fn rrf_merge(a: &[i64], b: &[i64], limit: usize) -> Vec<i64> {
 /// Fetch documents by id, preserving the order of `ids`.
 fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> anyhow::Result<Vec<Document>> {
     let sql = if include_deleted {
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, (summary IS NOT NULL AND TRIM(summary) != '') FROM documents WHERE id = ?1"
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, (summary IS NOT NULL AND TRIM(summary) != ''), is_own FROM documents WHERE id = ?1"
     } else {
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, (summary IS NOT NULL AND TRIM(summary) != '') FROM documents WHERE id = ?1 AND deleted_at IS NULL"
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, (summary IS NOT NULL AND TRIM(summary) != ''), is_own FROM documents WHERE id = ?1 AND deleted_at IS NULL"
     };
     let mut doc_stmt = conn.prepare(sql)?;
     let mut author_stmt = conn.prepare(
@@ -1785,10 +1785,11 @@ fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> any
                     r.get::<_, Option<i64>>(12)?,
                     r.get::<_, Option<i64>>(13)?,
                     r.get::<_, i64>(14)?,
+                    r.get::<_, i64>(15)?,
                 ))
             })
             .optional()?;
-        let Some((id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, has_summary)) = row else {
+        let Some((id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, has_summary, is_own)) = row else {
             continue;
         };
         let pub_status = discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref());
@@ -1828,6 +1829,7 @@ fn fetch_documents(conn: &Connection, ids: &[i64], include_deleted: bool) -> any
             citekey,
             last_page,
             page_count,
+            is_own: is_own != 0,
         });
     }
     Ok(out)
@@ -2475,6 +2477,298 @@ pub fn import_bibtex(app: AppHandle, path: String) -> Result<AddSummary, String>
         }
     }
     Ok(summary)
+}
+
+/// Summary of a LaTeX-project (.zip) import.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LatexImportSummary {
+    /// New "own work" PDFs added to the library.
+    pub imported: usize,
+    /// PDFs already present (still marked own + their references re-linked).
+    pub duplicates: usize,
+    /// PDF files found inside the archive.
+    pub pdfs_found: usize,
+    /// Total .bib entries parsed across every .bib in the archive.
+    pub bib_entries: usize,
+    /// Bibliography rows linked into the citation graph (document_references).
+    pub references_linked: usize,
+    /// Of those, how many lack a DOI (won't match citation-gap analysis yet).
+    pub refs_without_doi: usize,
+    pub errors: Vec<String>,
+}
+
+/// RAII cleanup for the extraction temp directory (fires on any return path).
+struct TempDirGuard(PathBuf);
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Import a LaTeX project archive (.zip): add its compiled PDF(s) as the user's
+/// own work and capture the .bib bibliography as the paper's reference graph.
+/// fs + pdfium heavy, so it runs on a blocking thread. Entirely local (no network).
+#[tauri::command]
+pub async fn import_latex_zip(app: AppHandle, path: String) -> Result<LatexImportSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || import_latex_zip_inner(&app, &path))
+        .await
+        .map_err(|e| format!("Task fallito: {e}"))?
+}
+
+fn import_latex_zip_inner(app: &AppHandle, zip_path: &str) -> Result<LatexImportSummary, String> {
+    use std::io::Read;
+    let state = app.state::<AppState>();
+    let data_dir = app.path().app_data_dir().map_err(|e| format!("app_data_dir: {e}"))?;
+    let papers_dir = data_dir.join("papers");
+    std::fs::create_dir_all(&papers_dir).map_err(|e| format!("Creazione papers/: {e}"))?;
+    let extract_dir = {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        data_dir.join("tmp").join(format!("latex_{stamp}"))
+    };
+    std::fs::create_dir_all(&extract_dir).map_err(|e| format!("Creazione cartella temp: {e}"))?;
+    let _cleanup = TempDirGuard(extract_dir.clone());
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // --- 1. Open the archive; extract only PDFs (to disk) and .bib files (to memory).
+    // Defensive bounds against a malformed/decompression-bomb archive (the user
+    // picks the file, so this is belt-and-suspenders, not a security boundary).
+    const MAX_ENTRIES: usize = 50_000;
+    const MAX_PDF_BYTES: u64 = 300 * 1024 * 1024; // matches import::MAX_IMPORT_BYTES
+    const MAX_BIB_BYTES: u64 = 32 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("Apertura .zip: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Lettura .zip: {e}"))?;
+    let mut pdfs: Vec<(PathBuf, PathBuf)> = Vec::new(); // (abs pdf path on disk, relative dir)
+    let mut bibs: Vec<(PathBuf, String)> = Vec::new(); //  (relative dir, .bib content)
+    let n_entries = archive.len();
+    if n_entries > MAX_ENTRIES {
+        errors.push(format!("Archivio con troppe voci ({n_entries}): ne leggo {MAX_ENTRIES}"));
+    }
+    let mut total_bytes: u64 = 0;
+    for i in 0..n_entries.min(MAX_ENTRIES) {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(e) => {
+                errors.push(format!("Voce zip {i}: {e}"));
+                continue;
+            }
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        // enclosed_name() rejects absolute paths and `..` traversal (zip-slip guard);
+        // take an owned copy so the entry can then be read mutably.
+        let rel = match entry.enclosed_name() {
+            Some(r) => r.to_path_buf(),
+            None => continue,
+        };
+        let ext = rel.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+        let rel_dir = rel.parent().map(Path::to_path_buf).unwrap_or_default();
+        if total_bytes >= MAX_TOTAL_BYTES {
+            errors.push("Limite dimensione archivio raggiunto: import interrotto".into());
+            break;
+        }
+        match ext.as_deref() {
+            Some("pdf") => {
+                // `entry.size()` is the declared uncompressed size; the `.take()` cap
+                // below enforces it even if the header lies.
+                if entry.size() > MAX_PDF_BYTES {
+                    errors.push(format!("PDF troppo grande, saltato: {}", rel.display()));
+                    continue;
+                }
+                let out = extract_dir.join(&rel);
+                if let Some(parent) = out.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::File::create(&out) {
+                    Ok(mut f) => {
+                        match std::io::copy(&mut (&mut entry).take(MAX_PDF_BYTES), &mut f) {
+                            Ok(written) => {
+                                total_bytes = total_bytes.saturating_add(written);
+                                pdfs.push((out, rel_dir));
+                            }
+                            Err(e) => errors.push(format!("Estrazione {}: {e}", rel.display())),
+                        }
+                    }
+                    Err(e) => errors.push(format!("Scrittura {}: {e}", rel.display())),
+                }
+            }
+            Some("bib") => {
+                if entry.size() > MAX_BIB_BYTES {
+                    errors.push(format!(".bib troppo grande, saltato: {}", rel.display()));
+                    continue;
+                }
+                let mut buf = Vec::new();
+                if (&mut entry).take(MAX_BIB_BYTES).read_to_end(&mut buf).is_ok() {
+                    total_bytes = total_bytes.saturating_add(buf.len() as u64);
+                    bibs.push((rel_dir, String::from_utf8_lossy(&buf).into_owned()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // --- 2. Parse every .bib file.
+    let parsed: Vec<(PathBuf, Vec<bibtex::BibEntry>)> =
+        bibs.iter().map(|(dir, c)| (dir.clone(), bibtex::parse(c))).collect();
+    let bib_entries: usize = parsed.iter().map(|(_, e)| e.len()).sum();
+
+    // --- 3. Import each PDF as own work: content-addressed copy → prepare → commit.
+    let thumb = thumb_dir(app);
+    let _ = std::fs::create_dir_all(&thumb);
+    let mut imported = 0usize;
+    let mut duplicates = 0usize;
+    let mut own_papers: Vec<(i64, PathBuf)> = Vec::new();
+    for (pdf_path, pdf_dir) in &pdfs {
+        let bytes = match std::fs::read(pdf_path) {
+            Ok(b) => b,
+            Err(e) => {
+                errors.push(format!("Lettura PDF: {e}"));
+                continue;
+            }
+        };
+        let hash = import::sha256_hex(&bytes);
+        let dest = papers_dir.join(format!("{hash}.pdf"));
+        if !dest.exists() {
+            if let Err(e) = std::fs::write(&dest, &bytes) {
+                errors.push(format!("Copia PDF nella libreria: {e}"));
+                continue;
+            }
+        }
+        let prepared = {
+            let _g = state.pdfium_lock.lock();
+            match import::prepare_import(&state.pdfium, &thumb, &dest) {
+                Ok(p) => p,
+                Err(e) => {
+                    errors.push(format!("Analisi PDF: {e:#}"));
+                    continue;
+                }
+            }
+        };
+        let outcome = {
+            let conn = state.db.lock();
+            match import::commit_import(&conn, &prepared) {
+                Ok(o) => o,
+                Err(e) => {
+                    errors.push(format!("Salvataggio PDF: {e:#}"));
+                    continue;
+                }
+            }
+        };
+        {
+            let conn = state.db.lock();
+            let _ = conn.execute("UPDATE documents SET is_own = 1 WHERE id = ?1", params![outcome.document_id]);
+        }
+        if outcome.imported {
+            imported += 1;
+            // Only NEW documents get their bibliography linked, so we never wipe or
+            // overwrite the (possibly Crossref-enriched) references of a paper the
+            // user already had. A fresh row has no references yet.
+            own_papers.push((outcome.document_id, pdf_dir.clone()));
+        } else {
+            duplicates += 1;
+        }
+    }
+
+    // --- 4. Link each new paper to its bibliography (the document_references graph).
+    let mut references_linked = 0usize;
+    let mut refs_without_doi = 0usize;
+    if !own_papers.is_empty() {
+        let single = own_papers.len() == 1;
+        let conn = state.db.lock();
+        for (doc_id, pdf_dir) in &own_papers {
+            // Dedupe within a paper: the same citation can be reachable via two
+            // overlapping .bib dirs (root + subdir), or via `single` accepting all.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (bib_dir, entries) in &parsed {
+                // A .bib applies to a PDF sitting in the same dir or a descendant;
+                // for a lone paper, accept every .bib in the archive.
+                if !(single || pdf_dir.starts_with(bib_dir)) {
+                    continue;
+                }
+                for e in entries {
+                    let Some(rref) = bib_to_ref(e) else { continue };
+                    let key = match &rref.doi {
+                        Some(d) => format!("doi:{d}"),
+                        None => format!("t:{}", rref.meta.title.as_deref().unwrap_or_default().to_lowercase()),
+                    };
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    let raw = latex_ref_raw(&rref);
+                    let doi = rref.doi.as_deref();
+                    if conn
+                        .execute(
+                            "INSERT INTO document_references (document_id, ref_doi, raw) VALUES (?1, ?2, ?3)",
+                            params![doc_id, doi, raw],
+                        )
+                        .is_ok()
+                    {
+                        references_linked += 1;
+                        if doi.is_none() {
+                            refs_without_doi += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if imported > 0 || duplicates > 0 {
+        let _ = app.emit("library-changed", ());
+    }
+    Ok(LatexImportSummary {
+        imported,
+        duplicates,
+        pdfs_found: pdfs.len(),
+        bib_entries,
+        references_linked,
+        refs_without_doi,
+        errors,
+    })
+}
+
+/// Best-effort human citation string for a bibliography entry (stored in `raw`).
+fn latex_ref_raw(rref: &metadata::ResolvedRef) -> String {
+    let m = &rref.meta;
+    let mut parts: Vec<String> = Vec::new();
+    if !m.authors.is_empty() {
+        let names: Vec<String> = m
+            .authors
+            .iter()
+            .take(6)
+            .map(|a| match (&a.given, &a.family) {
+                (Some(g), Some(f)) => format!("{g} {f}"),
+                (None, Some(f)) => f.clone(),
+                (Some(g), None) => g.clone(),
+                _ => String::new(),
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !names.is_empty() {
+            parts.push(names.join(", "));
+        }
+    }
+    if let Some(t) = &m.title {
+        parts.push(t.clone());
+    }
+    if let Some(v) = &m.venue {
+        parts.push(v.clone());
+    }
+    if let Some(y) = m.year {
+        parts.push(y.to_string());
+    }
+    let s = parts.join(". ");
+    if s.is_empty() {
+        rref.doi.clone().unwrap_or_default()
+    } else {
+        s
+    }
 }
 
 /// Try to attach an Open-Access PDF to a reference-only document.
@@ -4681,6 +4975,7 @@ pub struct LibraryFacets {
     pub unread: i64,
     pub github: i64,
     pub peerreviewed: i64,
+    pub own: i64,
 }
 
 /// Counts behind the sidebar's library filters, computed over the whole library
@@ -4690,10 +4985,10 @@ pub struct LibraryFacets {
 #[tauri::command]
 pub fn library_facets(state: State<'_, AppState>) -> Result<LibraryFacets, String> {
     let conn = state.db.lock();
-    let mut facets = LibraryFacets { all: 0, favorite: 0, unread: 0, github: 0, peerreviewed: 0 };
+    let mut facets = LibraryFacets { all: 0, favorite: 0, unread: 0, github: 0, peerreviewed: 0, own: 0 };
     let mut stmt = conn
         .prepare(
-            "SELECT favorite, is_read, github_url, doi, venue, path
+            "SELECT favorite, is_read, github_url, doi, venue, path, is_own
              FROM documents WHERE deleted_at IS NULL",
         )
         .map_err(|e| e.to_string())?;
@@ -4706,11 +5001,12 @@ pub fn library_facets(state: State<'_, AppState>) -> Result<LibraryFacets, Strin
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
+                r.get::<_, i64>(6)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     for row in rows {
-        let (favorite, is_read, github_url, doi, venue, path) = row.map_err(|e| e.to_string())?;
+        let (favorite, is_read, github_url, doi, venue, path, is_own) = row.map_err(|e| e.to_string())?;
         facets.all += 1;
         if favorite != 0 {
             facets.favorite += 1;
@@ -4720,6 +5016,9 @@ pub fn library_facets(state: State<'_, AppState>) -> Result<LibraryFacets, Strin
         }
         if github_url.is_some() {
             facets.github += 1;
+        }
+        if is_own != 0 {
+            facets.own += 1;
         }
         if discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref()).as_deref()
             == Some("published")
@@ -5385,17 +5684,18 @@ fn query_documents(
         Some("favorite") => conds.push("favorite = 1".to_string()),
         Some("unread") => conds.push("is_read = 0".to_string()),
         Some("github") => conds.push("github_url IS NOT NULL".to_string()),
+        Some("mywork") => conds.push("is_own = 1".to_string()),
         _ => {}
     }
     let sql = format!(
-        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, (summary IS NOT NULL AND TRIM(summary) != '')
+        "SELECT id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, (summary IS NOT NULL AND TRIM(summary) != ''), is_own
          FROM documents WHERE {} ORDER BY added_at DESC, id DESC",
         conds.join(" AND ")
     );
 
     let mut stmt = conn.prepare(&sql)?;
     #[allow(clippy::type_complexity)]
-    let base: Vec<(i64, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>, i64)> =
+    let base: Vec<(i64, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>, i64, i64)> =
         stmt.query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -5413,6 +5713,7 @@ fn query_documents(
                 r.get(12)?,
                 r.get(13)?,
                 r.get(14)?,
+                r.get(15)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -5424,7 +5725,7 @@ fn query_documents(
     )?;
 
     let mut docs = Vec::with_capacity(base.len());
-    for (id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, has_summary) in base {
+    for (id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, has_summary, is_own) in base {
         let pub_status = discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref());
         let paper_url = paper_link_for(doi.as_deref(), path.as_deref());
         let authors: Vec<String> = author_stmt
@@ -5463,6 +5764,7 @@ fn query_documents(
             citekey,
             last_page,
             page_count,
+            is_own: is_own != 0,
         });
     }
     // pub_status is computed, not a column — filter the peer-reviewed view here.
