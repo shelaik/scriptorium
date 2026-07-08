@@ -548,6 +548,26 @@
       setNotice("Impossibile copiare negli appunti");
     }
   }
+  /** Copy an arbitrary snippet (the current PDF text selection) to the clipboard. */
+  async function copySelection(text: string) {
+    const t = text.trim();
+    if (!t) return;
+    try {
+      await navigator.clipboard.writeText(t);
+      setNotice("Testo copiato negli appunti ✓");
+    } catch {
+      setNotice("Impossibile copiare negli appunti");
+    }
+  }
+  /** The live PDF text selection, if any — read at right-click time for the radial.
+   *  Trusts the browser's live selection (right-click preserves it) so a stale
+   *  `pending` from an earlier selection can never be copied; `pending` is only a
+   *  fallback when the live range is unavailable but still non-collapsed. */
+  function currentSelection(): string {
+    const live = window.getSelection();
+    if (live && !live.isCollapsed && live.rangeCount > 0) return live.toString().trim();
+    return "";
+  }
   async function saveText(ext: "txt" | "md") {
     const path = await save({
       defaultPath: `estratto.${ext}`,
@@ -1301,7 +1321,13 @@
   let viewerRadial = $state<{ x: number; y: number; items: RadialItem[] } | null>(null);
 
   function buildViewerRadial(): RadialItem[] {
-    return [
+    const sel = currentSelection();
+    const items: RadialItem[] = [];
+    if (sel) {
+      const preview = sel.length > 40 ? sel.slice(0, 40) + "…" : sel;
+      items.push({ id: "copysel", label: "Copia", hint: `Copia il testo selezionato: “${preview}”`, action: () => copySelection(sel) });
+    }
+    items.push(
       { id: "fitw", label: "Adatta larghezza", hint: "Larghezza pagina = finestra (W)", action: fitWidth },
       { id: "fith", label: "Adatta pagina", hint: "Pagina intera nella finestra (H)", action: fitPage },
       { id: "spread", label: "Due pagine", checked: spread, hint: "Vista a due pagine (2)", action: toggleSpread },
@@ -1325,7 +1351,8 @@
         ],
       },
       { id: "close", label: "Chiudi lettore", danger: true, hint: "Torna alla libreria (Esc)", action: onClose },
-    ];
+    );
+    return items;
   }
 
   function onViewerContext(e: MouseEvent) {

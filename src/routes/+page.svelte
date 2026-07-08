@@ -446,7 +446,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.5.2";
+  const APP_VERSION = "0.5.3";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1944,6 +1944,21 @@
     }
   }
 
+  /** Copy the paper's title to the clipboard (quick action from grid/list menus). */
+  async function copyTitle(doc: DocumentItem) {
+    const t = (doc.title ?? "").trim();
+    if (!t) {
+      status = "Questo documento non ha un titolo da copiare";
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(t);
+      status = "Titolo copiato negli appunti";
+    } catch (e) {
+      status = "Errore copia: " + e;
+    }
+  }
+
   // ----- "Cura della libreria": salute + gap di citazioni + duplicati, a schede -----
   let careModal = $state(false);
   let careTab = $state<"salute" | "gap" | "duplicati">("salute");
@@ -2566,6 +2581,7 @@
       orgKids.push({ id: "or-pdf", label: "Allega PDF…", hint: "Questa voce è solo un riferimento: trova un PDF Open Access o allegane uno da un link", action: () => (refPanel = { doc: d, url: "", busy: false }) });
     return [
       { id: "d-open", label: "Apri", icon: I.open, hint: "Leggi nel visore integrato", action: () => openDocument(d) },
+      { id: "d-copyt", label: "Copia titolo", icon: I.copy, hint: "Copia il titolo del paper negli appunti", disabled: !(d.title ?? "").trim(), action: () => copyTitle(d) },
       { id: "d-fav", label: "Preferito", icon: I.star, checked: d.favorite, hint: d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti", action: () => toggleFavorite(d) },
       { id: "d-read", label: "Letto", icon: I.check, checked: d.is_read, hint: d.is_read ? "Segna come da leggere" : "Segna come letto", action: () => toggleRead(d) },
       { id: "d-cite", label: "Cita", icon: I.quote, hint: "Copia citazioni, riferimenti, esplora", children: citeKids },
