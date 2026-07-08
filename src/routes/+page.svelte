@@ -262,6 +262,17 @@
   // Compact tool bar: which global-radial group's dropdown is open (items are
   // derived live from buildGlobalRadial() at render, so disabled/badge stay fresh).
   let toolMenu = $state<{ id: string; x: number; y: number } | null>(null);
+  // Which tool-bar group owns the current view, so its icon shows a "you are here"
+  // mark (replaces the active highlight the moved sidebar buttons used to give).
+  let activeToolGroup = $derived.by(() => {
+    if (careModal) return "g-tools";
+    switch (filter.kind) {
+      case "novita": return "g-novita";
+      case "ask": case "wiki": case "notes": case "discover": return "g-search";
+      case "trash": case "terminal": case "duplicates": return "g-tools";
+      default: return null;
+    }
+  });
   let watchedFolder = $state<string | null>(null);
   let view = $state<"grid" | "list" | "map">("grid");
   // ----- Orbita layer: radial menu, command palette, popovers, map, spotlight -----
@@ -477,7 +488,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.3";
+  const APP_VERSION = "0.8.4";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2604,6 +2615,7 @@
     ask: "M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01M12 2a10 10 0 1 0 .01 0",
     near: "M12 8a4 4 0 1 0 .01 0M12 2v2M12 20v2M2 12h2M20 12h2",
     heal: "M22 12h-4l-3 9L9 3l-3 9H2",
+    bell: "M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0",
     x: "M18 6L6 18M6 6l12 12",
   };
 
@@ -2896,6 +2908,14 @@
         ],
       },
       { id: "g-redis", label: "Riscopri", icon: I.compass, hint: "Un documento dimenticato, pescato per te", action: () => rediscover() },
+      {
+        id: "g-novita",
+        label: "Novità",
+        icon: I.bell,
+        hint: "Nuovi paper sui temi che segui (ricerche salvate), raccolti a ogni avvio",
+        badge: novitaN > 0 ? (novitaN > 99 ? "99+" : String(novitaN)) : undefined,
+        action: () => openNovita(),
+      },
       {
         id: "g-exp",
         label: "Esporta",
@@ -3783,11 +3803,13 @@
       <button
         class="iconbtn"
         class:menuopen={toolMenu?.id === g.id}
+        class:active={activeToolGroup === g.id}
         title={g.hint ? g.label + " — " + g.hint : g.label}
         aria-label={g.label}
         onclick={(e) => openTool(e, g)}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d={g.icon} /></svg>
+        {#if g.badge}<span class="toolbadge">{g.badge}</span>{/if}
       </button>
     {/each}
   </nav>
@@ -3969,19 +3991,6 @@
         {/each}
       {/if}
 
-      <div class="sec">Strumenti</div>
-      <button class="navitem" class:active={filter.kind === "ask"} onclick={() => { setFilter({ kind: "ask" }); loadRagStatus(); }} title="Fai domande alla tua libreria: risposte con citazioni dai tuoi documenti (AI locale)">Chiedi alla libreria</button>
-      <button class="navitem" class:active={filter.kind === "wiki"} onclick={openWikiView} title="La tua enciclopedia privata: pagine per concetto generate dall'AI locale dai tuoi paper, con fonti che aprono il PDF alla pagina giusta">Wiki della libreria</button>
-      <button class="navitem" class:active={filter.kind === "notes"} onclick={openNotesView} title="Le tue note in Markdown: file .md veri su disco, con [[collegamenti]] a note e paper">Note</button>
-      <button class="navitem" class:active={filter.kind === "discover"} onclick={() => setFilter({ kind: "discover" })} title="Cerca paper online (arXiv / OpenAlex / ADS) e aggiungili alla libreria">Scopri online</button>
-      <button class="navitem" class:active={filter.kind === "novita"} onclick={openNovita} title="Nuovi paper usciti sui temi che segui (ricerche salvate), raccolti a ogni avvio">
-        Novità{#if novitaN > 0}<span class="navbadge" title={`${novitaN} da vedere`}>{novitaN > 99 ? "99+" : novitaN}</span>{/if}
-      </button>
-      <button class="navitem" class:active={careModal} onclick={() => openCare("salute")} title="Salute della libreria, gap di citazioni e duplicati — in un posto solo">Cura della libreria</button>
-      <button class="navitem" class:active={filter.kind === "trash"} onclick={() => setFilter({ kind: "trash" })} title="Documenti eliminati: ripristina o elimina definitivamente">Cestino</button>
-      <button class="navitem" class:active={filter.kind === "terminal"} onclick={() => { terminalOpened = true; setFilter({ kind: "terminal" }); }} title="Terminale integrato: usa claude code o altri strumenti a riga di comando sui tuoi PDF">Terminale</button>
-      <p class="sidehint" title="Aggancia da URL, Aggiungi per ID, Salute libreria, Gap di citazioni e tutto il resto vivono nel menu radiale (tasto destro) e nella palette (Ctrl+K)">Tasto destro: menu radiale · Ctrl+K: palette</p>
-
       <div class="sec">Cartella sorvegliata</div>
       <div class="watched">
         {#if watchedFolder}
@@ -3992,11 +4001,7 @@
         {/if}
       </div>
 
-      <div class="appfoot">
-        <button class="navitem foot" onclick={openSettings} title="Impostazioni: abilita la ricerca online, email, chiave OpenAlex e token ADS">Impostazioni</button>
-        <button class="navitem foot" onclick={() => (helpModal = true)} title="Guida all'uso e scorciatoie da tastiera">Aiuto</button>
-        <button class="navitem foot" onclick={() => (aboutModal = true)} title="Informazioni su Scriptorium">Informazioni</button>
-      </div>
+      <p class="sidehint" title="Chiedi alla libreria, Wiki, Note, Scopri online, Novità, Cura della libreria, Cestino, Terminale, Impostazioni, Aiuto e Informazioni sono ora nella barra strumenti in alto ↑ — tasto destro: menu radiale · Ctrl+K: palette">Gli strumenti sono nella barra in alto ↑</p>
     </aside>
 
     <main class="main">
@@ -5591,7 +5596,7 @@
             <li><strong>Viste</strong>: griglia (copertine ridimensionabili con − ▭ +), lista a colonne, e <strong>Costellazione</strong> — la libreria come mappa semantica: ogni stella un documento, i legami sono la somiglianza di significato. Clic per aprire, tasto destro per il menu, Ctrl+clic per selezionare.</li>
             <li><strong>Continua a leggere</strong>: in “Tutti” trovi in alto gli ultimi PDF aperti. Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
             <li><strong>Riscopri</strong> (menu radiale o palette): ti ripesca un documento dimenticato o mai letto.</li>
-            <li><strong>Cura della libreria</strong> (sidebar o radiale → Strumenti) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi) e <strong>Duplicati</strong> (unione). Il <strong>Cestino</strong> resta tra gli Strumenti.</li>
+            <li><strong>Cura della libreria</strong> (barra strumenti in alto o radiale → Strumenti) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi) e <strong>Duplicati</strong> (unione). Il <strong>Cestino</strong> resta tra gli Strumenti.</li>
             <li><strong>Tag</strong>: la <strong>matitina ✎</strong> accanto a un tag nella barra laterale lo <strong>rinomina o ricolora</strong>; la <strong>×</strong> lo elimina. Dal pannello di dettaglio aggiungi/togli tag al volo.</li>
             <li>Nella vista <strong>Tutti</strong>, la <strong>Panoramica</strong> in alto (comprimibile) mostra quanti documenti hai da leggere, in lettura e aggiunti questo mese, e ti propone un paper da <strong>riscoprire</strong> ogni giorno.</li>
           </ul>
@@ -5647,7 +5652,7 @@
         <div class="helpsec">
           <h3>Wiki della libreria</h3>
           <ul>
-            <li>La tua <strong>enciclopedia privata</strong>: una pagina per concetto, scritta dall'AI locale leggendo solo i tuoi documenti (barra laterale → <em>Wiki della libreria</em>).</li>
+            <li>La tua <strong>enciclopedia privata</strong>: una pagina per concetto, scritta dall'AI locale leggendo solo i tuoi documenti (barra strumenti in alto → Cerca → <em>Wiki della libreria</em>).</li>
             <li>Le fonti, in tre modi: <strong>«Genera/aggiorna dai tag»</strong> (una pagina per ogni tag con almeno 2 documenti); un <strong>concetto libero</strong> (i paper pertinenti li trova la ricerca semantica); oppure <strong>scegli tu le fonti</strong> — seleziona i documenti nella griglia → tasto destro → <em>Pagina wiki (AI)</em>: la pagina usa esattamente quelli (max 10).</li>
             <li>Le citazioni <strong>[n]</strong> nel testo aprono il PDF <strong>alla pagina giusta</strong>; i concetti citati in altre pagine diventano <strong>link</strong> tra pagine; in fondo trovi le fonti con i passaggi usati (chip «p. N»).</li>
             <li>Ogni fonte <em>deve</em> comparire nella pagina: se la sintesi non la usa, viene dichiarata in «Fonti non integrate» — mai omessa in silenzio. Il pallino <strong>●</strong> sull'elenco segnala che la libreria è cambiata e conviene rigenerare.</li>
@@ -6281,10 +6286,6 @@
     border-radius: 6px; padding: 6px 8px; font-size: 12px; outline: none;
   }
   .newcoll .smart { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
-  /* App-level chrome, separated from the working tools above. */
-  .appfoot { margin: 18px 0 4px; padding-top: 8px; border-top: 1px solid var(--border); }
-  .navitem.foot { color: var(--dim); font-size: 12px; padding: 6px 9px; }
-  .navitem.foot:hover { color: var(--text); }
   .watched { display: flex; align-items: center; gap: 4px; margin: 6px; }
   .wpath {
     flex: 1; font-size: 12px; color: var(--dim); overflow: hidden;
@@ -6424,13 +6425,6 @@
     background: var(--accent); color: var(--on-accent);
   }
   .inlibtag { background: var(--border); color: var(--dim); margin-left: 6px; margin-right: 0; }
-  /* Nav "Novità" unread badge */
-  .navbadge {
-    display: inline-flex; align-items: center; justify-content: center;
-    min-width: 17px; height: 17px; padding: 0 5px; margin-left: 7px;
-    font-size: 10.5px; font-weight: 700; line-height: 1; border-radius: 9px;
-    background: var(--accent); color: var(--on-accent);
-  }
   /* "Novità" feed view */
   .novhead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding: 4px 4px 14px; border-bottom: 1px solid var(--border-soft); margin-bottom: 14px; flex-wrap: wrap; }
   .novtitle h2 { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 600; color: var(--text); }
@@ -6935,7 +6929,18 @@
     padding: 4px 18px; background: var(--surface);
     border-bottom: 1px solid var(--border-soft);
   }
-  .toolbar .iconbtn { width: 36px; height: 32px; }
+  .toolbar .iconbtn { position: relative; width: 36px; height: 32px; }
+  .toolbar .iconbtn.active { color: var(--accent); }
+  .toolbar .iconbtn.active::after {
+    content: ""; position: absolute; left: 8px; right: 8px; bottom: 1px; height: 2px;
+    background: var(--accent); border-radius: 2px;
+  }
+  .toolbadge {
+    position: absolute; top: 1px; right: 1px; min-width: 15px; height: 15px; padding: 0 3px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700; line-height: 1; color: var(--on-accent); background: var(--accent);
+    border-radius: 8px; box-shadow: 0 0 0 1.5px var(--surface); pointer-events: none;
+  }
   .toolmenu { width: 250px; }
   .menusec {
     font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em;
