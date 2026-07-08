@@ -36,7 +36,15 @@
     createSavedSearch,
     deleteSavedSearch,
     runSavedSearch,
+    setWatchAutoRun,
     type SavedSearch,
+    novitaCount,
+    listNovita,
+    dismissHit,
+    dismissWatchHits,
+    acceptHit,
+    sweepWatchesNow,
+    type NovitaGroup,
     embeddingStatus,
     generateEmbeddings,
     cancelEmbeddings,
@@ -139,7 +147,7 @@
   import DetailPanel from "$lib/DetailPanel.svelte";
 
   type Filter = {
-    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki";
+    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita";
     id?: number;
     label?: string;
   };
@@ -368,6 +376,16 @@
   let savedSearches = $state<SavedSearch[]>([]);
   let discoverNewIds = $state<Set<string>>(new Set());
   let savingSearch = $state(false);
+  // "Novità" feed: papers surfaced by the on-launch sweep of saved searches.
+  let novitaN = $state(0); // unread count → nav badge
+  let novitaGroups = $state<NovitaGroup[]>([]);
+  let novitaLoading = $state(false);
+  let novitaSweeping = $state(false);
+  let acceptingHit = $state<number | null>(null);
+  let novitaP: Promise<() => void> | null = null;
+  // In-flight accept/ignore mutations: while > 0 the event-driven feed reload is
+  // skipped so it can't revert an optimistic removal (a card wouldn't reappear).
+  let novitaMutating = 0;
   // ----- RAG engine ("Chiedi alla libreria") -----
   let askQuestion = $state("");
   let askAnswer = $state("");
@@ -446,7 +464,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.5.4";
+  const APP_VERSION = "0.6.0";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1815,8 +1833,96 @@
     try {
       await deleteSavedSearch(s.id);
       await loadSaved();
+      await refreshNovitaCount();
     } catch {
       /* ignore */
+    }
+  }
+
+  // ----- "Novità": feed from the saved-search sweep -----
+  async function refreshNovitaCount() {
+    try {
+      novitaN = await novitaCount();
+    } catch {
+      /* ignore — badge just stays put */
+    }
+  }
+  async function openNovita() {
+    setFilter({ kind: "novita" });
+    novitaLoading = true;
+    try {
+      novitaGroups = await listNovita();
+    } catch (e) {
+      status = "Errore nel caricare le novità: " + e;
+    } finally {
+      novitaLoading = false;
+    }
+  }
+  /** Add a feed item to the library, then drop it from the open feed + badge. */
+  async function acceptNovita(watchId: number, hitId: number) {
+    acceptingHit = hitId;
+    novitaMutating++;
+    try {
+      const res = await acceptHit(hitId);
+      status =
+        res === "added_pdf"
+          ? "Aggiunto alla libreria (PDF scaricato) ✓"
+          : res === "added_ref"
+            ? "Aggiunto come riferimento ✓"
+            : "Era già in libreria";
+      dropHitFromFeed(watchId, hitId);
+      await refreshNovitaCount();
+      loadDocs();
+    } catch (e) {
+      status = "Errore: " + e;
+    } finally {
+      acceptingHit = null;
+      novitaMutating--;
+    }
+  }
+  async function ignoreNovita(watchId: number, hitId: number) {
+    novitaMutating++;
+    try {
+      await dismissHit(hitId);
+      dropHitFromFeed(watchId, hitId);
+      await refreshNovitaCount();
+    } catch (e) {
+      status = "Errore: " + e;
+    } finally {
+      novitaMutating--;
+    }
+  }
+  async function ignoreAllNovita(watchId: number) {
+    novitaMutating++;
+    try {
+      await dismissWatchHits(watchId);
+      novitaGroups = novitaGroups.filter((g) => g.watch_id !== watchId);
+      await refreshNovitaCount();
+    } catch (e) {
+      status = "Errore: " + e;
+    } finally {
+      novitaMutating--;
+    }
+  }
+  /** Remove one hit from the in-memory feed, dropping now-empty groups. */
+  function dropHitFromFeed(watchId: number, hitId: number) {
+    novitaGroups = novitaGroups
+      .map((g) => (g.watch_id === watchId ? { ...g, hits: g.hits.filter((h) => h.hit_id !== hitId) } : g))
+      .filter((g) => g.hits.length > 0);
+  }
+  async function sweepNovitaNow() {
+    if (novitaSweeping) return;
+    novitaSweeping = true;
+    status = "Cerco novità negli archivi…";
+    try {
+      const fresh = await sweepWatchesNow();
+      status = fresh > 0 ? `${fresh} nuovi paper trovati` : "Nessuna novità al momento";
+      novitaGroups = await listNovita();
+      await refreshNovitaCount();
+    } catch (e) {
+      status = "Errore ricerca novità: " + e;
+    } finally {
+      novitaSweeping = false;
     }
   }
   // ----- RAG engine -----
@@ -2326,6 +2432,14 @@
     wikiP = listen<{ phase: string; done: number; total: number; concept: string }>("wiki-progress", (e) => {
       wikiProg = e.payload.phase === "done" ? null : e.payload;
     });
+    // "Novità": the on-launch sweep finished — refresh the badge (and the feed if open).
+    novitaP = listen<number>("novita-changed", () => {
+      refreshNovitaCount();
+      // Don't reload the feed mid accept/ignore or we'd revert the optimistic removal.
+      if (filter.kind === "novita" && novitaMutating === 0)
+        listNovita().then((g) => (novitaGroups = g)).catch(() => {});
+    });
+    refreshNovitaCount();
     return () => {
       dragP?.then((f) => f());
       embP?.then((f) => f());
@@ -2334,6 +2448,7 @@
       askP?.then((f) => f());
       connP?.then((f) => f());
       wikiP?.then((f) => f());
+      novitaP?.then((f) => f());
       clearTimeout(searchTimer);
       clearTimeout(clearTimer);
       clearInterval(aiStatusTimer);
@@ -3548,6 +3663,9 @@
       <button class="navitem" class:active={filter.kind === "ask"} onclick={() => { setFilter({ kind: "ask" }); loadRagStatus(); }} title="Fai domande alla tua libreria: risposte con citazioni dai tuoi documenti (AI locale)">Chiedi alla libreria</button>
       <button class="navitem" class:active={filter.kind === "wiki"} onclick={openWikiView} title="La tua enciclopedia privata: pagine per concetto generate dall'AI locale dai tuoi paper, con fonti che aprono il PDF alla pagina giusta">Wiki della libreria</button>
       <button class="navitem" class:active={filter.kind === "discover"} onclick={() => setFilter({ kind: "discover" })} title="Cerca paper online (arXiv / OpenAlex / ADS) e aggiungili alla libreria">Scopri online</button>
+      <button class="navitem" class:active={filter.kind === "novita"} onclick={openNovita} title="Nuovi paper usciti sui temi che segui (ricerche salvate), raccolti a ogni avvio">
+        Novità{#if novitaN > 0}<span class="navbadge" title={`${novitaN} da vedere`}>{novitaN > 99 ? "99+" : novitaN}</span>{/if}
+      </button>
       <button class="navitem" class:active={careModal} onclick={() => openCare("salute")} title="Salute della libreria, gap di citazioni e duplicati — in un posto solo">Cura della libreria</button>
       <button class="navitem" class:active={filter.kind === "trash"} onclick={() => setFilter({ kind: "trash" })} title="Documenti eliminati: ripristina o elimina definitivamente">Cestino</button>
       <button class="navitem" class:active={filter.kind === "terminal"} onclick={() => { terminalOpened = true; setFilter({ kind: "terminal" }); }} title="Terminale integrato: usa claude code o altri strumenti a riga di comando sui tuoi PDF">Terminale</button>
@@ -3770,6 +3888,71 @@
             {/if}
           </section>
         </div>
+      {:else if filter.kind === "novita"}
+        <div class="novhead">
+          <div class="novtitle">
+            <h2>Novità</h2>
+            <span class="novsub">Nuovi paper sui temi che segui — raccolti a ogni avvio dalle tue ricerche salvate</span>
+          </div>
+          <button class="ghost small" onclick={sweepNovitaNow} disabled={novitaSweeping} title="Cerca subito nuovi paper per tutte le ricerche salvate">
+            {novitaSweeping ? "Cerco…" : "↻ Cerca ora"}
+          </button>
+        </div>
+        {#if novitaLoading}
+          <div class="empty"><p>Carico le novità…</p></div>
+        {:else if !novitaGroups.length}
+          <div class="empty novintro">
+            <p class="big">Nessuna novità al momento</p>
+            {#if savedSearches.length}
+              <p>Le tue {savedSearches.length} ricerche salvate vengono ricontrollate a ogni avvio. Quando esce qualcosa di nuovo lo trovi qui, pronto da aggiungere con un click.</p>
+              <p class="dimtext">Puoi forzare il controllo adesso con «↻ Cerca ora».</p>
+            {:else}
+              <p>Salva una ricerca da <strong>Scopri online</strong> (★ Salva) per iniziare a monitorare un tema: le novità compariranno qui.</p>
+            {/if}
+          </div>
+        {:else}
+          <div class="novfeed">
+            {#each novitaGroups as g (g.watch_id)}
+              <section class="novgroup">
+                <header class="novgh">
+                  <span class="novgname">{g.watch_name}</span>
+                  <span class="novgcount">{g.hits.length}</span>
+                  <button class="hflink small" onclick={() => ignoreAllNovita(g.watch_id)} title="Segna tutte come lette (le rimuove dalle novità)">segna tutte lette</button>
+                </header>
+                {#each g.hits as h (h.hit_id)}
+                  {@const r = h.result}
+                  {@const hid = "nov" + h.hit_id}
+                  <article class="novcard">
+                    <div class="novmain">
+                      <div class="novtl">
+                        {#if r.abstract_text}
+                          <button class="abstoggle" class:open={expandedAbstract === hid} onclick={() => toggleAbstract(hid)} title={expandedAbstract === hid ? "Nascondi abstract" : "Mostra abstract"} aria-label="Mostra/nascondi abstract">▸</button>
+                        {/if}
+                        <span class="novt" title={r.title ?? ""}>{r.title ?? "Senza titolo"}</span>
+                        {#if r.pub_status}<span class="badgeinline">{@render pubBadge(r.pub_status, r.url)}</span>{/if}
+                        {#if r.in_library}<span class="nuovo inlibtag" title="Già presente in libreria">in libreria</span>{/if}
+                      </div>
+                      <div class="novmeta">
+                        {r.authors.slice(0, 4).join(", ")}{r.authors.length > 4 ? " et al." : ""}{r.year ? ` · ${r.year}` : ""}{r.venue ? ` · ${r.venue}` : ""}
+                      </div>
+                      {#if expandedAbstract === hid && r.abstract_text}
+                        <p class="novabs">{r.abstract_text}</p>
+                      {/if}
+                    </div>
+                    <div class="novact">
+                      {#if r.in_library}
+                        <button class="ghost small" onclick={() => ignoreNovita(g.watch_id, h.hit_id)} title="Rimuovi dalle novità">Ignora</button>
+                      {:else}
+                        <button class="ghost small primary" onclick={() => acceptNovita(g.watch_id, h.hit_id)} disabled={acceptingHit === h.hit_id} title="Aggiungi alla libreria (scarica il PDF se Open Access)">{acceptingHit === h.hit_id ? "…" : "Aggiungi"}</button>
+                        <button class="hflink small" onclick={() => ignoreNovita(g.watch_id, h.hit_id)} title="Rimuovi dalle novità">Ignora</button>
+                      {/if}
+                    </div>
+                  </article>
+                {/each}
+              </section>
+            {/each}
+          </div>
+        {/if}
       {:else if filter.kind === "discover"}
         <div class="discbar">
           <select
@@ -5813,6 +5996,43 @@
     padding: 1px 6px; border-radius: 4px; margin-right: 6px;
     background: var(--accent); color: var(--on-accent);
   }
+  .inlibtag { background: var(--border); color: var(--dim); margin-left: 6px; margin-right: 0; }
+  /* Nav "Novità" unread badge */
+  .navbadge {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 17px; height: 17px; padding: 0 5px; margin-left: 7px;
+    font-size: 10.5px; font-weight: 700; line-height: 1; border-radius: 9px;
+    background: var(--accent); color: var(--on-accent);
+  }
+  /* "Novità" feed view */
+  .novhead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding: 4px 4px 14px; border-bottom: 1px solid var(--border-soft); margin-bottom: 14px; flex-wrap: wrap; }
+  .novtitle h2 { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 600; color: var(--text); }
+  .novsub { font-size: 12.5px; color: var(--faint); }
+  .novintro .big { font-size: 17px; }
+  .novfeed { display: flex; flex-direction: column; gap: 22px; }
+  .novgroup { display: flex; flex-direction: column; gap: 8px; }
+  .novgh { display: flex; align-items: center; gap: 10px; padding: 0 2px 2px; }
+  .novgname { font-family: var(--serif); font-size: 15px; font-weight: 600; color: var(--text); }
+  .novgcount {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 18px; height: 18px; padding: 0 6px; font-size: 11px; font-weight: 700;
+    border-radius: 9px; background: var(--accent-soft); color: var(--accent);
+  }
+  .novgh .hflink { margin-left: auto; }
+  .novcard {
+    display: flex; align-items: flex-start; gap: 14px; justify-content: space-between;
+    background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--r-md);
+    padding: 11px 14px; transition: border-color var(--ease);
+  }
+  .novcard:hover { border-color: var(--border); }
+  .novmain { min-width: 0; flex: 1 1 auto; }
+  .novtl { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+  .novt { font-size: 14px; font-weight: 600; color: var(--text); line-height: 1.35; }
+  .novmeta { font-size: 12px; color: var(--faint); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; }
+  .novabs { font-size: 12.5px; color: var(--dim); line-height: 1.5; margin: 8px 0 2px; max-width: 70ch; }
+  .novact { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+  .ghost.primary { border-color: var(--accent); color: var(--accent); }
+  .ghost.primary:hover:not(:disabled) { background: var(--accent-soft); }
   /* Help modal */
   .helpmodal { width: 700px; max-height: 86vh; overflow-y: auto; }
   .helpsec { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }

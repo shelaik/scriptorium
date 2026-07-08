@@ -64,6 +64,22 @@ CREATE TABLE IF NOT EXISTS saved_searches (
   last_run_at TEXT
 );
 
+-- Persistent "Novità" feed: genuinely-new results surfaced by a saved search
+-- since it was created. Fed by both the manual run and the on-launch sweep;
+-- UNIQUE(watch_id, external_id) dedups across runs, `state` tracks the user's
+-- handling (new -> added | dismissed). Decoupled from saved_searches.seen_ids
+-- (the frozen creation baseline) so manual runs and sweeps never cannibalize.
+CREATE TABLE IF NOT EXISTS watch_hits (
+  id          INTEGER PRIMARY KEY,
+  watch_id    INTEGER NOT NULL REFERENCES saved_searches(id) ON DELETE CASCADE,
+  external_id TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  score       REAL,
+  found_at    TEXT DEFAULT (datetime('now')),
+  state       TEXT NOT NULL DEFAULT 'new',   -- 'new' | 'added' | 'dismissed'
+  UNIQUE(watch_id, external_id)
+);
+
 -- ===== Tags =====
 CREATE TABLE IF NOT EXISTS tags (
   id    INTEGER PRIMARY KEY,
@@ -244,6 +260,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "documents", "page_count", "INTEGER")?;
     // RAG: page number a passage was taken from (NULL for older chunks / non-PDF refs).
     add_column_if_missing(conn, "doc_chunks", "page", "INTEGER")?;
+    // Saved search participates in the on-launch "Novità" sweep (default: yes).
+    add_column_if_missing(conn, "saved_searches", "auto_run", "INTEGER NOT NULL DEFAULT 1")?;
     backfill_github_urls(conn)?;
     // Assign citekeys to any documents that don't have one yet (cheap no-op once full).
     super::citekey::backfill(conn)?;

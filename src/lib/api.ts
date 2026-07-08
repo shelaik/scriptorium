@@ -221,9 +221,12 @@ export interface SavedSearch {
   oa_only: boolean;
   sort: string;
   last_run_at: string | null;
+  auto_run: boolean;
 }
 export const listSavedSearches = () => invoke<SavedSearch[]>("list_saved_searches");
 export const deleteSavedSearch = (id: number) => invoke<void>("delete_saved_search", { id });
+export const setWatchAutoRun = (id: number, autoRun: boolean) =>
+  invoke<void>("set_watch_auto_run", { id, autoRun });
 export const createSavedSearch = (s: {
   name: string;
   source: string;
@@ -304,6 +307,25 @@ export const discoverSearch = (
   });
 export const discoverAdd = (result: SearchResult) =>
   invoke<string>("discover_add", { result });
+
+// ----- Novità (saved-search monitoring feed) -----
+export interface NovitaHit {
+  hit_id: number;
+  found_at: string | null;
+  result: SearchResult;
+}
+export interface NovitaGroup {
+  watch_id: number;
+  watch_name: string;
+  hits: NovitaHit[];
+}
+export const novitaCount = () => invoke<number>("novita_count");
+export const listNovita = () => invoke<NovitaGroup[]>("list_novita");
+export const dismissHit = (hitId: number) => invoke<void>("dismiss_hit", { hitId });
+export const dismissWatchHits = (watchId: number) => invoke<void>("dismiss_watch_hits", { watchId });
+export const acceptHit = (hitId: number) => invoke<string>("accept_hit", { hitId });
+/** Run the auto-run watches now (ignores the debounce); returns fresh-hit count. */
+export const sweepWatchesNow = () => invoke<number>("sweep_watches_now");
 
 // ----- "Aggancia da URL" + browser connector -----
 /** Download a PDF from a URL and import it. Returns "added"|"duplicate"|"not_pdf". */

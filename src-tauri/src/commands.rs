@@ -3863,6 +3863,8 @@ pub struct SavedSearch {
     pub oa_only: bool,
     pub sort: String,
     pub last_run_at: Option<String>,
+    /// Whether the on-launch "Novità" sweep re-runs this search automatically.
+    pub auto_run: bool,
 }
 
 fn row_to_saved(r: &rusqlite::Row) -> rusqlite::Result<SavedSearch> {
@@ -3877,10 +3879,11 @@ fn row_to_saved(r: &rusqlite::Row) -> rusqlite::Result<SavedSearch> {
         oa_only: r.get::<_, i64>(7)? != 0,
         sort: r.get(8)?,
         last_run_at: r.get(10)?,
+        auto_run: r.get::<_, i64>(11)? != 0,
     })
 }
 
-const SAVED_COLS: &str = "id, name, source, query, author, year_from, year_to, oa_only, sort, seen_ids, last_run_at";
+const SAVED_COLS: &str = "id, name, source, query, author, year_from, year_to, oa_only, sort, seen_ids, last_run_at, auto_run";
 
 #[tauri::command]
 pub fn list_saved_searches(state: State<'_, AppState>) -> Result<Vec<SavedSearch>, String> {
@@ -3928,8 +3931,24 @@ pub fn create_saved_search(
 #[tauri::command]
 pub fn delete_saved_search(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let conn = state.db.lock();
+    // Clear the feed rows explicitly (the FK CASCADE only fires when foreign_keys
+    // is ON — this keeps it correct regardless).
+    conn.execute("DELETE FROM watch_hits WHERE watch_id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM saved_searches WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Toggle whether a saved search participates in the on-launch Novità sweep.
+#[tauri::command]
+pub fn set_watch_auto_run(state: State<'_, AppState>, id: i64, auto_run: bool) -> Result<(), String> {
+    let conn = state.db.lock();
+    conn.execute(
+        "UPDATE saved_searches SET auto_run = ?1 WHERE id = ?2",
+        params![auto_run as i64, id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -3937,26 +3956,24 @@ pub fn delete_saved_search(state: State<'_, AppState>, id: i64) -> Result<(), St
 pub struct SavedRun {
     pub name: String,
     pub results: Vec<discovery::SearchResult>,
-    /// external_ids that are new since the last run.
+    /// external_ids surfaced as genuinely-new this run (also persisted to watch_hits).
     pub new_ids: Vec<String>,
 }
 
-/// Re-run a saved search; returns its results and which are new since last time,
-/// then records the current results as seen.
-#[tauri::command]
-pub async fn run_saved_search(app: AppHandle, id: i64) -> Result<SavedRun, String> {
-    let (s, seen) = {
+/// Shared core for both the manual "Run" and the on-launch sweep: fetch a saved
+/// search's current results and persist genuinely-new ones into `watch_hits`.
+///
+/// Novelty = an external_id that is neither in the creation baseline (`seen_ids`)
+/// nor already recorded in `watch_hits`. Crucially this NEVER mutates `seen_ids`,
+/// so a manual run and the sweep can't cannibalize each other's novelty (the
+/// unbounded `INSERT OR IGNORE` into `watch_hits` is the single dedup point).
+/// Returns the fetched results and the external_ids freshly surfaced this run.
+async fn run_watch_core(app: &AppHandle, s: &SavedSearch) -> Result<(Vec<discovery::SearchResult>, Vec<String>), String> {
+    let seen: String = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
-        let s = conn
-            .query_row(&format!("SELECT {SAVED_COLS} FROM saved_searches WHERE id = ?1"), params![id], row_to_saved)
-            .optional()
+        conn.query_row("SELECT seen_ids FROM saved_searches WHERE id = ?1", params![s.id], |r| r.get(0))
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "ricerca non trovata".to_string())?;
-        let seen: String = conn
-            .query_row("SELECT seen_ids FROM saved_searches WHERE id = ?1", params![id], |r| r.get(0))
-            .map_err(|e| e.to_string())?;
-        (s, seen)
     };
 
     let results = discover_search(
@@ -3971,30 +3988,212 @@ pub async fn run_saved_search(app: AppHandle, id: i64) -> Result<SavedRun, Strin
     )
     .await?;
 
-    let seen_set: std::collections::HashSet<&str> = seen.lines().collect();
-    let new_ids: Vec<String> = results
-        .iter()
-        .map(|r| r.external_id.as_str())
-        .filter(|x| !seen_set.contains(x))
-        .map(str::to_string)
-        .collect();
-
-    // Merge the current ids into "seen" and stamp the run.
-    let mut all: std::collections::BTreeSet<String> = seen.lines().map(str::to_string).collect();
-    for r in &results {
-        all.insert(r.external_id.clone());
-    }
-    let merged = all.into_iter().collect::<Vec<_>>().join("\n");
+    let baseline: std::collections::HashSet<&str> = seen.lines().collect();
+    let mut fresh: Vec<String> = Vec::new();
     {
         let state = app.state::<AppState>();
+        let mut cg = state.db.lock();
+        let tx = cg.transaction().map_err(|e| e.to_string())?;
+        for r in &results {
+            // Skip the frozen creation baseline AND anything already in the library:
+            // the feed is only for genuinely-new papers to add. Not persisting
+            // in-library hits keeps the UNIQUE slot free, so a paper removed later
+            // can resurface as a novità on a future sweep.
+            if baseline.contains(r.external_id.as_str()) || r.in_library {
+                continue;
+            }
+            let json = serde_json::to_string(r).map_err(|e| e.to_string())?;
+            let n = tx
+                .execute(
+                    "INSERT OR IGNORE INTO watch_hits (watch_id, external_id, result_json)
+                     VALUES (?1, ?2, ?3)",
+                    params![s.id, r.external_id, json],
+                )
+                .map_err(|e| e.to_string())?;
+            if n > 0 {
+                fresh.push(r.external_id.clone());
+            }
+        }
+        tx.execute("UPDATE saved_searches SET last_run_at = datetime('now') WHERE id = ?1", params![s.id])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    Ok((results, fresh))
+}
+
+/// Re-run a saved search now; returns its results and which are freshly new,
+/// persisting the new ones into the Novità feed.
+#[tauri::command]
+pub async fn run_saved_search(app: AppHandle, id: i64) -> Result<SavedRun, String> {
+    let s = {
+        let state = app.state::<AppState>();
         let conn = state.db.lock();
-        conn.execute(
-            "UPDATE saved_searches SET seen_ids = ?1, last_run_at = datetime('now') WHERE id = ?2",
-            params![merged, id],
+        conn.query_row(&format!("SELECT {SAVED_COLS} FROM saved_searches WHERE id = ?1"), params![id], row_to_saved)
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "ricerca non trovata".to_string())?
+    };
+    let (results, new_ids) = run_watch_core(&app, &s).await?;
+    Ok(SavedRun { name: s.name, results, new_ids })
+}
+
+/// On-launch (or manual) sweep of every auto-run saved search whose last run is
+/// older than the debounce window. Runs sequentially (each `discover_search`
+/// already paces itself politely), silently no-ops when online discovery is off,
+/// and emits `novita-changed` with the total count of fresh hits when done.
+/// `force` ignores the debounce (used by the manual "cerca ora" button).
+/// Returns the total number of freshly-surfaced hits across all swept watches.
+pub async fn run_all_watches(app: AppHandle, force: bool) -> usize {
+    let enabled = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        setting(&conn, "discovery_enabled").as_deref() == Some("1")
+    };
+    if !enabled {
+        return 0;
+    }
+    let watches: Vec<SavedSearch> = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let sql = if force {
+            format!("SELECT {SAVED_COLS} FROM saved_searches WHERE auto_run = 1 ORDER BY id")
+        } else {
+            format!(
+                "SELECT {SAVED_COLS} FROM saved_searches
+                 WHERE auto_run = 1 AND (last_run_at IS NULL OR last_run_at < datetime('now','-12 hours'))
+                 ORDER BY id"
+            )
+        };
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        stmt.query_map([], row_to_saved)
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    };
+    if watches.is_empty() {
+        return 0;
+    }
+    let mut total_new = 0usize;
+    for s in &watches {
+        if let Ok((_, fresh)) = run_watch_core(&app, s).await {
+            total_new += fresh.len();
+        }
+    }
+    let _ = app.emit("novita-changed", total_new);
+    total_new
+}
+
+/// Manual trigger for the sweep (Settings / Novità "cerca ora"). Returns the
+/// count of hits this invocation actually surfaced (not a racy global diff).
+#[tauri::command]
+pub async fn sweep_watches_now(app: AppHandle) -> Result<usize, String> {
+    Ok(run_all_watches(app, true).await)
+}
+
+// ===== Novità feed (watch_hits) =====
+
+#[derive(serde::Serialize)]
+pub struct NovitaHit {
+    pub hit_id: i64,
+    pub found_at: Option<String>,
+    pub result: discovery::SearchResult,
+}
+
+#[derive(serde::Serialize)]
+pub struct NovitaGroup {
+    pub watch_id: i64,
+    pub watch_name: String,
+    pub hits: Vec<NovitaHit>,
+}
+
+/// Count of unhandled ('new') feed items — drives the nav badge.
+#[tauri::command]
+pub fn novita_count(state: State<'_, AppState>) -> Result<i64, String> {
+    let conn = state.db.lock();
+    conn.query_row("SELECT COUNT(*) FROM watch_hits WHERE state = 'new'", [], |r| r.get(0))
+        .map_err(|e| e.to_string())
+}
+
+/// The Novità feed: unhandled hits grouped by their watch, newest first.
+#[tauri::command]
+pub fn list_novita(state: State<'_, AppState>) -> Result<Vec<NovitaGroup>, String> {
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT h.id, h.found_at, h.result_json, s.id, s.name
+             FROM watch_hits h JOIN saved_searches s ON s.id = h.watch_id
+             WHERE h.state = 'new'
+             ORDER BY s.name COLLATE NOCASE, s.id, h.found_at DESC, h.id DESC",
         )
         .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut groups: Vec<NovitaGroup> = Vec::new();
+    for row in rows.filter_map(Result::ok) {
+        let (hit_id, found_at, json, watch_id, watch_name) = row;
+        let Ok(result) = serde_json::from_str::<discovery::SearchResult>(&json) else {
+            continue; // skip a corrupt/legacy row rather than fail the whole feed
+        };
+        let hit = NovitaHit { hit_id, found_at, result };
+        match groups.last_mut() {
+            Some(g) if g.watch_id == watch_id => g.hits.push(hit),
+            _ => groups.push(NovitaGroup { watch_id, watch_name, hits: vec![hit] }),
+        }
     }
-    Ok(SavedRun { name: s.name, results, new_ids })
+    Ok(groups)
+}
+
+/// Mark one feed item as dismissed (removed from the badge/feed, not re-surfaced).
+#[tauri::command]
+pub fn dismiss_hit(state: State<'_, AppState>, hit_id: i64) -> Result<(), String> {
+    let conn = state.db.lock();
+    conn.execute("UPDATE watch_hits SET state = 'dismissed' WHERE id = ?1", params![hit_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Mark every unhandled hit of a watch as dismissed ("segna tutti letti").
+#[tauri::command]
+pub fn dismiss_watch_hits(state: State<'_, AppState>, watch_id: i64) -> Result<(), String> {
+    let conn = state.db.lock();
+    conn.execute(
+        "UPDATE watch_hits SET state = 'dismissed' WHERE watch_id = ?1 AND state = 'new'",
+        params![watch_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Accept a feed item: add it to the library (reuses `discover_add`) and mark the
+/// hit as 'added'. Returns the discover_add outcome ("added_pdf"|"added_ref"|"duplicate").
+#[tauri::command]
+pub async fn accept_hit(app: AppHandle, hit_id: i64) -> Result<String, String> {
+    let json: String = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        conn.query_row("SELECT result_json FROM watch_hits WHERE id = ?1", params![hit_id], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "novità non trovata".to_string())?
+    };
+    let result: discovery::SearchResult = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let outcome = discover_add(app.clone(), result).await?;
+    let state = app.state::<AppState>();
+    let conn = state.db.lock();
+    conn.execute("UPDATE watch_hits SET state = 'added' WHERE id = ?1", params![hit_id])
+        .map_err(|e| e.to_string())?;
+    Ok(outcome)
 }
 
 // ===== AI (Ollama / LM Studio) — optional, opt-in =====

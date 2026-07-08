@@ -100,6 +100,15 @@ pub fn run() {
             // Start the browser connector (loopback bookmarklet endpoint) unless
             // the user disabled it. Non-fatal if the port can't be bound.
             commands::start_connector(app.handle());
+            // "Novità": on-launch background sweep of auto-run saved searches for
+            // new papers since last time. Debounced (12h) and gated behind the
+            // opt-in online-discovery setting; emits `novita-changed` when done.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    commands::run_all_watches(handle, false).await;
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -131,6 +140,13 @@ pub fn run() {
             commands::create_saved_search,
             commands::delete_saved_search,
             commands::run_saved_search,
+            commands::set_watch_auto_run,
+            commands::sweep_watches_now,
+            commands::novita_count,
+            commands::list_novita,
+            commands::dismiss_hit,
+            commands::dismiss_watch_hits,
+            commands::accept_hit,
             commands::get_obsidian_vault,
             commands::set_obsidian_vault,
             commands::export_obsidian,
