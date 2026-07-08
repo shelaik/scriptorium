@@ -473,7 +473,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.0";
+  const APP_VERSION = "0.8.1";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2075,6 +2075,27 @@
     }
   }
 
+  /** Copy a citation for a whole selection: one \cite{k1,k2,…} or all BibTeX entries. */
+  async function copyCiteMulti(ids: number[], format: string) {
+    if (!ids.length) return;
+    try {
+      const text = await citeText(ids, format);
+      if (!text.trim()) {
+        status = "Niente da citare nella selezione";
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      status =
+        format === "bibtex"
+          ? `BibTeX copiato (${ids.length} voci)`
+          : format === "latex"
+            ? `\\cite copiato (${ids.length} chiavi)`
+            : `Citazioni copiate (${ids.length})`;
+    } catch (e) {
+      status = "Errore copia: " + e;
+    }
+  }
+
   /** Copy the stored citekey straight from the loaded document (no round-trip). */
   async function copyCitekey(doc: DocumentItem) {
     if (!doc.citekey) return;
@@ -2775,7 +2796,19 @@
     }
     if (tagKids.length) items.push({ id: "s-tag", label: "Aggiungi tag", icon: I.tag, children: tagKids });
     if (collKids.length) items.push({ id: "s-coll", label: "In collezione", icon: I.folder, children: collKids });
-    items.push({ id: "s-exp", label: "Esporta citazioni", icon: I.exp, action: () => exportLibrary(ids) });
+    items.push({
+      id: "s-cite",
+      label: "Cita",
+      icon: I.quote,
+      hint: "Copia le citazioni della selezione per LaTeX/Pandoc",
+      children: [
+        { id: "sci-tex", label: "Copia \\cite{…}", hint: "Un solo \\cite con tutte le chiavi", action: () => copyCiteMulti(ids, "latex") },
+        { id: "sci-bib", label: "Copia BibTeX", hint: "Le voci .bib di tutti i selezionati", action: () => copyCiteMulti(ids, "bibtex") },
+        { id: "sci-pan", label: "Copia [@…] (Pandoc)", action: () => copyCiteMulti(ids, "pandoc") },
+        { id: "sci-key", label: "Copia citekey", action: () => copyCiteMulti(ids, "citekey") },
+      ],
+    });
+    items.push({ id: "s-exp", label: "Esporta citazioni", icon: I.exp, hint: "Salva un file .bib/.ris/.json", action: () => exportLibrary(ids) });
     items.push({ id: "s-none", label: "Deseleziona", icon: I.x, action: () => (selected = []) });
     items.push({ id: "s-del", label: "Elimina", icon: I.trash, danger: true, action: () => trashSelected(ids) });
     return items;
