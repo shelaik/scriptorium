@@ -220,45 +220,58 @@ pub async fn enrich_all(app: AppHandle) -> Result<EnrichSummary, String> {
     };
 
     for (id, existing, fulltext) in candidates {
-        let doi = existing.or_else(|| metadata::extract_doi(&fulltext));
-        let Some(doi) = doi else {
-            summary.no_doi += 1;
-            continue;
+        // Whether the PDF carried *any* DOI at all — used only to classify a
+        // non-resolution as "cited-work DOI" vs "no DOI" for the summary.
+        let had_doi = existing.is_some() || metadata::extract_doi(&fulltext).is_some();
+        // Resolve identity from the paper's OWN title (a scavenged citation DOI
+        // can no longer rename the document). Bounded so one slow lookup can't hang.
+        let resolved = match tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            metadata::resolve_document_meta(&client, &fulltext, existing.as_deref(), email.as_deref()),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                summary.errors.push(format!("id {id}: {e:#}"));
+                None
+            }
+            Err(_) => {
+                summary.errors.push(format!("id {id}: timeout"));
+                None
+            }
         };
-        match metadata::fetch_crossref(&client, &doi, email.as_deref()).await {
-            Ok(Some(meta)) => {
-                // The first DOI in a PDF is often a *cited* work's, not this
-                // document's. Only apply the metadata when its title actually
-                // matches the start of the PDF text; otherwise leave the doc
-                // un-enriched rather than mislabel it with the wrong paper.
-                let head: String = fulltext.chars().take(1200).collect();
-                let title_ok = meta
-                    .title
-                    .as_deref()
-                    .is_some_and(|t| metadata::title_matches_doc(t, &head));
-                if !title_ok {
-                    summary.skipped_mismatch += 1;
-                } else {
-                    let state = app.state::<AppState>();
-                    let mut conn = state.db.lock();
-                    match metadata::apply_metadata(&mut conn, id, &doi, &meta) {
-                        Ok(()) => {
-                            // Refresh the stored citekey now that authors/year/title are known.
-                            let _ = crate::db::citekey::auto_citekey(&conn, id);
-                            summary.updated += 1;
-                        }
-                        Err(e) => summary.errors.push(format!("{doi}: {e:#}")),
+        match resolved {
+            Some(r) => {
+                let state = app.state::<AppState>();
+                let mut conn = state.db.lock();
+                match apply_resolved(&mut conn, id, &r) {
+                    Ok(()) => {
+                        // Refresh the stored citekey now that authors/year/title are known.
+                        let _ = crate::db::citekey::auto_citekey(&conn, id);
+                        summary.updated += 1;
                     }
+                    Err(e) => summary.errors.push(format!("id {id}: {e:#}")),
                 }
             }
-            Ok(None) => summary.no_doi += 1,
-            Err(e) => summary.errors.push(format!("{doi}: {e:#}")),
+            None if had_doi => summary.skipped_mismatch += 1,
+            None => summary.no_doi += 1,
         }
-        // Be polite to the Crossref API between requests.
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        // Be polite to the online APIs between documents.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 
     Ok(summary)
+}
+
+/// Apply metadata resolved by [`metadata::resolve_document_meta`]: with a DOI use
+/// the full upsert (keeps references + caches the record); without one (an arXiv
+/// preprint) write the bibliographic fields and leave the DOI null.
+fn apply_resolved(conn: &mut Connection, id: i64, r: &metadata::Resolved) -> anyhow::Result<()> {
+    match r.doi.as_deref() {
+        Some(doi) => metadata::apply_metadata(conn, id, doi, &r.meta),
+        None => write_repaired(conn, id, &r.meta),
+    }
 }
 
 /// Result of a one-shot metadata repair pass.
@@ -268,6 +281,9 @@ pub struct RepairSummary {
     pub checked: usize,
     /// Correct metadata recovered from arXiv via the id in the filename.
     pub repaired_arxiv: usize,
+    /// Full record re-resolved online (Crossref/arXiv) from the recovered title —
+    /// fixes docs mislabelled with a cited work's metadata.
+    pub resolved_online: usize,
     /// Title recovered from the PDF's first line (no arXiv id available).
     pub retitled: usize,
     /// Wrong metadata blanked because no title could be recovered.
@@ -286,6 +302,21 @@ fn write_repaired(conn: &mut Connection, id: i64, meta: &metadata::CrossrefMeta)
     )?;
     metadata::set_authors(&tx, id, &meta.authors)?;
     tx.execute("DELETE FROM document_references WHERE document_id = ?1", params![id])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Update a document's bibliographic fields (title/year/venue/abstract/authors)
+/// while PRESERVING its DOI and reference list. Used when an online title search
+/// resolves to an arXiv record (no DOI) for a document that may already hold a
+/// valid DOI — so repair never removes a good identifier.
+fn write_bib_only(conn: &mut Connection, id: i64, meta: &metadata::CrossrefMeta) -> anyhow::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE documents SET title = COALESCE(?1, title), year = ?2, venue = ?3, abstract = ?4 WHERE id = ?5",
+        params![meta.title, meta.year, meta.venue, meta.abstract_text, id],
+    )?;
+    metadata::set_authors(&tx, id, &meta.authors)?;
     tx.commit()?;
     Ok(())
 }
@@ -362,6 +393,10 @@ pub async fn repair_metadata(app: AppHandle) -> Result<RepairSummary, String> {
                     let changed = doi.is_some() || meta.title.as_deref() != Some(title_s.as_str());
                     let state = app.state::<AppState>();
                     let mut conn = state.db.lock();
+                    // The arXiv record (matched by filename id + head) is authoritative:
+                    // rewrite title/authors and clear any stale DOI/refs. We can't tell a
+                    // genuinely-published DOI from a wrongly-scavenged one here (arXiv
+                    // gives no DOI), so we don't freeze a possibly-wrong DOI.
                     match write_repaired(&mut conn, id, &meta) {
                         Ok(()) => {
                             let _ = crate::db::citekey::auto_citekey(&conn, id);
@@ -385,10 +420,71 @@ pub async fn repair_metadata(app: AppHandle) -> Result<RepairSummary, String> {
         if is_filename_title {
             continue;
         }
+
+        // (b1) Re-resolve the correct record ONLINE from the paper's own title.
+        //      This repairs a doc mislabelled with a cited work's metadata when
+        //      the real paper IS indexed. We pass the FULL fulltext (so DOI
+        //      scanning matches the enrich path) and the STORED DOI (so a still-
+        //      valid DOI is re-validated and preserved, not discarded).
+        let full: String = {
+            let state = app.state::<AppState>();
+            let conn = state.db.lock();
+            conn.query_row("SELECT COALESCE(fulltext,'') FROM documents WHERE id = ?1", params![id], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_else(|| head.clone())
+        };
+        let online = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            metadata::resolve_document_meta(&client, &full, doi.as_deref(), email.as_deref()),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await; // be gentle to the APIs
+        match online {
+            Ok(Ok(Some(r))) => {
+                let new_title = r.meta.title.clone().unwrap_or_default();
+                let state = app.state::<AppState>();
+                let mut conn = state.db.lock();
+                // A DOI result replaces the record; an arXiv (no-DOI) result
+                // updates the bib fields but PRESERVES any existing DOI+references
+                // rather than nulling them.
+                let write = match r.doi.as_deref() {
+                    Some(d) => metadata::apply_metadata(&mut conn, id, d, &r.meta),
+                    None => write_bib_only(&mut conn, id, &r.meta),
+                };
+                match write {
+                    Ok(()) => {
+                        let _ = crate::db::citekey::auto_citekey(&conn, id);
+                        sum.resolved_online += 1;
+                        sum.checked += 1;
+                        sum.details.push(format!("id {id}: risolto online → {new_title}"));
+                    }
+                    Err(e) => sum.details.push(format!("id {id}: errore scrittura: {e:#}")),
+                }
+                continue;
+            }
+            // A network error / timeout must NOT fall through to the destructive
+            // retitle below — that would corrupt a good record on a mere hiccup.
+            Ok(Err(_)) | Err(_) => {
+                sum.details.push(format!("id {id}: risoluzione online non riuscita (rete) — lasciato invariato"));
+                continue;
+            }
+            Ok(Ok(None)) => { /* not indexed anywhere — fall through to (b2) */ }
+        }
+
+        // (b2) Nothing online. NEVER destroy a record that still has a DOI: a
+        //      failed title match can be a merely-garbled head, not a wrong DOI,
+        //      and clearing the DOI + references would lose good data. Only docs
+        //      with no DOI get a first-line title recovery (nothing to lose).
+        if doi.is_some() {
+            continue;
+        }
         let Some(guess) = metadata::first_line_title(&head) else {
             continue;
         };
-        if guess == title_s && doi.is_none() {
+        if guess == title_s {
             continue; // already recovered on a previous pass
         }
         let meta = metadata::CrossrefMeta {
@@ -3435,41 +3531,36 @@ pub async fn discover_add(app: AppHandle, result: discovery::SearchResult) -> Re
 
 // ===== "Aggancia da URL" + browser connector =====
 
-/// Best-effort single-document enrichment: extract a DOI from the stored
-/// fulltext, look it up on Crossref, and apply the metadata only when its title
-/// matches the PDF (so we never latch onto a *cited* work's DOI). Never fatal.
+/// Best-effort single-document enrichment: resolve the paper's identity from its
+/// own recovered title (a DOI in the text is trusted only when its Crossref title
+/// matches this paper, never a *cited* work's). Never fatal.
 async fn enrich_one(app: &AppHandle, id: i64) -> Result<(), String> {
-    let (fulltext, email): (String, Option<String>) = {
+    let (fulltext, existing_doi, email): (String, Option<String>, Option<String>) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
-        let ft: String = conn
+        let row: Option<(String, Option<String>)> = conn
             .query_row(
-                "SELECT COALESCE(fulltext,'') FROM documents WHERE id = ?1",
+                "SELECT COALESCE(fulltext,''), doi FROM documents WHERE id = ?1",
                 params![id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
+            .map_err(|e| e.to_string())?;
+        let (ft, doi) = row.unwrap_or_default();
         let email = setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty());
-        (ft, email)
-    };
-    let Some(doi) = metadata::extract_doi(&fulltext) else {
-        return Ok(());
+        (ft, doi, email)
     };
     let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
-    if let Ok(Some(meta)) = metadata::fetch_crossref(&client, &doi, email.as_deref()).await {
-        let head: String = fulltext.chars().take(1200).collect();
-        let title_ok = meta
-            .title
-            .as_deref()
-            .is_some_and(|t| metadata::title_matches_doc(t, &head));
-        if title_ok {
-            let state = app.state::<AppState>();
-            let mut conn = state.db.lock();
-            if metadata::apply_metadata(&mut conn, id, &doi, &meta).is_ok() {
-                let _ = crate::db::citekey::auto_citekey(&conn, id);
-            }
+    if let Ok(Ok(Some(r))) = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        metadata::resolve_document_meta(&client, &fulltext, existing_doi.as_deref(), email.as_deref()),
+    )
+    .await
+    {
+        let state = app.state::<AppState>();
+        let mut conn = state.db.lock();
+        if apply_resolved(&mut conn, id, &r).is_ok() {
+            let _ = crate::db::citekey::auto_citekey(&conn, id);
         }
     }
     Ok(())

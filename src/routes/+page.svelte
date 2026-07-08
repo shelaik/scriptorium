@@ -446,7 +446,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.5.1";
+  const APP_VERSION = "0.5.2";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -872,12 +872,13 @@
 
   async function enrichMeta() {
     enriching = true;
-    status = "Recupero metadati da Crossref…";
+    status = "Recupero metadati (DOI e ricerca per titolo su Crossref/arXiv)…";
     try {
       const res = await enrichAll();
       const parts = [`${res.updated} aggiornati`];
-      if (res.no_doi) parts.push(`${res.no_doi} senza DOI`);
-      if (res.skipped_mismatch) parts.push(`${res.skipped_mismatch} saltati (DOI di un lavoro citato)`);
+      // no_doi + skipped_mismatch both mean "couldn't be resolved online" now.
+      const notFound = res.no_doi + res.skipped_mismatch;
+      if (notFound) parts.push(`${notFound} non trovati online (non indicizzati)`);
       if (res.errors.length) parts.push(`${res.errors.length} errori`);
       status = parts.join(" · ");
       await loadDocs();
@@ -893,8 +894,9 @@
   async function repairMeta() {
     if (!(await confirmAsk(
       "Verifico ogni documento e correggo quelli il cui titolo non corrisponde al PDF " +
-      "(di solito causati da un DOI di un lavoro citato). I paper arXiv recuperano i metadati " +
-      "corretti da arXiv; per gli altri ricavo il titolo dalla prima riga del PDF. " +
+      "(di solito causati dal DOI di un lavoro citato). Per ognuno cerco il record giusto " +
+      "online per titolo (Crossref/arXiv); i paper arXiv si recuperano dall'id nel nome file; " +
+      "se non è indicizzato da nessuna parte, ricavo almeno il titolo dalla prima riga del PDF. " +
       "I documenti già corretti non vengono toccati. Può richiedere fino a un minuto. Procedo?",
       "Ripara", false
     ))) return;
@@ -908,6 +910,7 @@
       } else {
         const parts = [`${res.checked} corretti`];
         if (res.repaired_arxiv) parts.push(`${res.repaired_arxiv} da arXiv`);
+        if (res.resolved_online) parts.push(`${res.resolved_online} risolti online per titolo`);
         if (res.retitled) parts.push(`${res.retitled} dal testo del PDF`);
         repairMsg = "Riparazione completata: " + parts.join(" · ");
       }
@@ -5039,8 +5042,8 @@
         <div class="helpsec">
           <h3>Metadati & manutenzione</h3>
           <ul>
-            <li><strong>Metadati</strong>: quando ci sono schede incomplete compare in alto il suggerimento «✦ N senza metadati» — un clic recupera titolo, autori, anno, rivista, abstract e riferimenti da Crossref (lo trovi anche nel radiale → Strumenti). Il titolo recuperato viene <strong>verificato</strong> contro l'inizio del PDF: se non corrisponde il documento <strong>non</strong> viene arricchito.</li>
-            <li><strong>Impostazioni → Manutenzione → «Ripara metadati errati»</strong>: ricontrolla tutta la libreria e corregge le schede il cui titolo non corrisponde al PDF. I paper <strong>arXiv</strong> recuperano i dati corretti da arXiv (ID dal nome file); per gli altri il titolo è ricavato dalla prima riga del PDF. I documenti già corretti non vengono toccati. Sicuro e ripetibile.</li>
+            <li><strong>Metadati</strong>: quando ci sono schede incomplete compare in alto il suggerimento «✦ N senza metadati» — un clic recupera titolo, autori, anno, rivista, abstract e riferimenti (lo trovi anche nel radiale → Strumenti). L'identità del paper si risolve dal suo <strong>titolo</strong> (ricerca su Crossref e arXiv), non solo dal primo DOI nel testo: così un <strong>DOI di un lavoro citato</strong> non può più far scambiare il paper per un altro. Se il paper non è indicizzato da nessuna parte viene lasciato com'è, senza etichette sbagliate.</li>
+            <li><strong>Impostazioni → Manutenzione → «Ripara metadati errati»</strong>: ricontrolla tutta la libreria e corregge le schede il cui titolo non corrisponde al PDF. Per ognuna cerca il record giusto <strong>online per titolo</strong> (Crossref/arXiv); i paper <strong>arXiv</strong> si recuperano dall'ID nel nome file; se non è indicizzato, ricava almeno il titolo dalla prima riga del PDF. I documenti già corretti non vengono toccati. Sicuro e ripetibile.</li>
             <li>Le schede senza metadati mostrano <strong>ⓘ</strong>: premi «Metadati» per recuperarli, oppure usa il <strong>clic destro → Modifica metadati</strong> per inserirli/correggerli a mano.</li>
           </ul>
         </div>
@@ -6044,6 +6047,30 @@
   .exlist::-webkit-scrollbar-thumb { background: transparent; border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
   .exlist:hover::-webkit-scrollbar-thumb { background: var(--border); background-clip: padding-box; }
   .exlist::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: padding-box; }
+
+  /* ===== Scrollbar coerenti col tema, ovunque =====
+     Pollice traslucido (derivato da --text) su binario trasparente: assume il
+     colore del fondo su cui scorre — bg, surface o panel — così si "confonde"
+     con lo sfondo del tema attivo in tutti gli 11 temi (chiari e scuri),
+     firmandosi appena all'hover. Le barre già personalizzate (.taglist, .exlist)
+     hanno selettori più specifici e restano com'erano. */
+  :global(*) {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--text) 15%, transparent) transparent;
+  }
+  :global(::-webkit-scrollbar) { width: 12px; height: 12px; }
+  :global(::-webkit-scrollbar-track) { background: transparent; }
+  :global(::-webkit-scrollbar-thumb) {
+    background: color-mix(in srgb, var(--text) 15%, transparent);
+    border-radius: 8px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+  :global(::-webkit-scrollbar-thumb:hover) {
+    background: color-mix(in srgb, var(--text) 32%, transparent);
+    background-clip: padding-box;
+  }
+  :global(::-webkit-scrollbar-corner) { background: transparent; }
   /* ✕ close button for dialogs that drop the bottom “Chiudi” button. */
   .modal-x {
     position: absolute; top: 10px; right: 12px; z-index: 2;

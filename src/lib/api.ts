@@ -414,18 +414,22 @@ export const rebuildThumbnails = () =>
 
 export interface EnrichSummary {
   updated: number;
+  /** No identity could be resolved online (not indexed, or only cited DOIs present). */
   no_doi: number;
-  /** DOIs that pointed at a cited work (title didn't match the PDF), skipped. */
+  /** Had a DOI in the text but it (a cited work) didn't match this paper, and no
+   *  title search matched either. */
   skipped_mismatch: number;
   errors: string[];
 }
 
-/** Enrich all documents lacking a DOI via Crossref. */
+/** Resolve metadata for documents lacking it, by DOI or by title (Crossref/arXiv). */
 export const enrichAll = () => invoke<EnrichSummary>("enrich_all");
 
 export interface RepairSummary {
   checked: number;
   repaired_arxiv: number;
+  /** Full record re-resolved online from the recovered title. */
+  resolved_online: number;
   retitled: number;
   cleared: number;
   details: string[];

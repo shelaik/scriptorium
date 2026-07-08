@@ -7,6 +7,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::time::Duration;
 
 const USER_AGENT: &str = "Scriptorium/0.1";
@@ -73,10 +74,39 @@ static TITLE_STOP: Lazy<std::collections::HashSet<&'static str>> = Lazy::new(|| 
     .collect()
 });
 
+/// Fold common Latin diacritics to ASCII so titles that disagree only on accents
+/// (Poincaré/Poincare, Erdős/Erdos, Schrödinger/Schrodinger) compare as equal.
+/// Apply after lowercasing.
+fn fold_ascii(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => out.push('a'),
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => out.push('e'),
+            'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ĭ' | 'į' | 'ı' => out.push('i'),
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => out.push('o'),
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => out.push('u'),
+            'ç' | 'ć' | 'ĉ' | 'č' => out.push('c'),
+            'ñ' | 'ń' | 'ň' => out.push('n'),
+            'ś' | 'š' | 'ş' => out.push('s'),
+            'ź' | 'ż' | 'ž' => out.push('z'),
+            'ý' | 'ÿ' => out.push('y'),
+            'ł' => out.push('l'),
+            'ğ' => out.push('g'),
+            'ř' => out.push('r'),
+            'đ' => out.push('d'),
+            'ß' => out.push_str("ss"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Distinctive (≥4-letter, non-stopword) lowercase words of a title, de-duplicated.
+/// Diacritics are folded so accent-only spelling differences don't split a word.
 fn sig_title_words(title: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for w in title.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+    for w in fold_ascii(&title.to_lowercase()).split(|c: char| !c.is_alphanumeric()) {
         if w.len() >= 4 && !TITLE_STOP.contains(w) && !out.iter().any(|x| x == w) {
             out.push(w.to_string());
         }
@@ -90,16 +120,53 @@ fn sig_title_words(title: &str) -> Vec<String> {
 /// enrichment from latching onto a DOI that actually belongs to a *cited* work
 /// (the cause of cards showing a different paper than the file).
 pub fn title_matches_doc(title: &str, head: &str) -> bool {
-    let head_l = head.to_lowercase();
+    let head_l = fold_ascii(&head.to_lowercase());
     let words = sig_title_words(title);
     if words.is_empty() {
         // No distinctive words (very short/generic title): require the trimmed
         // title itself to appear near the top.
-        let t = title.trim().to_lowercase();
+        let t = fold_ascii(&title.trim().to_lowercase());
         return t.len() >= 4 && head_l.contains(&t);
     }
     let hits = words.iter().filter(|w| head_l.contains(w.as_str())).count();
     hits * 2 >= words.len() // ≥ 50% of distinctive title words present
+}
+
+/// Order-preserving normalized form of a title: lowercase words (any length)
+/// joined by single spaces. Used for exact comparison of low-distinctiveness titles.
+fn norm_title_string(s: &str) -> String {
+    fold_ascii(&s.to_lowercase())
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The set of *distinctive* words of a title (same rule as [`sig_title_words`]).
+fn distinctive_set(s: &str) -> HashSet<String> {
+    sig_title_words(s).into_iter().collect()
+}
+
+/// Do two TITLES name the same paper? True only when they carry the SAME set of
+/// distinctive words. Precision-first by design: a genuinely different paper —
+/// even one that merely adds ("Riemannian Denoising Diffusion…") or reorders
+/// ("Is Attention All You Need?") a word — differs in its distinctive set and is
+/// rejected. Overlap-based similarity (Jaccard) was too loose here: it matched
+/// those neighbours. Titles with no distinctive words fall back to exact
+/// normalized-string equality. A near-miss leaves the document un-enriched
+/// rather than mislabelling it — the whole point of this gate.
+pub fn strong_title_match(a: &str, b: &str) -> bool {
+    let da = distinctive_set(a);
+    let db = distinctive_set(b);
+    // Low-distinctiveness titles are ambiguous as a bag of words — e.g.
+    // "Attention Is All You Need" vs "Is Attention All You Need?" reduce to the
+    // same {attention, need}. Require exact normalized-string equality for those
+    // so word order and completeness decide.
+    if da.len() < 3 || db.len() < 3 {
+        let na = norm_title_string(a);
+        return !na.is_empty() && na == norm_title_string(b);
+    }
+    da == db
 }
 
 /// Recover an arXiv id from a *filename* (not body text, which is full of cited
@@ -122,26 +189,76 @@ pub fn arxiv_id_from_filename(name: &str) -> Option<String> {
     Some(format!("{yymm}.{num}{ver}"))
 }
 
+/// A leading line that is publisher chrome (banner / running head / homepage /
+/// copyright), not the paper's title — skipped when recovering the title so a
+/// journal PDF's first line doesn't get mistaken for the title.
+fn is_banner_line(l: &str) -> bool {
+    let s = l.trim();
+    if s.chars().count() < 3 {
+        return true;
+    }
+    let low = s.to_lowercase();
+    // Prefix-anchored chrome: an identifier/URL/copyright line never *starts* a
+    // real title. (Anchored, so a title merely containing "www" or "issn" is safe.)
+    const PFX: &[&str] = &[
+        "http://", "https://", "www.", "doi:", "arxiv:", "issn", "e-issn", "isbn", "©", "(c) 20",
+    ];
+    if PFX.iter().any(|p| low.starts_with(p)) {
+        return true;
+    }
+    // Distinctive multi-word phrases that essentially never occur inside a paper
+    // title (kept narrow on purpose — broad venue words like "journal of" or
+    // "conference on" were dropped because real titles do contain them).
+    const PHR: &[&str] = &[
+        "lists available at", "available online at", "copy available at", "journal homepage",
+        "downloaded from", "content downloaded", "rights reserved", "creative commons",
+        "copyright ", "©",
+    ];
+    PHR.iter().any(|p| low.contains(p))
+}
+
 /// Best-effort title from the start of the extracted PDF text: the first
-/// non-empty line, plus the next one when the first looks like a wrapped title
-/// (short, or ends with a colon). Used to recover a sensible title for a
-/// mis-enriched document that has no arXiv id in its filename.
+/// non-empty, non-banner line, plus the next one when the first looks like a
+/// wrapped title (short, or ends with a colon). Used to recover a sensible title
+/// for a mis-enriched document that has no arXiv id in its filename.
 pub fn first_line_title(fulltext: &str) -> Option<String> {
-    let mut lines = fulltext
+    let lines: Vec<&str> = fulltext
         .split(|c: char| c == '\n' || c == '\r')
         .map(str::trim)
-        .filter(|l| !l.is_empty());
-    let first = lines.next()?;
+        .filter(|l| !l.is_empty())
+        .take(10)
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    // Where does the publisher chrome end? Skip the leading *contiguous* run of
+    // banner lines (only leading — so a banner appearing after a real title, as
+    // happens with non-linear PDF text order, never drags the title away).
+    let mut start = 0;
+    while start < lines.len() && is_banner_line(lines[start]) {
+        start += 1;
+    }
+    // Elsevier/ScienceDirect sandwich: "<journal name>\n journal homepage: …".
+    // If the line right after the banners is a journal name immediately followed
+    // by a homepage line, skip the journal name and the homepage line too.
+    if start + 1 < lines.len() && lines[start + 1].to_lowercase().contains("journal homepage") {
+        start += 2;
+        while start < lines.len() && is_banner_line(lines[start]) {
+            start += 1;
+        }
+    }
+    let first = lines.get(start).copied().filter(|l| !l.trim().is_empty())?;
     let mut title = first.to_string();
     // Append the next line when the first looks like a wrapped title (does not end
     // with sentence punctuation) and the next line is a title continuation — NOT
     // the author/affiliation line, which carries superscript markers or digits.
     let l1_complete = first.ends_with('.') || first.ends_with('?') || first.ends_with('!');
     if !l1_complete {
-        if let Some(second) = lines.next() {
+        if let Some(second) = lines.get(start + 1).copied() {
             let low = second.to_lowercase();
             let looks_meta = low.starts_with("abstract")
                 || low.starts_with("introduction")
+                || is_banner_line(second)
                 || second.chars().any(|c| matches!(c, '∗' | '†' | '‡' | '§') || c.is_ascii_digit());
             if !looks_meta {
                 title.push(' ');
@@ -155,7 +272,7 @@ pub fn first_line_title(fulltext: &str) -> Option<String> {
     }
     let title = title
         .trim()
-        .trim_end_matches(|c: char| matches!(c, ':' | ' ' | ',' | '-'))
+        .trim_end_matches(|c: char| matches!(c, ':' | ' ' | ',' | '-' | '.'))
         .trim()
         .to_string();
     (title.chars().count() >= 4).then_some(title)
@@ -207,8 +324,12 @@ pub async fn fetch_crossref(
     }
 
     let body: Value = resp.json().await.context("parsing Crossref JSON")?;
-    let msg = &body["message"];
+    Ok(Some(parse_crossref_work(&body["message"])))
+}
 
+/// Parse one Crossref "work" JSON object into our metadata shape. Shared by the
+/// single-DOI lookup (`message`) and the title search (each `message.items[i]`).
+fn parse_crossref_work(msg: &Value) -> CrossrefMeta {
     let authors = msg["author"]
         .as_array()
         .map(|arr| {
@@ -233,17 +354,63 @@ pub async fn fetch_crossref(
         })
         .unwrap_or_default();
 
-    let year = msg["issued"]["date-parts"][0][0].as_i64();
+    // `issued` is the canonical date; some records only carry `published*`.
+    let year = msg["issued"]["date-parts"][0][0]
+        .as_i64()
+        .or_else(|| msg["published"]["date-parts"][0][0].as_i64())
+        .or_else(|| msg["published-print"]["date-parts"][0][0].as_i64())
+        .or_else(|| msg["published-online"]["date-parts"][0][0].as_i64());
 
-    Ok(Some(CrossrefMeta {
+    CrossrefMeta {
         title: first_str(&msg["title"]),
         venue: first_str(&msg["container-title"]),
         year,
         abstract_text: msg["abstract"].as_str().map(strip_markup),
         authors,
         references,
-        raw_json: body.to_string(),
-    }))
+        raw_json: msg.to_string(),
+    }
+}
+
+/// Resolve a paper by TITLE via Crossref's bibliographic search. Returns the DOI
+/// and metadata of the first relevance-ranked result whose title *strongly*
+/// matches `title` — so a near-miss (a different paper Crossref happened to rank)
+/// is rejected rather than applied.
+pub async fn crossref_search_title(
+    client: &reqwest::Client,
+    title: &str,
+    email: Option<&str>,
+) -> Result<Option<(String, CrossrefMeta)>> {
+    let title = title.trim();
+    if title.chars().count() < 8 {
+        return Ok(None); // too weak to search on
+    }
+    let mail = match email {
+        Some(e) if !e.trim().is_empty() => format!("&mailto={}", e.trim()),
+        _ => String::new(),
+    };
+    let url = format!(
+        "https://api.crossref.org/works?query.bibliographic={}&rows=5{}",
+        urlencoding(title),
+        mail
+    );
+    let resp = client.get(&url).send().await.context("Crossref title search")?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let body: Value = resp.json().await.context("Crossref search JSON")?;
+    let Some(items) = body["message"]["items"].as_array() else {
+        return Ok(None);
+    };
+    for it in items {
+        let meta = parse_crossref_work(it);
+        if let (Some(cand), Some(doi)) = (meta.title.as_deref(), it["DOI"].as_str()) {
+            if strong_title_match(title, cand) {
+                return Ok(Some((doi.to_string(), meta)));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Upsert an author and return its id.
@@ -282,25 +449,41 @@ pub fn set_authors(conn: &Connection, id: i64, authors: &[Author]) -> Result<()>
 pub fn apply_metadata(conn: &mut Connection, id: i64, doi: &str, meta: &CrossrefMeta) -> Result<()> {
     let tx = conn.transaction().context("starting metadata transaction")?;
 
-    // Avoid violating UNIQUE(doi): if another document already owns this DOI,
-    // apply the rest of the metadata but leave this row's doi unchanged.
-    let dup: Option<i64> = tx
+    // UNIQUE(doi) spans soft-deleted rows too, so decide who owns this DOI:
+    //  - a *live* document owns it → don't duplicate; also clear any stale DOI on
+    //    this row so a mislabel isn't frozen as "correct" (real title + wrong DOI).
+    //  - only a *soft-deleted* row holds it → reclaim it (null the dead holder,
+    //    then set it here) so the live paper keeps its own DOI.
+    let live_dup: Option<i64> = tx
         .query_row(
-            "SELECT id FROM documents WHERE doi = ?1 AND id <> ?2",
+            "SELECT id FROM documents WHERE doi = ?1 AND id <> ?2 AND deleted_at IS NULL",
             params![doi, id],
             |r| r.get(0),
         )
         .optional()?;
-    let doi_to_set: Option<&str> = if dup.is_some() { None } else { Some(doi) };
 
-    tx.execute(
-        "UPDATE documents
-         SET title = COALESCE(?1, title), year = ?2, venue = ?3,
-             doi = COALESCE(?4, doi), abstract = ?5
-         WHERE id = ?6",
-        params![meta.title, meta.year, meta.venue, doi_to_set, meta.abstract_text, id],
-    )
-    .context("updating document with metadata")?;
+    if live_dup.is_some() {
+        tx.execute(
+            "UPDATE documents
+             SET title = COALESCE(?1, title), year = ?2, venue = ?3, doi = NULL, abstract = ?4
+             WHERE id = ?5",
+            params![meta.title, meta.year, meta.venue, meta.abstract_text, id],
+        )
+        .context("updating document with metadata")?;
+    } else {
+        // Free the DOI from any soft-deleted holder before claiming it here.
+        tx.execute(
+            "UPDATE documents SET doi = NULL WHERE doi = ?1 AND id <> ?2",
+            params![doi, id],
+        )?;
+        tx.execute(
+            "UPDATE documents
+             SET title = COALESCE(?1, title), year = ?2, venue = ?3, doi = ?4, abstract = ?5
+             WHERE id = ?6",
+            params![meta.title, meta.year, meta.venue, doi, meta.abstract_text, id],
+        )
+        .context("updating document with metadata")?;
+    }
 
     tx.execute("DELETE FROM document_authors WHERE document_id = ?1", params![id])?;
     for (pos, a) in meta.authors.iter().enumerate() {
@@ -379,6 +562,28 @@ fn year_from(s: &str) -> Option<i64> {
     None
 }
 
+/// Parse one arXiv Atom `<entry>` block into metadata.
+fn parse_arxiv_entry(entry: &str) -> CrossrefMeta {
+    let title = between(entry, "<title>", "</title>");
+    let mut authors = Vec::new();
+    let mut rest = entry;
+    while let Some(name) = between(rest, "<name>", "</name>") {
+        authors.push(split_name(&name));
+        let cut = rest.find("</name>").map(|i| i + 7).unwrap_or(rest.len());
+        rest = &rest[cut..];
+    }
+    let year = between(entry, "<published>", "</published>").and_then(|p| year_from(&p));
+    CrossrefMeta {
+        title,
+        venue: Some("arXiv".to_string()),
+        year,
+        abstract_text: between(entry, "<summary>", "</summary>"),
+        authors,
+        references: Vec::new(),
+        raw_json: String::new(),
+    }
+}
+
 /// arXiv Atom feed → metadata.
 pub async fn fetch_arxiv(client: &reqwest::Client, id: &str) -> Result<Option<CrossrefMeta>> {
     let url = format!("https://export.arxiv.org/api/query?id_list={id}&max_results=1");
@@ -391,25 +596,96 @@ pub async fn fetch_arxiv(client: &reqwest::Client, id: &str) -> Result<Option<Cr
     let Some(estart) = body.find("<entry>") else {
         return Ok(None);
     };
-    let entry = &body[estart..];
-    let title = between(entry, "<title>", "</title>");
-    let mut authors = Vec::new();
-    let mut rest = entry;
-    while let Some(name) = between(rest, "<name>", "</name>") {
-        authors.push(split_name(&name));
-        let cut = rest.find("</name>").map(|i| i + 7).unwrap_or(rest.len());
-        rest = &rest[cut..];
+    Ok(Some(parse_arxiv_entry(&body[estart..])))
+}
+
+/// Resolve a paper by TITLE via arXiv's title search (`ti:`). Returns the first
+/// result whose title strongly matches `title`. arXiv is where recent preprints
+/// live that Crossref does not yet index.
+pub async fn arxiv_search_title(client: &reqwest::Client, title: &str) -> Result<Option<CrossrefMeta>> {
+    let title = title.trim();
+    if title.chars().count() < 8 {
+        return Ok(None);
     }
-    let year = between(entry, "<published>", "</published>").and_then(|p| year_from(&p));
-    Ok(Some(CrossrefMeta {
-        title,
-        venue: Some("arXiv".to_string()),
-        year,
-        abstract_text: between(entry, "<summary>", "</summary>"),
-        authors,
-        references: Vec::new(),
-        raw_json: String::new(),
-    }))
+    // Quote the phrase so arXiv ranks close title matches first; strong_title_match
+    // still guards against a loose hit.
+    let url = format!(
+        "https://export.arxiv.org/api/query?search_query=ti:%22{}%22&max_results=5",
+        urlencoding(title)
+    );
+    let resp = client.get(&url).send().await.context("arXiv title search")?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let body = resp.text().await.context("arXiv search body")?;
+    for entry in body.split("<entry>").skip(1) {
+        let meta = parse_arxiv_entry(entry);
+        if let Some(cand) = meta.title.as_deref() {
+            if strong_title_match(title, cand) {
+                return Ok(Some(meta));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Metadata resolved for a document, with the DOI when the source has one
+/// (Crossref) or `None` when it does not (arXiv preprints).
+pub struct Resolved {
+    pub doi: Option<String>,
+    pub meta: CrossrefMeta,
+}
+
+/// Best-effort *correct* identity for a document. Every candidate is verified
+/// against the paper's OWN title recovered from the PDF (banner lines skipped),
+/// so a *cited* work's DOI can never rename it. Without a recoverable own title
+/// we cannot tell the paper apart from a citation, so we leave it un-enriched.
+/// Signals, in order:
+///   1. a DOI in the record or text — accepted ONLY if its Crossref title
+///      strictly matches the recovered own title (kills the "first DOI is a
+///      citation" trap, including a citation printed on the first page);
+///   2. a Crossref bibliographic search on the recovered title;
+///   3. an arXiv title search (recent preprints Crossref lacks).
+pub async fn resolve_document_meta(
+    client: &reqwest::Client,
+    fulltext: &str,
+    existing_doi: Option<&str>,
+    email: Option<&str>,
+) -> Result<Option<Resolved>> {
+    let head: String = fulltext.chars().take(1500).collect();
+    // The paper's own title is the anchor for every check — no title, no enrich.
+    let Some(g) = first_line_title(&head).filter(|s| !s.trim().is_empty()) else {
+        return Ok(None);
+    };
+
+    // (1) A DOI in the record or text — trust it ONLY on a strict title match.
+    let doi = existing_doi
+        .map(str::to_string)
+        .filter(|d| !d.trim().is_empty())
+        .or_else(|| extract_doi(fulltext));
+    if let Some(doi) = doi {
+        if let Some(meta) = fetch_crossref(client, &doi, email).await? {
+            if strong_title_match(&g, meta.title.as_deref().unwrap_or("")) {
+                return Ok(Some(Resolved { doi: Some(doi), meta }));
+            }
+        }
+    }
+
+    // (2) Crossref bibliographic search on the recovered title.
+    if let Some((doi, meta)) = crossref_search_title(client, &g, email).await? {
+        if strong_title_match(&g, meta.title.as_deref().unwrap_or("")) {
+            return Ok(Some(Resolved { doi: Some(doi), meta }));
+        }
+    }
+
+    // (3) arXiv title search (recent preprints Crossref lacks).
+    if let Some(meta) = arxiv_search_title(client, &g).await? {
+        if strong_title_match(&g, meta.title.as_deref().unwrap_or("")) {
+            return Ok(Some(Resolved { doi: None, meta }));
+        }
+    }
+
+    Ok(None)
 }
 
 /// OpenLibrary → book metadata for an ISBN.
@@ -656,6 +932,117 @@ mod tests {
             "Rescaling Egocentric Vision: Challenges for EPIC-KITCHENS-100",
             head
         ));
+    }
+
+    #[test]
+    fn strong_title_match_separates_own_title_from_cited_work() {
+        // The document's own title vs its cited Topol reference — must NOT match,
+        // even though both are medical-AI papers (the ATHENA-R1 bug).
+        let athena = "ATHENA-R1: An AI Agent for Treatment Reasoning over a Biomedical Tool Universe";
+        let topol = "High-performance medicine: the convergence of human and artificial intelligence";
+        assert!(!strong_title_match(athena, topol));
+        // Same paper, hyphenation/spacing differences — must match.
+        assert!(strong_title_match(
+            "High performance medicine the convergence of human and artificial intelligence",
+            topol
+        ));
+        // The same title with the subtitle present matches exactly.
+        assert!(strong_title_match(
+            "Athena: Enhancing Multimodal Reasoning with Data-efficient Process Reward Models",
+            "Athena: Enhancing Multimodal Reasoning with Data-efficient Process Reward Models"
+        ));
+        // Two unrelated papers do not match.
+        assert!(!strong_title_match(
+            "Attention Is All You Need",
+            "High-performance medicine: the convergence of human and artificial intelligence"
+        ));
+        // A cited work whose title is a token-subset / prefix / extension of the
+        // document's title must NOT match, in either argument order — no subset,
+        // prefix or containment shortcut may reopen the cited-work trap.
+        let citing = "Attention is not all you need pure attention loses rank doubly exponentially with depth";
+        let cited = "Attention Is All You Need";
+        assert!(!strong_title_match(citing, cited));
+        assert!(!strong_title_match(cited, citing));
+        assert!(!strong_title_match("Segment Anything", "Segment Anything in Medical Images"));
+        assert!(!strong_title_match("Segment Anything in Medical Images", "Segment Anything"));
+        // A subtitle-truncated recovery is (conservatively) NOT matched — we prefer
+        // leaving a doc un-enriched over any risk of a wrong extension.
+        assert!(!strong_title_match(
+            "Learning Transferable Visual Models",
+            "Learning Transferable Visual Models From Natural Language Supervision"
+        ));
+        // Real neighbours that a looser (Jaccard) gate wrongly matched on live
+        // Crossref data — a one-word extension and a reordered near-duplicate.
+        assert!(!strong_title_match(
+            "Denoising Diffusion Probabilistic Models",
+            "Riemannian Denoising Diffusion Probabilistic Models"
+        ));
+        assert!(!strong_title_match(
+            "Denoising Diffusion Probabilistic Models",
+            "Denoising Diffusion Implicit Models"
+        ));
+        assert!(!strong_title_match("Attention Is All You Need", "Is Attention All You Need?"));
+        // A distinctive multi-word title still matches its exact self.
+        assert!(strong_title_match(
+            "Deep Residual Learning for Image Recognition",
+            "Deep Residual Learning for Image Recognition"
+        ));
+        // Accent-only spelling differences must NOT split the same paper.
+        assert!(strong_title_match(
+            "Poincare Recurrence in Neural Dynamics",
+            "Poincaré Recurrence in Neural Dynamics"
+        ));
+        assert!(strong_title_match(
+            "Erdos-Renyi Graphs and Spectral Gaps",
+            "Erdős–Rényi Graphs and Spectral Gaps"
+        ));
+    }
+
+    #[test]
+    fn first_line_title_handles_banner_edge_cases() {
+        // A long contiguous run of publisher chrome is skipped entirely.
+        let long = "Downloaded from https://x.org\r\
+                    © 2021 Publisher\r\
+                    ISSN 1234-5678\r\
+                    e-ISSN 8765-4321\r\
+                    ISBN 978-0-000\r\
+                    This content downloaded from 1.2.3.4\r\
+                    Deep Residual Learning for Image Recognition.";
+        assert_eq!(
+            first_line_title(long).as_deref(),
+            Some("Deep Residual Learning for Image Recognition")
+        );
+        // A banner emitted AFTER the real title (non-linear text order) must not
+        // drag the title away — the leading real title wins.
+        let nonlinear = "Machine Learning Approaches to Protein Folding.\r\
+                         Available at ScienceDirect\r\
+                         Journal of Computational Biology";
+        assert_eq!(
+            first_line_title(nonlinear).as_deref(),
+            Some("Machine Learning Approaches to Protein Folding")
+        );
+        // A real title that merely contains a venue phrase is not treated as chrome.
+        let contains = "A Workshop on Reproducibility Is Not Enough.\r\
+                        Jane Doe";
+        assert_eq!(
+            first_line_title(contains).as_deref(),
+            Some("A Workshop on Reproducibility Is Not Enough")
+        );
+    }
+
+    #[test]
+    fn first_line_title_skips_publisher_banner() {
+        // A ScienceDirect-style banner + running head must be skipped; the real
+        // title on a later line is what gets recovered.
+        let txt = "Contents lists available at ScienceDirect\r\
+                   Artificial Intelligence in Medicine\r\
+                   journal homepage: www.elsevier.com/locate/artmed\r\
+                   Deep learning for retinal disease detection\r\
+                   Jane Doe1, John Smith2";
+        assert_eq!(
+            first_line_title(txt).as_deref(),
+            Some("Deep learning for retinal disease detection")
+        );
     }
 
     #[test]
