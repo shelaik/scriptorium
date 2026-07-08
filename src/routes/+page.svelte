@@ -122,6 +122,14 @@
     wikiGenerate,
     wikiDelete,
     wikiCancel,
+    listNotes,
+    getNote,
+    createNote,
+    saveNote,
+    deleteNote,
+    revealNotesDir,
+    type NoteMeta,
+    type NoteView,
     compareDocuments,
     generateReview,
     harvestResults,
@@ -148,7 +156,7 @@
   import DetailPanel from "$lib/DetailPanel.svelte";
 
   type Filter = {
-    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita" | "mywork";
+    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita" | "mywork" | "notes";
     id?: number;
     label?: string;
   };
@@ -465,7 +473,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.7.0";
+  const APP_VERSION = "0.8.0";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2819,6 +2827,7 @@
           { id: "gq-pal", label: "Palette comandi", hint: "Ctrl+K — ogni azione, digitando", action: () => (paletteOpen = true) },
           { id: "gq-ask", label: "Chiedi alla libreria", icon: I.ask, hint: "Risposte con citazioni dai tuoi PDF (AI locale)", action: () => { setFilter({ kind: "ask" }); loadRagStatus(); } },
           { id: "gq-wiki", label: "Wiki della libreria", icon: I.open, hint: "La tua enciclopedia privata, generata dai tuoi paper", action: () => openWikiView() },
+          { id: "gq-notes", label: "Note", icon: I.open, hint: "Note in Markdown (file .md) con [[collegamenti]]", action: () => openNotesView() },
           { id: "gq-disc", label: "Scopri online", hint: "arXiv, OpenAlex, ADS e altre fonti", action: () => setFilter({ kind: "discover" }) },
         ],
       },
@@ -3092,6 +3101,144 @@
   let wikiNewConcept = $state("");
   let wikiBusy = $state(false);
   let wikiProg = $state<{ phase: string; done: number; total: number; concept: string } | null>(null);
+
+  // ----- Note (.md vault) -----
+  let notesList = $state<NoteMeta[]>([]);
+  let noteView = $state<NoteView | null>(null);
+  let noteDraft = $state(""); // raw markdown in the editor
+  let noteMode = $state<"edit" | "preview">("preview");
+  let noteNewTitle = $state("");
+  let noteSaved = $state(true); // false while an autosave is pending/failed
+  let noteSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let noteFlush: Promise<void> | null = null; // in-flight save (single-flight guard)
+
+  async function openNotesView() {
+    setFilter({ kind: "notes" });
+    await loadNotes();
+  }
+  async function loadNotes() {
+    try {
+      notesList = await listNotes();
+    } catch (e) {
+      status = "Errore nel caricare le note: " + e;
+    }
+  }
+  async function openNote(slug: string) {
+    await flushNote(); // persist the note we're leaving
+    if (noteView && !noteSaved) {
+      status = "Salvataggio non riuscito: riprova prima di cambiare nota";
+      return; // don't overwrite the still-unsaved edits with another note
+    }
+    try {
+      noteView = await getNote(slug);
+      noteDraft = noteView.content_md;
+      noteMode = "preview";
+      noteSaved = true;
+    } catch (e) {
+      status = "Errore nell'aprire la nota: " + e;
+    }
+  }
+  async function newNote() {
+    const title = noteNewTitle.trim();
+    await flushNote();
+    if (noteView && !noteSaved) {
+      status = "Salvataggio non riuscito: riprova prima di creare una nota";
+      return;
+    }
+    try {
+      const slug = await createNote(title);
+      noteNewTitle = "";
+      await loadNotes();
+      await openNote(slug);
+      noteMode = "edit"; // jump straight into writing
+    } catch (e) {
+      status = "Errore nel creare la nota: " + e;
+    }
+  }
+  function onNoteInput() {
+    noteSaved = false;
+    clearTimeout(noteSaveTimer);
+    noteSaveTimer = setTimeout(flushNote, 700);
+  }
+  /** Persist the current note. Single-flight (concurrent callers await the same
+   *  save) and loops until the on-disk copy matches the draft, so keystrokes
+   *  typed during an in-flight save are never lost. Leaves noteSaved=false on
+   *  error so callers can avoid discarding the dirty draft. */
+  function flushNote(): Promise<void> {
+    clearTimeout(noteSaveTimer);
+    if (noteFlush) return noteFlush;
+    if (noteSaved || !noteView) return Promise.resolve();
+    noteFlush = doFlushNote().finally(() => (noteFlush = null));
+    return noteFlush;
+  }
+  async function doFlushNote() {
+    while (noteView && !noteSaved) {
+      const slug = noteView.slug;
+      const snapshot = noteDraft;
+      let meta: NoteMeta;
+      try {
+        meta = await saveNote(slug, snapshot);
+      } catch (e) {
+        status = "Errore nel salvare la nota: " + e;
+        return; // leave noteSaved=false → callers know the save failed
+      }
+      if (noteView?.slug !== slug) return; // switched away mid-save; the new note handles itself
+      notesList = [meta, ...notesList.filter((n) => n.slug !== slug)];
+      if (noteDraft === snapshot) {
+        noteSaved = true; // fully flushed
+      }
+      // else: the draft changed during the save → loop and persist the newer text
+    }
+  }
+  /** Re-render the preview (re-weave links) from the current draft. */
+  async function refreshNotePreview() {
+    await flushNote();
+    if (!noteSaved) return; // save failed — keep the dirty draft, don't overwrite it
+    if (noteView) {
+      try {
+        noteView = await getNote(noteView.slug);
+        noteDraft = noteView.content_md;
+      } catch {
+        /* keep the current view */
+      }
+    }
+  }
+  async function removeNote(slug: string) {
+    if (noteView && noteView.slug !== slug) await flushNote(); // persist a different open note first
+    const n = notesList.find((x) => x.slug === slug);
+    if (!(await confirmAsk(`Eliminare la nota «${n?.title ?? slug}»?`))) return;
+    try {
+      await deleteNote(slug);
+      if (noteView?.slug === slug) {
+        noteView = null;
+        noteDraft = "";
+      }
+      await loadNotes();
+    } catch (e) {
+      status = "Errore: " + e;
+    }
+  }
+  /** Intercept clicks on woven note links: #note-<slug>, #doc-<id>, external. */
+  function noteLinksAction(node: HTMLElement) {
+    const onClick = (e: MouseEvent) => {
+      const a = (e.target as HTMLElement)?.closest("a");
+      if (!a) return;
+      const href = a.getAttribute("href") ?? "";
+      if (href.startsWith("#note-")) {
+        e.preventDefault();
+        openNote(href.slice("#note-".length));
+      } else if (href.startsWith("#doc-")) {
+        e.preventDefault();
+        const id = parseInt(href.slice("#doc-".length), 10);
+        if (!Number.isNaN(id)) openById(id, null);
+      } else if (/^https?:/.test(href)) {
+        e.preventDefault();
+        openInBrowser(href);
+      }
+    };
+    node.addEventListener("click", onClick);
+    return { destroy: () => node.removeEventListener("click", onClick) };
+  }
 
   async function loadWikiList() {
     try {
@@ -3697,6 +3844,7 @@
       <div class="sec">Strumenti</div>
       <button class="navitem" class:active={filter.kind === "ask"} onclick={() => { setFilter({ kind: "ask" }); loadRagStatus(); }} title="Fai domande alla tua libreria: risposte con citazioni dai tuoi documenti (AI locale)">Chiedi alla libreria</button>
       <button class="navitem" class:active={filter.kind === "wiki"} onclick={openWikiView} title="La tua enciclopedia privata: pagine per concetto generate dall'AI locale dai tuoi paper, con fonti che aprono il PDF alla pagina giusta">Wiki della libreria</button>
+      <button class="navitem" class:active={filter.kind === "notes"} onclick={openNotesView} title="Le tue note in Markdown: file .md veri su disco, con [[collegamenti]] a note e paper">Note</button>
       <button class="navitem" class:active={filter.kind === "discover"} onclick={() => setFilter({ kind: "discover" })} title="Cerca paper online (arXiv / OpenAlex / ADS) e aggiungili alla libreria">Scopri online</button>
       <button class="navitem" class:active={filter.kind === "novita"} onclick={openNovita} title="Nuovi paper usciti sui temi che segui (ricerche salvate), raccolti a ogni avvio">
         Novità{#if novitaN > 0}<span class="navbadge" title={`${novitaN} da vedere`}>{novitaN > 99 ? "99+" : novitaN}</span>{/if}
@@ -3919,6 +4067,78 @@
                 <p class="big">La tua enciclopedia privata</p>
                 <p>Ogni pagina è scritta dall'AI locale leggendo <strong>solo i tuoi documenti</strong>: le citazioni [n] aprono il PDF alla pagina giusta, i concetti si collegano tra loro, e nulla esce dal tuo computer.</p>
                 <p class="dimtext">Suggerimento: parti da «Genera/aggiorna dai tag» — una pagina per ciascun tema della tua libreria.</p>
+              </div>
+            {/if}
+          </section>
+        </div>
+      {:else if filter.kind === "notes"}
+        <div class="wikiwrap">
+          <aside class="wikinav">
+            <div class="wikinew">
+              <input
+                placeholder="Nuova nota: titolo…"
+                bind:value={noteNewTitle}
+                onkeydown={(e) => e.key === "Enter" && newNote()}
+                title="Crea una nuova nota .md"
+              />
+              <button class="ghost small" onclick={newNote} title="Crea la nota">Nuova</button>
+            </div>
+            <button class="ghost small wikiall" onclick={revealNotesDir} title="Apri la cartella delle note (.md) nel file explorer">
+              Apri cartella note
+            </button>
+            <div class="wikilist">
+              {#each notesList as n (n.slug)}
+                <div class="navrow">
+                  <button class="navitem noteitem" class:active={noteView?.slug === n.slug} onclick={() => openNote(n.slug)} title={n.excerpt || n.title}>
+                    <span class="notetitle">{n.title}</span>
+                    {#if n.excerpt}<span class="noteexc">{n.excerpt}</span>{/if}
+                  </button>
+                  <button class="x" title="Elimina questa nota" onclick={() => removeNote(n.slug)}>×</button>
+                </div>
+              {/each}
+              {#if !notesList.length}
+                <p class="wikiempty">Nessuna nota. Scrivi un titolo qui sopra e premi «Nuova». Le note sono file .md su disco: collega con [[Titolo nota]] oppure [[@citekey]] per un paper.</p>
+              {/if}
+            </div>
+          </aside>
+          <section class="wikibody">
+            {#if noteView}
+              <header class="wikihead notehead">
+                <h2 class="wikititle">{noteView.title}</h2>
+                <span class="notesaved" class:pending={!noteSaved}>{noteSaved ? "Salvato ✓" : "Salvo…"}</span>
+                <div class="notemodes">
+                  <button class="ghost small" class:on={noteMode === "edit"} onclick={() => (noteMode = "edit")} title="Modifica il Markdown">Modifica</button>
+                  <button class="ghost small" class:on={noteMode === "preview"} onclick={() => { noteMode = "preview"; refreshNotePreview(); }} title="Anteprima resa (ricalcola i collegamenti)">Anteprima</button>
+                </div>
+              </header>
+              {#if noteMode === "edit"}
+                <textarea
+                  class="noteeditor"
+                  bind:value={noteDraft}
+                  oninput={onNoteInput}
+                  onblur={flushNote}
+                  placeholder={"Scrivi in Markdown…\n\nUsa [[Titolo di un'altra nota]] per collegare una nota, [[@citekey]] o [[Titolo del paper]] per un documento."}
+                  spellcheck="false"
+                ></textarea>
+              {:else}
+                <article class="wikihtml notehtml" use:noteLinksAction>
+                  <!-- eslint-disable-next-line svelte/no-at-html-tags -- HTML sanificato dal backend (ammonia) -->
+                  {@html noteView.html}
+                </article>
+                {#if noteView.backlinks.length}
+                  <div class="notebacklinks">
+                    <h3>Collegata da</h3>
+                    {#each noteView.backlinks as b (b.slug)}
+                      <button class="passchip" onclick={() => openNote(b.slug)} title={`Apri «${b.title}»`}>{b.title}</button>
+                    {/each}
+                  </div>
+                {/if}
+              {/if}
+            {:else}
+              <div class="empty wikiintro">
+                <p class="big">Le tue note</p>
+                <p>Note in <strong>Markdown</strong>, salvate come <strong>file .md veri</strong> nella cartella delle note — restano tue, leggibili e modificabili anche da terminale o da qualsiasi editor.</p>
+                <p class="dimtext">Collega con <code>[[Titolo nota]]</code> o un paper con <code>[[@citekey]]</code> / <code>[[Titolo del paper]]</code>. I backlink compaiono in fondo a ogni nota.</p>
               </div>
             {/if}
           </section>
@@ -6643,6 +6863,28 @@
   .wikisrc.unused { opacity: 0.55; }
   .wikipages { display: inline-flex; gap: 4px; flex-wrap: wrap; }
   .wikiintro { max-width: 520px; margin: 0 auto; }
+
+  /* ===== Note (.md vault) ===== */
+  .noteitem { flex-direction: column; align-items: flex-start; gap: 1px; height: auto; padding: 6px 10px; }
+  .notetitle { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  .noteexc { font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  .notehead .notesaved { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+  .notehead .notesaved.pending { color: var(--accent); }
+  .notemodes { display: inline-flex; gap: 4px; }
+  .notemodes .ghost.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .noteeditor {
+    display: block; width: 100%; max-width: 820px; box-sizing: border-box;
+    min-height: 60vh; margin-top: 14px; resize: vertical;
+    background: var(--field); border: 1px solid var(--border); border-radius: var(--r-sm);
+    color: var(--text); padding: 14px 16px; outline: none;
+    font-family: var(--mono, ui-monospace, "Cascadia Code", Consolas, monospace);
+    font-size: 13.5px; line-height: 1.65; tab-size: 2;
+  }
+  .noteeditor:focus { border-color: var(--accent); }
+  .notehtml { margin-top: 14px; }
+  .notebacklinks { max-width: 780px; margin-top: 28px; border-top: 1px solid var(--border-soft); padding-top: 12px; }
+  .notebacklinks h3 { font-family: var(--serif); font-size: 14px; margin: 0 0 8px; color: var(--dim); }
+  .wikiintro code { background: var(--accent-soft); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
 
   /* ===== Esplora citazioni: mappa a due ali + indicatore in-libreria ===== */
   .libdot {

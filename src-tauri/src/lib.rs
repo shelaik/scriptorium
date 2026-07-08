@@ -10,6 +10,7 @@ mod github;
 mod import;
 mod metadata;
 mod model;
+mod notes;
 mod obsidian;
 mod ocr;
 mod rag;
@@ -190,6 +191,12 @@ pub fn run() {
             commands::set_connector_enabled,
             commands::import_bibtex,
             commands::import_latex_zip,
+            commands::list_notes,
+            commands::get_note,
+            commands::create_note,
+            commands::save_note,
+            commands::delete_note,
+            commands::reveal_notes_dir,
             commands::find_pdf,
             commands::attach_from_url,
             commands::hf_resources,

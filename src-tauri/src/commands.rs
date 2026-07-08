@@ -9,6 +9,7 @@ use crate::embed;
 use crate::github;
 use crate::import;
 use crate::metadata;
+use crate::notes;
 use crate::obsidian;
 use crate::pdf;
 use crate::rag;
@@ -5923,6 +5924,252 @@ pub fn share_via_outlook(state: State<'_, AppState>, id: i64) -> Result<(), Stri
         ps_lit(&path)
     );
     run_powershell(&script)
+}
+
+// ===== Standalone Markdown notes (a vault of real .md files on disk) =====
+//
+// Notes live as `<slug>.md` files under app_data_dir/notes/ — the files ARE the
+// source of truth (no DB table), so they stay editable from a terminal / any
+// editor. Titles are derived from the first line; [[wikilinks]] to other notes
+// (by slug or title) and to papers (`[[@citekey]]` / `[[title]]`) are woven at
+// read time. See `crate::notes` for the pure helpers.
+
+fn notes_dir(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .map(|d| d.join("notes"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("scriptorium-notes"))
+}
+
+/// Resolve a note slug to its file path, rejecting anything that isn't a plain
+/// single filename component (path-traversal guard).
+fn note_path(dir: &Path, slug: &str) -> Result<PathBuf, String> {
+    // Reject path separators, Windows drive/ADS colons and `..` traversal. Plain
+    // dots are allowed so a hand-made `my.note.md` still opens.
+    if slug.is_empty() || slug.contains(['/', '\\', ':']) || slug.contains("..") {
+        return Err("Nome nota non valido".into());
+    }
+    Ok(dir.join(format!("{slug}.md")))
+}
+
+#[derive(serde::Serialize)]
+pub struct NoteMeta {
+    pub slug: String,
+    pub title: String,
+    pub excerpt: String,
+    /// File mtime as epoch milliseconds (formatted by the frontend).
+    pub updated_at: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+pub struct NoteLink {
+    pub slug: String,
+    pub title: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct NoteView {
+    pub slug: String,
+    pub title: String,
+    pub content_md: String,
+    pub html: String,
+    /// Other notes that link to this one.
+    pub backlinks: Vec<NoteLink>,
+}
+
+/// Read every `.md` file in the vault into (slug, raw content, mtime-millis).
+fn read_vault(dir: &Path) -> Vec<(String, String, Option<i64>)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        let is_md = path
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|s| s.eq_ignore_ascii_case("md"))
+            .unwrap_or(false);
+        if !is_md {
+            continue;
+        }
+        let Some(slug) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mtime = e
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64);
+        out.push((slug, content, mtime));
+    }
+    out
+}
+
+/// List all notes (metadata only), newest first.
+#[tauri::command]
+pub fn list_notes(app: AppHandle) -> Result<Vec<NoteMeta>, String> {
+    let dir = notes_dir(&app);
+    let mut metas: Vec<NoteMeta> = read_vault(&dir)
+        .into_iter()
+        .map(|(slug, content, mtime)| NoteMeta {
+            slug,
+            title: notes::note_title(&content),
+            excerpt: notes::note_excerpt(&content),
+            updated_at: mtime,
+        })
+        .collect();
+    metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase())));
+    Ok(metas)
+}
+
+fn doc_by_citekey(conn: &Connection, key: &str) -> Option<(i64, Option<String>)> {
+    conn.query_row(
+        "SELECT id, title FROM documents WHERE deleted_at IS NULL AND citekey = ?1 COLLATE NOCASE LIMIT 1",
+        params![key],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+fn doc_by_title(conn: &Connection, title: &str) -> Option<(i64, Option<String>)> {
+    conn.query_row(
+        "SELECT id, title FROM documents WHERE deleted_at IS NULL AND title = ?1 COLLATE NOCASE LIMIT 1",
+        params![title],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// Load one note: raw body (for editing) + rendered HTML with woven links + backlinks.
+#[tauri::command]
+pub fn get_note(app: AppHandle, slug: String) -> Result<NoteView, String> {
+    let dir = notes_dir(&app);
+    let path = note_path(&dir, &slug)?;
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("Lettura nota: {e}"))?;
+    let vault = read_vault(&dir);
+
+    // Lookup for note targets: slug (lower) and title (lower) → (slug, title).
+    let mut note_by_key: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    for (s, c, _) in &vault {
+        let title = notes::note_title(c);
+        note_by_key.entry(s.to_lowercase()).or_insert_with(|| (s.clone(), title.clone()));
+        note_by_key.entry(title.to_lowercase()).or_insert_with(|| (s.clone(), title.clone()));
+    }
+
+    let state = app.state::<AppState>();
+    let woven = {
+        let conn = state.db.lock();
+        notes::weave_note_links(&content, |target| {
+            let key = target.to_lowercase();
+            if let Some((s, t)) = note_by_key.get(&key) {
+                return Some((t.clone(), format!("#note-{s}")));
+            }
+            if let Some(rest) = target.strip_prefix('@') {
+                if let Some((id, title)) = doc_by_citekey(&conn, rest.trim()) {
+                    return Some((title.unwrap_or_else(|| target.to_string()), format!("#doc-{id}")));
+                }
+            }
+            if let Some((id, title)) = doc_by_title(&conn, target) {
+                return Some((title.unwrap_or_else(|| target.to_string()), format!("#doc-{id}")));
+            }
+            None
+        })
+    };
+    let html = wiki::render_html(&woven);
+
+    // Backlinks: other notes whose body references this note's slug or title.
+    let this_title = notes::note_title(&content).to_lowercase();
+    let slug_lower = slug.to_lowercase();
+    let mut backlinks: Vec<NoteLink> = Vec::new();
+    for (s, c, _) in &vault {
+        if *s == slug {
+            continue;
+        }
+        if notes::link_targets(c).iter().any(|t| t == &slug_lower || t == &this_title) {
+            backlinks.push(NoteLink { slug: s.clone(), title: notes::note_title(c) });
+        }
+    }
+    backlinks.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+
+    Ok(NoteView {
+        title: notes::note_title(&content),
+        slug,
+        content_md: content,
+        html,
+        backlinks,
+    })
+}
+
+/// Create a new note from a title; returns its slug. Body seeded with `# title`.
+#[tauri::command]
+pub fn create_note(app: AppHandle, title: String) -> Result<String, String> {
+    let dir = notes_dir(&app);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Creazione cartella note: {e}"))?;
+    let title = title.trim();
+    let base = wiki::slugify(title); // "pagina" fallback for an empty/symbol title
+    let mut slug = base.clone();
+    let mut n = 2;
+    while dir.join(format!("{slug}.md")).exists() {
+        slug = format!("{base}-{n}");
+        n += 1;
+    }
+    let body = if title.is_empty() {
+        "# Nuova nota\n\n".to_string()
+    } else {
+        format!("# {title}\n\n")
+    };
+    std::fs::write(dir.join(format!("{slug}.md")), body).map_err(|e| format!("Creazione nota: {e}"))?;
+    Ok(slug)
+}
+
+/// Overwrite a note's body; returns refreshed metadata for the list.
+#[tauri::command]
+pub fn save_note(app: AppHandle, slug: String, content_md: String) -> Result<NoteMeta, String> {
+    let dir = notes_dir(&app);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = note_path(&dir, &slug)?;
+    std::fs::write(&path, &content_md).map_err(|e| format!("Salvataggio nota: {e}"))?;
+    let mtime = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+    Ok(NoteMeta {
+        slug,
+        title: notes::note_title(&content_md),
+        excerpt: notes::note_excerpt(&content_md),
+        updated_at: mtime,
+    })
+}
+
+#[tauri::command]
+pub fn delete_note(app: AppHandle, slug: String) -> Result<(), String> {
+    let dir = notes_dir(&app);
+    let path = note_path(&dir, &slug)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("Eliminazione nota: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Open the notes vault folder in the system file explorer.
+#[tauri::command]
+pub fn reveal_notes_dir(app: AppHandle) -> Result<(), String> {
+    let dir = notes_dir(&app);
+    let _ = std::fs::create_dir_all(&dir);
+    run_powershell(&format!(
+        "Start-Process explorer.exe -ArgumentList '\"{}\"'",
+        ps_lit(&dir.to_string_lossy())
+    ))
 }
 
 // ===== Local AI servers: start / stop =====

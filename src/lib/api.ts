@@ -750,6 +750,40 @@ export const wikiDelete = (slug: string) => invoke<void>("wiki_delete", { slug }
 /** Ask the running generation to stop at the next step. */
 export const wikiCancel = () => invoke<void>("wiki_cancel");
 
+// ===== Note (.md vault) =====
+export interface NoteMeta {
+  slug: string;
+  title: string;
+  excerpt: string;
+  /** File mtime as epoch milliseconds. */
+  updated_at: number | null;
+}
+export interface NoteLink {
+  slug: string;
+  title: string;
+}
+export interface NoteView {
+  slug: string;
+  title: string;
+  /** Raw Markdown, for the editor. */
+  content_md: string;
+  /** Sanitized HTML with [[wikilinks]] woven to #note-<slug> / #doc-<id>. */
+  html: string;
+  backlinks: NoteLink[];
+}
+/** All notes (metadata only), newest first. */
+export const listNotes = () => invoke<NoteMeta[]>("list_notes");
+/** One note: raw body + rendered HTML + backlinks. */
+export const getNote = (slug: string) => invoke<NoteView>("get_note", { slug });
+/** Create a note from a title; returns its slug. */
+export const createNote = (title: string) => invoke<string>("create_note", { title });
+/** Overwrite a note's body; returns refreshed metadata. */
+export const saveNote = (slug: string, contentMd: string) =>
+  invoke<NoteMeta>("save_note", { slug, contentMd });
+export const deleteNote = (slug: string) => invoke<void>("delete_note", { slug });
+/** Open the notes vault folder in the file explorer. */
+export const revealNotesDir = () => invoke<void>("reveal_notes_dir");
+
 // ===== Sintesi sulla selezione + percorso di lettura =====
 export interface ReviewSource {
   n: number;
