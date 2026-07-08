@@ -446,7 +446,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.5.3";
+  const APP_VERSION = "0.5.4";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -6423,7 +6423,11 @@
   .dupwrap.inmodal { padding: 0; max-height: 52vh; overflow-y: auto; }
 
   /* home leggera (vista «Tutti») */
-  .home { padding: 14px 22px 2px; }
+  .home {
+    padding: 14px 22px 2px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px 28px; flex-wrap: wrap;
+  }
   .homehead { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
   .homefold {
     background: none; border: none; color: var(--dim); cursor: pointer; padding: 0;
@@ -6442,7 +6446,7 @@
   button.hstat:hover { border-color: var(--accent); background: var(--accent-soft); }
   .hnum { font-size: 17px; font-weight: 700; color: var(--text); font-family: var(--serif); line-height: 1.1; }
   .hlab { font-size: 10.5px; color: var(--faint); }
-  .rediscover { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .rediscover { display: flex; align-items: center; gap: 12px; }
   .rdlabel {
     display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
     font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--faint);
