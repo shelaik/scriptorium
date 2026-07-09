@@ -561,6 +561,18 @@ export interface GapItem {
 export const citationGaps = (limit?: number) =>
   invoke<GapItem[]>("citation_gaps", { limit: limit ?? null });
 
+export interface BackfillDoiSummary {
+  scanned: number;
+  resolved: number;
+  updated_rows: number;
+  remaining: number;
+}
+/** Recover DOIs for already-imported references that lack one (online, precision-gated). */
+export const resolveReferenceDois = () =>
+  invoke<BackfillDoiSummary>("resolve_reference_dois");
+/** Request cancellation of an in-progress reference-DOI backfill. */
+export const cancelReferenceDois = () => invoke<void>("cancel_reference_dois");
+
 // ----- Obsidian / Markdown vault export -----
 export const getObsidianVault = () => invoke<string>("get_obsidian_vault");
 export const setObsidianVault = (path: string) =>

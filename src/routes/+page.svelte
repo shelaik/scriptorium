@@ -33,6 +33,8 @@
     libraryFacets,
     type LibraryFacets,
     citationGaps,
+    resolveReferenceDois,
+    cancelReferenceDois,
     type GapItem,
     listSavedSearches,
     createSavedSearch,
@@ -421,6 +423,9 @@
   let ragStatus = $state<RagStatus | null>(null);
   let ragBuilding = $state(false);
   let ragProg = $state<{ done: number; total: number } | null>(null);
+  // Reference-DOI backfill (Cura → Gap di citazioni)
+  let refdoiRunning = $state(false);
+  let refdoiProg = $state<{ done: number; total: number; resolved: number } | null>(null);
   let askScope = $state<{ kind: "doc" | "collection" | "tag"; id: number; label: string } | null>(null);
   // Group the cited passages by document so a repeated source appears once.
   let askGroups = $derived.by(() => {
@@ -491,7 +496,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.7";
+  const APP_VERSION = "0.8.8";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2218,6 +2223,32 @@
       gapsLoading = false;
     }
   }
+  async function runResolveRefDois() {
+    if (refdoiRunning) return;
+    refdoiRunning = true;
+    refdoiProg = null;
+    try {
+      const s = await resolveReferenceDois();
+      status =
+        s.resolved > 0
+          ? `DOI riferimenti: ${s.resolved} risolti su ${s.scanned} citazioni (${s.updated_rows} righe aggiornate) — ${s.remaining} citazioni ancora senza DOI.`
+          : `Nessun DOI recuperato su ${s.scanned} citazioni — ${s.remaining} ancora senza DOI.`;
+      // Newly-resolved DOIs can surface fresh gaps: refresh the list in place.
+      try {
+        gaps = await citationGaps(60);
+      } catch {
+        /* ignore */
+      }
+    } catch (e) {
+      status = "Errore risoluzione DOI: " + e;
+    } finally {
+      refdoiRunning = false;
+      refdoiProg = null;
+    }
+  }
+  function cancelRefDois() {
+    cancelReferenceDois().catch(() => {});
+  }
   function gapSearchOnline(doi: string) {
     careModal = false;
     discoverQuery = doi;
@@ -2461,6 +2492,7 @@
   let embP: Promise<() => void> | undefined;
   let watchP: Promise<() => void> | undefined;
   let ragP: Promise<() => void> | undefined;
+  let refdoiP: Promise<() => void> | undefined;
   let askP: Promise<() => void> | undefined;
   let connP: Promise<() => void> | undefined;
   let wikiP: Promise<() => void> | undefined;
@@ -2540,6 +2572,9 @@
     askP = listen<string>("ask-token", (e) => {
       if (asking) askAnswer += e.payload;
     });
+    refdoiP = listen<{ done: number; total: number; resolved: number }>("refdoi-progress", (e) => {
+      if (refdoiRunning) refdoiProg = e.payload;
+    });
     wikiP = listen<{ phase: string; done: number; total: number; concept: string }>("wiki-progress", (e) => {
       wikiProg = e.payload.phase === "done" ? null : e.payload;
     });
@@ -2556,6 +2591,7 @@
       embP?.then((f) => f());
       watchP?.then((f) => f());
       ragP?.then((f) => f());
+      refdoiP?.then((f) => f());
       askP?.then((f) => f());
       connP?.then((f) => f());
       wikiP?.then((f) => f());
@@ -5480,6 +5516,15 @@
 
         {:else if careTab === "gap"}
         <p class="dimtext">I DOI che la tua libreria cita di più ma che non possiedi ancora. Si basa sui riferimenti estratti — recupera i <strong>Metadati</strong> dei tuoi paper (Crossref) per arricchirli.</p>
+        <div class="refdoibar">
+          {#if refdoiRunning}
+            <button class="ghost small" onclick={cancelRefDois}>Interrompi</button>
+            <span class="dimtext">{refdoiProg ? `Risolvo ${refdoiProg.done}/${refdoiProg.total} — ${refdoiProg.resolved} DOI trovati…` : "Avvio…"}</span>
+          {:else}
+            <button class="ghost small" onclick={runResolveRefDois} title="Cerca online (Crossref) un DOI per i riferimenti che ne sono privi, così entrano nel conteggio dei gap">Risolvi DOI dei riferimenti (online)</button>
+            <span class="dimtext">Recupera i DOI mancanti dei riferimenti già in libreria — precision-first, nessun abbinamento incerto.</span>
+          {/if}
+        </div>
         {#if gapsLoading}
           <p class="dimtext">Calcolo in corso…</p>
         {:else if gaps.length}
@@ -5632,7 +5677,7 @@
             <li><strong>Viste</strong>: griglia (copertine ridimensionabili con − ▭ +), lista a colonne, e <strong>Costellazione</strong> — la libreria come mappa semantica: ogni stella un documento, i legami sono la somiglianza di significato. Clic per aprire, tasto destro per il menu, Ctrl+clic per selezionare.</li>
             <li><strong>Continua a leggere</strong>: in “Tutti” trovi in alto gli ultimi PDF aperti. Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
             <li><strong>Riscopri</strong> (barra <em>Riscopri</em>, radiale o palette): ti ripesca un documento dimenticato o mai letto.</li>
-            <li><strong>Cura della libreria</strong> (barra strumenti in alto o radiale → Strumenti) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi) e <strong>Duplicati</strong> (unione). Il <strong>Cestino</strong> resta tra gli Strumenti.</li>
+            <li><strong>Cura della libreria</strong> (barra strumenti in alto o radiale → Strumenti) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi; il pulsante <strong>«Risolvi DOI dei riferimenti»</strong> recupera online — precision-first, mai un abbinamento incerto — i DOI mancanti dei riferimenti già importati, così entrano nel conteggio) e <strong>Duplicati</strong> (unione). Il <strong>Cestino</strong> resta tra gli Strumenti.</li>
             <li><strong>Tag</strong>: la <strong>matitina ✎</strong> accanto a un tag nella barra laterale lo <strong>rinomina o ricolora</strong>; la <strong>×</strong> lo elimina. Dal pannello di dettaglio aggiungi/togli tag al volo.</li>
             <li>Nella vista <strong>Tutti</strong>, la <strong>Panoramica</strong> in alto (comprimibile) mostra quanti documenti hai da leggere, in lettura e aggiunti questo mese, e ti propone un paper da <strong>riscoprire</strong> ogni giorno.</li>
           </ul>
@@ -7155,6 +7200,8 @@
   .notehit:hover { border-color: var(--accent); background: var(--hover); }
   .nhtitle { font-family: var(--serif); font-size: 14px; color: var(--text); }
   .nhsnip { font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .refdoibar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; }
+  .refdoibar .dimtext { margin: 0; }
   .wikiintro code { background: var(--accent-soft); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
 
   /* ===== Esplora citazioni: mappa a due ali + indicatore in-libreria ===== */

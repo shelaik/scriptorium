@@ -413,6 +413,84 @@ pub async fn crossref_search_title(
     Ok(None)
 }
 
+/// True when a Crossref candidate TITLE is essentially spelled out inside a raw
+/// reference string — i.e. (nearly) all of the title's distinctive words appear
+/// in the citation text. Stricter than [`title_matches_doc`] (a 50% gate against a
+/// PDF's own header): a cited reference names the work almost in full, so a merely
+/// relevance-ranked near-miss from Crossref is rejected rather than applied.
+fn reference_names_title(cand_title: &str, reference: &str) -> bool {
+    let words = sig_title_words(cand_title);
+    // Need a SPECIFIC title: at least 4 distinctive words (after stripping generic
+    // academic vocabulary). Shorter titles collide too easily inside a noisy
+    // citation — and, since this is a one-directional coverage test, a short title
+    // that is merely a SUBSET of a different work's longer title would otherwise
+    // pass. Leave those unresolved: precision-first, never mislabel.
+    if words.len() < 4 {
+        return false;
+    }
+    // Whole-TOKEN membership, NOT substring: 'adam' must not match inside the
+    // surname 'adamson'. Tokenize the reference exactly as titles are tokenized.
+    let refl = fold_ascii(&reference.to_lowercase());
+    let ref_tokens: std::collections::HashSet<&str> = refl
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let hits = words.iter().filter(|w| ref_tokens.contains(w.as_str())).count();
+    // Essentially all of the candidate's distinctive words present (≥85%, and at
+    // most one miss regardless of length).
+    hits + 1 >= words.len() && hits * 100 >= words.len() * 85
+}
+
+/// Resolve a DOI from an UNSTRUCTURED reference string (a full citation: authors,
+/// year, title, venue) via Crossref bibliographic search. Precision-first: the
+/// first relevance-ranked candidate whose title is essentially spelled out in the
+/// citation wins; otherwise None — a near-miss is never applied. Used to backfill
+/// DOIs onto already-imported references so they reach the citation-gap finder.
+pub async fn crossref_resolve_reference(
+    client: &reqwest::Client,
+    reference: &str,
+    email: Option<&str>,
+) -> Result<Option<String>> {
+    let reference = reference.trim();
+    if reference.chars().count() < 20 {
+        return Ok(None); // too little to match on safely
+    }
+    let mail = match email {
+        Some(e) if !e.trim().is_empty() => format!("&mailto={}", e.trim()),
+        _ => String::new(),
+    };
+    let url = format!(
+        "https://api.crossref.org/works?query.bibliographic={}&rows=5{}",
+        urlencoding(reference),
+        mail
+    );
+    let resp = client.get(&url).send().await.context("Crossref reference search")?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let body: Value = resp.json().await.context("Crossref reference JSON")?;
+    let Some(items) = body["message"]["items"].as_array() else {
+        return Ok(None);
+    };
+    // Prefer a published record over a preprint when both name the same work:
+    // a preprint ("posted-content") carries a different DOI than the version the
+    // library likely holds, which would read as a false citation gap. Fall back to
+    // the preprint only if nothing published matches.
+    let mut preprint_fallback: Option<String> = None;
+    for it in items {
+        if let (Some(cand), Some(doi)) = (parse_crossref_work(it).title.as_deref(), it["DOI"].as_str()) {
+            if reference_names_title(cand, reference) {
+                if it["type"].as_str() == Some("posted-content") {
+                    preprint_fallback.get_or_insert_with(|| doi.to_lowercase());
+                } else {
+                    return Ok(Some(doi.to_lowercase()));
+                }
+            }
+        }
+    }
+    Ok(preprint_fallback)
+}
+
 /// Upsert an author and return its id.
 fn author_id(conn: &Connection, a: &Author) -> Result<i64> {
     conn.execute(
@@ -996,6 +1074,72 @@ mod tests {
             "Erdos-Renyi Graphs and Spectral Gaps",
             "Erdős–Rényi Graphs and Spectral Gaps"
         ));
+    }
+
+    #[test]
+    fn reference_names_title_gates_backfill() {
+        // A real reference whose full title (>=4 distinctive words) is spelled out,
+        // with the candidate's diacritics folded — accepted.
+        let raw = "A. Bordes, N. Usunier, A. Garcia-Duran, J. Weston, and O. Yakhnenko. 2013. \
+                   Translating embeddings for modeling multi-relational data. In Proc. of NIPS.";
+        assert!(reference_names_title("Translating embeddings for modeling multi-relational data", raw));
+        // Whole-token, NOT substring: 'adam' must not match inside the surname
+        // 'adamson' — so the Adam-optimizer DOI is not attached to a control paper.
+        let control = "Adamson, R. Stochastic optimization control. Automatica, 2019.";
+        assert!(!reference_names_title("Adam stochastic optimization control", control));
+        // A short candidate (<4 distinctive words) that is merely a SUBSET of a
+        // different work's longer title is rejected (the ELMo-as-subset trap).
+        let longer = "Deep contextualized word representations of sentences for pretraining transformer encoders. 2019.";
+        assert!(!reference_names_title("Deep contextualized word representations", longer));
+        // An unrelated candidate shares no distinctive word — rejected.
+        assert!(!reference_names_title("A survey of quantum error correction codes", raw));
+        // A candidate that names MORE than the reference does (extra distinctive
+        // words absent) falls below the coverage floor — rejected.
+        assert!(!reference_names_title(
+            "Translating embeddings for modeling multi-relational data across federated knowledge graphs",
+            raw
+        ));
+    }
+
+    #[test]
+    #[ignore = "hits the live Crossref API"]
+    fn crossref_resolve_reference_live() {
+        // Real DOI-less citation strings drawn from the library. Run with:
+        //   cargo test --lib crossref_resolve_reference_live -- --ignored --nocapture
+        let client = super::http_client(Some("test@example.com")).unwrap();
+        // Journal papers (always in Crossref) with >=4 distinctive title words.
+        let raws = [
+            "O. Russakovsky, J. Deng, H. Su, et al. ImageNet Large Scale Visual \
+             Recognition Challenge. International Journal of Computer Vision, 2015.",
+            "D. Silver, A. Huang, C. Maddison, et al. Mastering the game of Go with \
+             deep neural networks and tree search. Nature 529, 484-489 (2016).",
+            "J. Jumper, R. Evans, A. Pritzel, et al. Highly accurate protein structure \
+             prediction with AlphaFold. Nature 596, 583-589 (2021).",
+        ];
+        let mut resolved = 0usize;
+        tauri::async_runtime::block_on(async {
+            for raw in raws {
+                let doi = super::crossref_resolve_reference(&client, raw, Some("test@example.com"))
+                    .await
+                    .unwrap();
+                println!("RAW: {raw}\n  -> {doi:?}\n");
+                if doi.is_some() {
+                    resolved += 1;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            // A nonsense citation must NOT resolve (the precision guarantee).
+            let bogus = super::crossref_resolve_reference(
+                &client,
+                "Zzzq Xqptl. 1999. Flarngblat quxxle woozzle in the greeble. In Proc. of Nowhere.",
+                Some("test@example.com"),
+            )
+            .await
+            .unwrap();
+            println!("BOGUS -> {bogus:?}");
+            assert!(bogus.is_none(), "a nonsense citation must not resolve");
+        });
+        assert!(resolved >= 1, "expected >=1 real reference to resolve via Crossref");
     }
 
     #[test]

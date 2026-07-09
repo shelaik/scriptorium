@@ -5075,7 +5075,7 @@ pub fn citation_gaps(state: State<'_, AppState>, limit: Option<i64>) -> Result<V
              FROM document_references
              WHERE ref_doi IS NOT NULL AND TRIM(ref_doi) <> ''
                AND LOWER(TRIM(ref_doi)) NOT IN
-                   (SELECT LOWER(doi) FROM documents WHERE doi IS NOT NULL)
+                   (SELECT LOWER(doi) FROM documents WHERE doi IS NOT NULL AND deleted_at IS NULL)
              GROUP BY d
              ORDER BY c DESC, d
              LIMIT ?1",
@@ -5091,6 +5091,142 @@ pub fn citation_gaps(state: State<'_, AppState>, limit: Option<i64>) -> Result<V
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize, Clone)]
+struct RefDoiProgress {
+    done: usize,
+    total: usize,
+    resolved: usize,
+}
+
+#[derive(serde::Serialize)]
+pub struct BackfillDoiSummary {
+    /// Distinct DOI-less citations we looked up online.
+    pub scanned: usize,
+    /// Citations that got a DOI (precision-gated — never a near-miss).
+    pub resolved: usize,
+    /// `document_references` rows updated (one citation can be shared by papers).
+    pub updated_rows: usize,
+    /// DOI-less references (with usable text) still unresolved after the run.
+    pub remaining: usize,
+}
+
+/// Backfill DOIs onto already-imported references that lack one, so they reach the
+/// citation-gap finder. For each distinct DOI-less citation text, a precision-first
+/// Crossref bibliographic lookup (gated by `reference_names_title` — the candidate
+/// title must be spelled out in the citation, so a wrong DOI is never attached).
+/// Online-opt-in gated; runs with the DB unlocked during network I/O; cancellable;
+/// emits `refdoi-progress`.
+#[tauri::command]
+pub async fn resolve_reference_dois(app: AppHandle) -> Result<BackfillDoiSummary, String> {
+    // Run on a blocking thread: the inner body uses `block_on` for network I/O, and
+    // that must NOT run on the async-runtime worker thread (nested-runtime panic).
+    // Mirrors import_latex_zip / generate_embeddings.
+    tauri::async_runtime::spawn_blocking(move || resolve_reference_dois_inner(&app))
+        .await
+        .map_err(|e| format!("Task fallito: {e}"))?
+}
+
+fn resolve_reference_dois_inner(app: &AppHandle) -> Result<BackfillDoiSummary, String> {
+    let state = app.state::<AppState>();
+    state.refdoi_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let (online, email) = {
+        let conn = state.db.lock();
+        let online = setting(&conn, "discovery_enabled").as_deref() == Some("1");
+        let email = setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty());
+        (online, email)
+    };
+    if !online {
+        return Err("Abilita prima «Scopri online» nelle Impostazioni.".into());
+    }
+
+    // One lookup per DISTINCT citation text, applied to every row that shares it.
+    let raws: Vec<String> = {
+        let conn = state.db.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT raw FROM document_references
+                 WHERE (ref_doi IS NULL OR TRIM(ref_doi) = '')
+                   AND raw IS NOT NULL AND TRIM(raw) <> ''",
+            )
+            .map_err(|e| e.to_string())?;
+        let v = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .collect::<Vec<_>>();
+        v
+    };
+
+    const TOTAL_MAX: usize = 1200; // backstop; the real vault is far smaller
+    let target = raws.len().min(TOTAL_MAX); // what we'll actually attempt
+    let mut attempted = 0usize;
+    let mut resolved_pairs: Vec<(String, String)> = Vec::new(); // (raw, doi)
+    if target > 0 {
+        if let Ok(client) = metadata::http_client(email.as_deref()) {
+            tauri::async_runtime::block_on(async {
+                for raw in raws.iter() {
+                    if state.refdoi_cancel.load(std::sync::atomic::Ordering::SeqCst) || attempted >= target {
+                        break;
+                    }
+                    attempted += 1;
+                    let r = tokio::time::timeout(
+                        std::time::Duration::from_secs(20),
+                        metadata::crossref_resolve_reference(&client, raw, email.as_deref()),
+                    )
+                    .await;
+                    if let Ok(Ok(Some(doi))) = r {
+                        resolved_pairs.push((raw.clone(), doi));
+                    }
+                    let _ = app.emit(
+                        "refdoi-progress",
+                        RefDoiProgress { done: attempted, total: target, resolved: resolved_pairs.len() },
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            });
+        }
+    }
+
+    // Apply: fill in every DOI-less row that shares a resolved citation text.
+    let mut updated_rows = 0usize;
+    if !resolved_pairs.is_empty() {
+        let conn = state.db.lock();
+        for (raw, doi) in &resolved_pairs {
+            if let Ok(n) = conn.execute(
+                "UPDATE document_references SET ref_doi = ?1
+                 WHERE raw = ?2 AND (ref_doi IS NULL OR TRIM(ref_doi) = '')",
+                params![doi, raw],
+            ) {
+                updated_rows += n;
+            }
+        }
+    }
+
+    // Distinct citations (matching `scanned`/`resolved`'s unit) still without a DOI.
+    let remaining = {
+        let conn = state.db.lock();
+        conn.query_row(
+            "SELECT COUNT(DISTINCT raw) FROM document_references
+             WHERE (ref_doi IS NULL OR TRIM(ref_doi) = '') AND raw IS NOT NULL AND TRIM(raw) <> ''",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as usize
+    };
+
+    // No `library-changed` emit: only document_references.ref_doi changed — the
+    // document set and embeddings (hence the semantic map) are untouched. The gap
+    // tab refreshes itself via citationGaps() after the run.
+    Ok(BackfillDoiSummary { scanned: attempted, resolved: resolved_pairs.len(), updated_rows, remaining })
+}
+
+/// Request cancellation of an in-progress reference-DOI backfill.
+#[tauri::command]
+pub fn cancel_reference_dois(state: State<'_, AppState>) {
+    state.refdoi_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[derive(serde::Serialize)]

@@ -41,6 +41,8 @@ pub struct AppState {
     pub cancel_embed: AtomicBool,
     /// Set to request cancellation of an in-progress RAG indexing job.
     pub rag_cancel: AtomicBool,
+    /// Set to request cancellation of an in-progress reference-DOI backfill.
+    pub refdoi_cancel: AtomicBool,
     /// Set to request cancellation of an in-progress wiki generation.
     pub wiki_cancel: AtomicBool,
     /// The active watched-folder watcher (dropping it stops watching).
@@ -68,6 +70,7 @@ pub fn run() {
                 pdfium_lock: Mutex::new(()),
                 cancel_embed: AtomicBool::new(false),
                 rag_cancel: AtomicBool::new(false),
+                refdoi_cancel: AtomicBool::new(false),
                 wiki_cancel: AtomicBool::new(false),
                 watcher: Mutex::new(None),
                 connector: Mutex::new(None),
@@ -139,6 +142,8 @@ pub fn run() {
             commands::export_citations,
             commands::citation_links,
             commands::citation_gaps,
+            commands::resolve_reference_dois,
+            commands::cancel_reference_dois,
             commands::library_health,
             commands::library_facets,
             commands::list_saved_searches,
