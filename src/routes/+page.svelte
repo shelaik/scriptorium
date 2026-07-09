@@ -504,7 +504,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.17";
+  const APP_VERSION = "0.8.18";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3286,7 +3286,7 @@
   /** Open the destination picker for a piece of text originating from `d`. */
   async function openSendToNote(
     d: DocumentItem | null,
-    part: { content: string; label?: string; page?: number | null; collapse?: boolean },
+    part: { content: string; label?: string; page?: number | null; collapse?: boolean; code?: string | null },
     pos: { x: number; y: number },
   ) {
     if (!d || !part.content.trim()) {
@@ -3312,6 +3312,7 @@
         page: part.page ?? null,
         label: part.label ?? null,
         collapse: part.collapse ?? false,
+        code: part.code ?? null,
       },
       pos,
     };
@@ -5031,7 +5032,7 @@
       aiEnabled={!!aiStat?.enabled}
       initialPage={openDocPage}
       onClose={() => { openDoc = null; openDocPage = null; }}
-      onSendToNote={(content, page, pos) => openSendToNote(openDoc, { content, page, collapse: true }, pos)}
+      onSendToNote={(content, page, pos, opts) => openSendToNote(openDoc, { content, page, collapse: !opts?.code, label: opts?.label, code: opts?.code }, pos)}
       onOpenNotes={() => { openDoc = null; openDocPage = null; openNotesView(); }}
     />
   {/if}
@@ -5865,8 +5866,9 @@
             <li><strong>Annotazioni</strong>: evidenzia selezionando il testo (con colore e commento), oppure modalità <strong>Nota puntuale</strong> per un appunto “a spillo” in un punto qualsiasi — sono <em>ancorate alla pagina</em> e le ritrovi nel pannello <strong>Annotazioni</strong> (tasto <kbd>A</kbd>).</li>
             <li><strong>Nota del documento</strong> (pannello <strong>Nota doc</strong>, tasto <kbd>E</kbd>): un unico appunto libero legato all'<em>intero</em> paper — diverso dalle Annotazioni (ancorate a un punto) e dagli <strong>Appunti</strong> (i tuoi file .md indipendenti).</li>
             <li><strong>Cerca nel documento</strong> (<kbd>Ctrl</kbd>+<kbd>F</kbd>): compare come <strong>fascia dedicata nella barra in alto</strong> del lettore, senza coprire la pagina; <kbd>Invio</kbd>/<kbd>Maiusc</kbd>+<kbd>Invio</kbd> scorrono i risultati. Più <strong>indice</strong>, zoom/adatta, rotazione, due pagine, modalità notte; riprende dall'<strong>ultima pagina</strong> letta.</li>
-            <li><strong>Estrai tabella</strong> (icona griglia): trascina un rettangolo su una tabella → anteprima → esporta in CSV / Markdown / Excel (+ “migliora con AI”).</li>
-            <li><strong>Estrai testo</strong> (icona testo): trascina un'area → copia il testo o salvalo in .txt/.md.</li>
+            <li><strong>Estrai tabella</strong> (icona griglia): trascina un rettangolo su una tabella → anteprima → esporta in CSV / Markdown / Excel / <strong>LaTeX</strong> (booktabs) (+ “migliora con AI”).</li>
+            <li><strong>Estrai testo</strong> (icona testo): trascina un'area → copia il testo o salvalo in .txt/.md, oppure <strong>Copia LaTeX</strong>.</li>
+            <li><strong>→ LaTeX</strong>: da una selezione (radiale → <em>Copia come LaTeX</em>), da una <strong>tabella</strong> o da un <strong>testo</strong> estratti, ottieni il <strong>LaTeX</strong> (testo con i caratteri speciali già “escapati”, tabella in <code>booktabs</code>) da <strong>copiare</strong> o mandare <strong>→ Appunti</strong>: entra come blocco di codice con il <strong>riferimento al paper</strong> (<code>[[@citekey]]</code>). Le <em>formule</em> arriveranno in un secondo momento.</li>
             <li><strong>Lente AI</strong>: seleziona un passaggio → <em>Spiega</em>, <em>Traduci</em> o <em>Chiedi</em> — la risposta arriva in una scheda accanto al testo e puoi salvarla nella <strong>Nota del documento</strong> (richiede l'AI locale attiva).</li>
             <li><strong>→ Appunti</strong>: manda il testo selezionato in un appunto .md (radiale <em>Manda agli Appunti</em> o barretta dell'evidenziazione) — arriva come citazione, con il riferimento al paper in coda. Vedi <em>Appunti</em>.</li>
             <li><strong>Vai agli Appunti</strong> (radiale del lettore): chiude il lettore e apre i tuoi Appunti .md.</li>

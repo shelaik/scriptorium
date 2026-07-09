@@ -19,6 +19,9 @@ export interface NotePayload {
   /** Collapse internal whitespace (good for PDF selections, whose line breaks are
    *  layout noise). Leave false to preserve structure (AI summaries). */
   collapse?: boolean;
+  /** When set (e.g. "latex"), render the content as a fenced code block in that
+   *  language instead of a blockquote, with the attribution as a caption below. */
+  code?: string | null;
 }
 
 /** A wikilink token that resolves back to the source paper. */
@@ -30,8 +33,25 @@ export function refToken(citekey: string | null | undefined, title: string): str
   return `[[${safe || "senza titolo"}]]`;
 }
 
+/** A fenced code block (e.g. LaTeX) with the source paper as a caption line below.
+ *  The content stays verbatim inside the fence; the `[[@citekey]]` caption sits
+ *  outside so it resolves to a live backlink. */
+function buildCodeBlock(p: NotePayload): string {
+  const body = (p.content ?? "").replace(/\r\n/g, "\n").replace(/\n+$/, "");
+  // The fence must be longer than the longest backtick run inside, or the block
+  // would close early (LaTeX never has these, but extracted text is untrusted).
+  const longest = (body.match(/`+/g) ?? []).reduce((m, r) => Math.max(m, r.length), 0);
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  const block = `${fence}${p.code}\n${body}\n${fence}`;
+  const ref = refToken(p.citekey, p.title);
+  const label = p.label && p.label.trim() ? `${p.label.trim()} ` : "";
+  const page = p.page != null ? `, p. ${p.page}` : "";
+  return `${block}\n\n*${label}${ref}${page}*`;
+}
+
 /** The Markdown block to append to a note. */
 export function buildQuoteBlock(p: NotePayload): string {
+  if (p.code) return buildCodeBlock(p);
   let text = (p.content ?? "").replace(/\r\n/g, "\n");
   if (p.collapse) {
     text = text.replace(/\s+/g, " ").trim();

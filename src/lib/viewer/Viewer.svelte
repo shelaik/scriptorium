@@ -20,6 +20,7 @@
   import { printDocument } from "$lib/print";
   import { revealDocument } from "$lib/share";
   import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, aiExplain } from "$lib/api";
+  import { escapeLatex, textToLatex, tableToLatex } from "$lib/latex";
   import { save } from "@tauri-apps/plugin-dialog";
   import ShareMenu from "$lib/ShareMenu.svelte";
   import RadialMenu from "$lib/RadialMenu.svelte";
@@ -43,8 +44,14 @@
     aiEnabled?: boolean;
     initialPage?: number | null;
     onClose: () => void;
-    /** Send the current selection (with its page) to a note; handled by +page. */
-    onSendToNote?: (content: string, page: number | null, pos: { x: number; y: number }) => void;
+    /** Send content (with its page) to an appunto; handled by +page. `opts.code`
+     *  wraps it as a fenced code block (e.g. LaTeX) instead of a quote. */
+    onSendToNote?: (
+      content: string,
+      page: number | null,
+      pos: { x: number; y: number },
+      opts?: { code?: string; label?: string },
+    ) => void;
     /** Close the reader and jump to the Appunti (.md notes) surface; handled by +page. */
     onOpenNotes?: () => void;
   } = $props();
@@ -170,6 +177,8 @@
   let textModal = $state(false);
   let textLoading = $state(false);
   let textContent = $state("");
+  // Page a table/text region was extracted from — cited when sending LaTeX to an appunto.
+  let extractPage = $state<number | null>(null);
   let printing = $state(false);
   let notice = $state("");
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -509,6 +518,7 @@
     if (!start || !rect || rect.w < 8 || rect.h < 8) return;
     const b = start.wrap.getBoundingClientRect();
     const page = Number(start.wrap.dataset.page);
+    extractPage = Number.isFinite(page) ? page : null;
     const norm = [
       (rect.x - b.left) / b.width,
       (rect.y - b.top) / b.height,
@@ -610,6 +620,41 @@
     } finally {
       aiCleaning = false;
     }
+  }
+  // ----- LaTeX from a selection / extracted table / extracted text -----
+  async function copyLatex(latex: string) {
+    if (!latex.trim()) {
+      setNotice("Niente da convertire in LaTeX");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(latex);
+      setNotice("LaTeX copiato negli appunti ✓");
+    } catch {
+      setNotice("Impossibile copiare negli appunti");
+    }
+  }
+  /** Hand a LaTeX snippet to +page's "send to appunto" picker as a code block. */
+  function latexToNote(latex: string, label: string, e: MouseEvent) {
+    if (!latex.trim()) {
+      setNotice("Niente da convertire in LaTeX");
+      return;
+    }
+    onSendToNote?.(latex, extractPage, { x: e.clientX, y: e.clientY }, { code: "latex", label });
+  }
+  function tableLatexCopy() {
+    copyLatex(tableToLatex(tableGrid));
+  }
+  function tableLatexToNote(e: MouseEvent) {
+    tableModal = false;
+    latexToNote(tableToLatex(tableGrid), "Tabella (LaTeX) da", e);
+  }
+  function textLatexCopy() {
+    copyLatex(textToLatex(textContent));
+  }
+  function textLatexToNote(e: MouseEvent) {
+    textModal = false;
+    latexToNote(textToLatex(textContent), "Testo (LaTeX) da", e);
   }
 
   function onMouseUp(e: MouseEvent) {
@@ -1354,6 +1399,12 @@
           action: () => onSendToNote?.(selText, page, at),
         });
       }
+      items.push({
+        id: "sellatex",
+        label: "Copia come LaTeX",
+        hint: "Copia la selezione come LaTeX (escape dei caratteri speciali)",
+        action: () => copyLatex(escapeLatex(sel)),
+      });
     }
     items.push(
       { id: "fitw", label: "Adatta larghezza", hint: "Larghezza pagina = finestra (W)", action: fitWidth },
@@ -1822,6 +1873,8 @@
             <button onclick={() => doExportTable("csv")}>CSV</button>
             <button onclick={() => doExportTable("md")}>Markdown</button>
             <button onclick={() => doExportTable("xlsx")}>Excel</button>
+            <button onclick={tableLatexCopy} title="Copia la tabella come LaTeX in stile booktabs (nel documento serve il pacchetto booktabs)">Copia LaTeX</button>
+            {#if onSendToNote}<button onclick={tableLatexToNote} title="Manda la tabella in LaTeX a un appunto, con citazione al paper">→ Appunti</button>{/if}
           {/if}
           <button class="close" onclick={() => (tableModal = false)}>Chiudi</button>
         </div>
@@ -1856,6 +1909,8 @@
             <button onclick={copyText}>Copia</button>
             <button onclick={() => saveText("txt")}>Salva .txt</button>
             <button onclick={() => saveText("md")}>Salva .md</button>
+            <button onclick={textLatexCopy} title="Copia il testo come LaTeX (caratteri speciali già con escape)">Copia LaTeX</button>
+            {#if onSendToNote}<button onclick={textLatexToNote} title="Manda il testo in LaTeX a un appunto, con citazione al paper">→ Appunti</button>{/if}
           {/if}
           <button class="close" onclick={() => (textModal = false)}>Chiudi</button>
         </div>
