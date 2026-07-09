@@ -281,7 +281,8 @@
       case "wiki": return "g-wiki";
       case "discover": return "g-disc";
       case "terminal": return "g-term";
-      case "trash": case "duplicates": return "g-tools";
+      case "trash": return "g-trash";
+      case "duplicates": return "g-tools";
       default: return null;
     }
   });
@@ -503,7 +504,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.14";
+  const APP_VERSION = "0.8.15";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2674,6 +2675,7 @@
     note: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8",
     globe: "M12 2a10 10 0 1 0 .01 0M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10",
     term: "M4 17l6-6-6-6M12 19h8",
+    backup: "M22 12H2M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01",
     x: "M18 6L6 18M6 6l12 12",
   };
 
@@ -2986,7 +2988,6 @@
         icon: I.tools,
         hint: "Manutenzione e diagnostica",
         children: [
-          { id: "gt-meta", label: "Recupera metadati", badge: needsMeta > 0 ? String(needsMeta) : undefined, disabled: enriching || docs.length === 0, hint: "Da Crossref via DOI: autori, anno, rivista, riferimenti", action: () => enrichMeta() },
           {
             id: "gt-care",
             label: "Cura della libreria",
@@ -3000,10 +3001,10 @@
           },
           { id: "gt-thumb", label: "Rigenera anteprime", disabled: rebuildingThumbs, action: () => rebuildThumbs() },
           { id: "gt-emb", label: "Indice semantico", hint: `${emb.embedded}/${emb.total} documenti indicizzati`, disabled: generating || emb.embedded >= emb.total || emb.total === 0, action: () => generateIndex() },
-          { id: "gt-backup", label: "Backup libreria…", action: () => doBackup() },
-          { id: "gt-trash", label: "Cestino", icon: I.trash, action: () => setFilter({ kind: "trash" }) },
         ],
       },
+      { id: "g-backup", label: "Backup libreria", icon: I.backup, hint: "Copia completa della libreria (PDF + database) in una cartella", action: () => doBackup() },
+      { id: "g-trash", label: "Cestino", icon: I.trash, hint: "I documenti eliminati (ripristinabili)", action: () => setFilter({ kind: "trash" }) },
       { id: "g-term", label: "Terminale", icon: I.term, hint: "PowerShell integrato nella cartella dei PDF", action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
       {
         id: "g-theme",
@@ -5813,7 +5814,7 @@
         <div class="helpsec">
           <h3>Barra strumenti, menu radiale e palette — l'interfaccia</h3>
           <ul>
-            <li><strong>Barra strumenti</strong> (in alto, sotto il titolo): un'icona per ogni funzione — <strong>Importa</strong>, <strong>Vista</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Note</strong> (📝), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔, con il conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Strumenti</strong> (Recupera metadati, Cura della libreria, Cestino, Backup, indice semantico…), <strong>Terminale</strong> (&gt;_), <strong>Aspetto</strong> e <strong>Sistema</strong> (Impostazioni, Aiuto, Informazioni). Le voci con un menu si aprono al clic, le altre eseguono direttamente; l'icona si evidenzia quando sei nella vista corrispondente. La <strong>palette comandi</strong> (icona <kbd>Ctrl</kbd>+<kbd>K</kbd>) è accanto al contatore «senza metadati». La <strong>barra laterale</strong> resta per la navigazione: filtri, tag, collezioni, ricerche salvate, cartella sorvegliata.</li>
+            <li><strong>Barra strumenti</strong> (in alto, sotto il titolo): un'icona per ogni funzione — <strong>Importa</strong>, <strong>Vista</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Note</strong> (📝), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔, con il conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Strumenti</strong> (Cura della libreria, Rigenera anteprime, Indice semantico), <strong>Backup libreria</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Aspetto</strong> e <strong>Sistema</strong> (Impostazioni, Aiuto, Informazioni). Le voci con un menu si aprono al clic, le altre eseguono direttamente; l'icona si evidenzia quando sei nella vista corrispondente. Il <strong>Recupera metadati</strong> e la <strong>palette comandi</strong> (icona <kbd>Ctrl</kbd>+<kbd>K</kbd>) sono in alto accanto al contatore «✦ senza metadati». La <strong>barra laterale</strong> resta per la navigazione: filtri, tag, collezioni, ricerche salvate, cartella sorvegliata.</li>
             <li><strong>Tasto destro</strong> su un documento → il <strong>menu radiale</strong>: le azioni disposte ad anello attorno al cursore, organizzate in orbite (Cita, AI, Organizza, Condividi…). Tasto destro sullo <strong>spazio vuoto</strong> → il menu radiale globale (gli stessi gruppi della barra). La barra, il radiale e la palette pescano dallo <strong>stesso registro</strong>: nessuna funzione è esclusiva di una sola.</li>
             <li><strong>Come si naviga</strong>: muovi il mouse verso un petalo (basta la direzione, non serve arrivarci) e clicca; oppure <strong>secondo clic destro</strong> per entrare nei sottomenu senza spostarti; <strong>rotella</strong> per ruotare la selezione; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; frecce + Invio da tastiera. <kbd>Esc</kbd> chiude, il centro torna indietro.</li>
             <li><kbd>Ctrl</kbd>+<kbd>K</kbd> → la <strong>palette comandi</strong>: ogni azione, documento, filtro e tema, digitando. <kbd>/</kbd> va alla ricerca, <kbd>Ctrl</kbd>+<kbd>B</kbd> mostra/nasconde la barra laterale.</li>
@@ -5835,7 +5836,7 @@
             <li><strong>Viste</strong>: griglia (copertine ridimensionabili con − ▭ +), lista a colonne, e <strong>Costellazione</strong> — la libreria come mappa semantica: ogni stella un documento, i legami sono la somiglianza di significato. Clic per aprire, tasto destro per il menu, Ctrl+clic per selezionare.</li>
             <li><strong>Continua a leggere</strong>: in “Tutti” trovi in alto gli ultimi PDF aperti. Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
             <li><strong>Riscopri</strong> (barra <em>Riscopri</em>, radiale o palette): ti ripesca un documento dimenticato o mai letto.</li>
-            <li><strong>Cura della libreria</strong> (barra strumenti in alto o radiale → Strumenti) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi; il pulsante <strong>«Risolvi DOI dei riferimenti»</strong> recupera online — precision-first, mai un abbinamento incerto — i DOI mancanti dei riferimenti già importati, così entrano nel conteggio) e <strong>Duplicati</strong> (unione). Il <strong>Cestino</strong> resta tra gli Strumenti.</li>
+            <li><strong>Cura della libreria</strong> (barra strumenti in alto o radiale → Strumenti) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi; il pulsante <strong>«Risolvi DOI dei riferimenti»</strong> recupera online — precision-first, mai un abbinamento incerto — i DOI mancanti dei riferimenti già importati, così entrano nel conteggio) e <strong>Duplicati</strong> (unione). Il <strong>Cestino</strong> ha la sua icona dedicata sulla barra.</li>
             <li><strong>Tag</strong>: la <strong>matitina ✎</strong> accanto a un tag nella barra laterale lo <strong>rinomina o ricolora</strong>; la <strong>×</strong> lo elimina. Dal pannello di dettaglio aggiungi/togli tag al volo.</li>
             <li>Nella vista <strong>Tutti</strong>, la <strong>Panoramica</strong> in alto (comprimibile) mostra quanti documenti hai da leggere, in lettura e aggiunti questo mese, e ti propone un paper da <strong>riscoprire</strong> ogni giorno.</li>
           </ul>
@@ -5936,7 +5937,7 @@
             <li><strong>Esporta</strong> (barra <em>Esporta</em>, radiale o Ctrl+K): <em>Citazioni</em> (BibTeX / RIS / CSL) dei documenti mostrati, oppure <em>In Obsidian</em> (note Markdown nel tuo vault).</li>
             <li><strong>AI locale</strong> (Ollama / LM Studio): riassunti, tag automatici, lente di lettura — opzionali, mai automatici, disattivabili. Impostazioni → AI locale.</li>
             <li>Le schede con un <strong>riassunto AI</strong> mostrano il bollino <strong>✦ AI</strong>; nel menu radiale le voci AI indicano ✓ ciò che c'è già. Il <strong>batch</strong> sulla selezione <strong>salta</strong> chi ha già riassunto/tag (te lo dice: «N saltati»); per rigenerare un riassunto usa il tasto destro sul singolo documento.</li>
-            <li><strong>Terminale</strong> integrato (es. per <code>claude code</code>) con la <strong>sua icona (&gt;_) sulla barra</strong> in alto; <strong>Backup</strong> completo (barra → <em>Strumenti</em>); <strong>11 temi</strong> dell'interfaccia (barra → <em>Aspetto</em>, radiale o palette).</li>
+            <li><strong>Terminale</strong> integrato (es. per <code>claude code</code>) con la <strong>sua icona (&gt;_) sulla barra</strong> in alto; <strong>Backup libreria</strong> completo (icona propria sulla barra); <strong>11 temi</strong> dell'interfaccia (barra → <em>Aspetto</em>, radiale o palette).</li>
             <li>Suggerimento: le finestre si <strong>ridimensionano</strong> trascinando l'angolo in basso a destra.</li>
           </ul>
         </div>
