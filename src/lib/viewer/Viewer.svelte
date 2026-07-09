@@ -179,6 +179,9 @@
   let textContent = $state("");
   // Page a table/text region was extracted from — cited when sending LaTeX to an appunto.
   let extractPage = $state<number | null>(null);
+  // Preview toggles in the extraction modals: raw vs. the generated LaTeX.
+  let textView = $state<"text" | "latex">("text");
+  let tableView = $state<"grid" | "latex">("grid");
   let printing = $state(false);
   let notice = $state("");
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -532,6 +535,7 @@
       textMode = false;
       textModal = true;
       textLoading = true;
+      textView = "text";
       textContent = "";
       try {
         textContent = await extractRegionText(id, page, region);
@@ -546,6 +550,7 @@
     tableMode = false;
     tableModal = true;
     tableLoading = true;
+    tableView = "grid";
     tableGrid = [];
     try {
       tableGrid = await extractTable(id, page, region);
@@ -1866,6 +1871,10 @@
           <strong>Tabella estratta</strong>
           {#if !tableLoading && tableGrid.length}
             <span class="tdim">{tableGrid.length}×{tableGrid[0]?.length ?? 0}</span>
+            <div class="viewtoggle">
+              <button class:on={tableView === "grid"} onclick={() => (tableView = "grid")} title="Anteprima come griglia">Griglia</button>
+              <button class:on={tableView === "latex"} onclick={() => (tableView = "latex")} title="Anteprima del LaTeX (booktabs) che verrebbe copiato">LaTeX</button>
+            </div>
           {/if}
           <span style="flex:1"></span>
           {#if !tableLoading && tableGrid.length}
@@ -1883,6 +1892,8 @@
             <p class="tdim">Estraggo la tabella…</p>
           {:else if !tableGrid.length}
             <p class="tdim">Nessun testo tabellare riconosciuto nell'area selezionata. Seleziona più precisamente attorno alla tabella, oppure usa un PDF con testo (non scansionato).</p>
+          {:else if tableView === "latex"}
+            <pre class="latexview">{tableToLatex(tableGrid)}</pre>
           {:else}
             <table class="extbl">
               <tbody>
@@ -1904,6 +1915,12 @@
       <div class="tablecard textcard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
           <strong>Testo estratto</strong>
+          {#if !textLoading && textContent.trim()}
+            <div class="viewtoggle">
+              <button class:on={textView === "text"} onclick={() => (textView = "text")} title="Testo grezzo (modificabile)">Testo</button>
+              <button class:on={textView === "latex"} onclick={() => (textView = "latex")} title="Anteprima del LaTeX che verrebbe copiato (caratteri speciali con escape)">LaTeX</button>
+            </div>
+          {/if}
           <span style="flex:1"></span>
           {#if !textLoading && textContent.trim()}
             <button onclick={copyText}>Copia</button>
@@ -1919,6 +1936,8 @@
             <p class="tdim">Estraggo il testo…</p>
           {:else if !textContent.trim()}
             <p class="tdim">Nessun testo riconosciuto nell'area selezionata (PDF scansionato?).</p>
+          {:else if textView === "latex"}
+            <pre class="latexview">{textToLatex(textContent)}</pre>
           {:else}
             <textarea class="exttext" bind:value={textContent} spellcheck="false"></textarea>
           {/if}
@@ -2121,6 +2140,16 @@
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   }
   .exttext:focus { border-color: var(--accent); }
+  .viewtoggle { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .viewtoggle button { border: none; border-radius: 0; padding: 4px 10px; font-size: 12px; }
+  .viewtoggle button.on, .viewtoggle button.on:hover { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+  .latexview {
+    width: 100%; min-height: 320px; max-height: 62vh; box-sizing: border-box; margin: 0;
+    overflow: auto; white-space: pre-wrap; word-break: break-word;
+    background: var(--field); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; font-size: 13px; line-height: 1.5;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; user-select: text;
+  }
 
   /* ----- page + canvas ----- */
   .pages :global(.pagewrap) {
