@@ -220,6 +220,8 @@ pub fn run() {
             commands::ai_clean_table,
             commands::extract_region_text,
             commands::formula_to_latex,
+            commands::formula_to_latex_ai,
+            commands::table_from_image_ai,
             commands::mathocr_status,
             commands::write_text_file,
             commands::get_discovery_settings,

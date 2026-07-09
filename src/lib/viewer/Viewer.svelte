@@ -19,7 +19,7 @@
   } from "$lib/api";
   import { printDocument } from "$lib/print";
   import { revealDocument } from "$lib/share";
-  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, aiExplain, formulaToLatex, mathocrStatus } from "$lib/api";
+  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, getAiSettings, aiListModels } from "$lib/api";
   import { escapeLatex, textToLatex, tableToLatex } from "$lib/latex";
   import { save } from "@tauri-apps/plugin-dialog";
   import ShareMenu from "$lib/ShareMenu.svelte";
@@ -172,6 +172,13 @@
   let tableLoading = $state(false);
   let tableGrid = $state<string[][]>([]);
   let aiCleaning = $state(false);
+  // Table engine chosen in the modal: native (pdfium text) or a local vision LLM.
+  let tableEngine = $state<"native" | "ollama">("native");
+  let tableImg = $state(""); // cropped table image (data URL), for the vision engine
+  let tableRegion: { x: number; y: number; w: number; h: number } | null = null;
+  let tablePage = 0;
+  let tableError = $state("");
+  let tableReq = 0; // epoch token, like formulaReq
   // Text extraction: drag a region to pull its plain text.
   let textMode = $state(false);
   let textModal = $state(false);
@@ -191,6 +198,13 @@
   let formulaMulti = $state(false); // recognize several stacked equations as one block
   let formulaError = $state(""); // a hard error (download/decode), distinct from "no formula"
   let formulaReq = 0; // epoch token: a stale recognition must not overwrite a newer one
+  let formulaEngine = $state<"local" | "ollama">("local"); // bundled math-OCR vs vision LLM
+  // Shared vision-LLM state for the "Ollama" engine in both modals. `aiEnabled` is
+  // already a prop; here we only cache the resolved settings for the model list.
+  let aiSettings: { provider: string; ollama_url: string; lmstudio_url: string; model: string } | null = null;
+  let visionModels = $state<string[]>([]);
+  let visionModel = $state("");
+  let visionModelsLoading = false; // in-flight guard: avoid concurrent model-list fetches
   let printing = $state(false);
   let notice = $state("");
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -594,8 +608,9 @@
       }
       formulaImg = dataUrl;
       formulaMulti = false;
+      formulaEngine = "local";
       formulaModal = true;
-      runFormula(false);
+      runFormula(false, "local");
       return;
     }
     if (textMode) {
@@ -615,18 +630,14 @@
       return;
     }
     tableMode = false;
+    // Keep both the region (native pdfium extraction) and a cropped image (the
+    // vision engine); the modal's engine toggle chooses which to use.
+    tableRegion = region;
+    tablePage = page;
+    tableImg = cropCanvasRegion(start.wrap, rect) ?? "";
+    tableEngine = "native";
     tableModal = true;
-    tableLoading = true;
-    tableView = "grid";
-    tableGrid = [];
-    try {
-      tableGrid = await extractTable(id, page, region);
-    } catch (err) {
-      error = "Errore estrazione tabella: " + err;
-      tableModal = false;
-    } finally {
-      tableLoading = false;
-    }
+    runTable("native");
   }
   async function copyText() {
     try {
@@ -730,20 +741,72 @@
   }
   /** Recognize the currently-cropped formula image (in the modal) as LaTeX.
    *  `multi` segments several stacked equations into one aligned block. */
-  async function runFormula(multi: boolean) {
+  /** Lazily fetch the provider's model list for the "Ollama" engine and pick a
+   *  sensible default vision model (a name that looks vision-capable). */
+  async function ensureVisionModels() {
+    if (!aiEnabled || visionModels.length || visionModelsLoading) return;
+    visionModelsLoading = true;
+    try {
+      if (!aiSettings) aiSettings = await getAiSettings();
+      const url = aiSettings.provider === "lmstudio" ? aiSettings.lmstudio_url : aiSettings.ollama_url;
+      const models = await aiListModels(aiSettings.provider as "ollama" | "lmstudio", url);
+      visionModels = models;
+      if (!visionModel || !models.includes(visionModel)) {
+        const guess = models.find((m) =>
+          /vl|vision|llava|minicpm|moondream|bakllava|granite.*vision|qwen.*vl|gemma.*3|pixtral|llama.*vision/i.test(m),
+        );
+        // Only auto-select something that looks vision-capable. Never silently
+        // fall back to a text or embedding model — leave the picker empty so the
+        // run shows a clear "select a vision model" error while the dropdown
+        // still lists every model for a manual pick.
+        visionModel = guess ?? "";
+      }
+    } catch {
+      /* leave the list empty; the run surfaces a clear error */
+    } finally {
+      visionModelsLoading = false;
+    }
+  }
+  function pickVisionModel(m: string, kind: "formula" | "table") {
+    visionModel = m;
+    try {
+      localStorage.setItem("scriptorium-vision-model", m);
+    } catch {
+      /* ignore */
+    }
+    if (kind === "formula") runFormula(formulaMulti, "ollama");
+    else runTable("ollama");
+  }
+  async function selectFormulaEngine(engine: "local" | "ollama") {
+    formulaEngine = engine; // highlight the picked toggle right away
+    if (engine === "ollama") {
+      formulaLoading = true; // show progress while the model list loads
+      await ensureVisionModels();
+    }
+    runFormula(formulaMulti, engine);
+  }
+
+  async function runFormula(multi: boolean, engine: "local" | "ollama" = formulaEngine) {
     if (!formulaImg) return;
     const req = ++formulaReq; // this run's epoch; a later run invalidates it
     formulaMulti = multi;
+    formulaEngine = engine;
     formulaLoading = true;
     formulaLatex = "";
     formulaError = "";
     try {
-      const st = await mathocrStatus();
-      if (formulaReq !== req) return; // superseded while awaiting
-      if (!st.ready) {
-        setNotice(`Primo uso: scarico il modello formula (~${st.downloadMb} MB), attendi…`);
+      let out: string;
+      if (engine === "ollama") {
+        if (!visionModel) throw "Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).";
+        out = await formulaToLatexAi(formulaImg, visionModel, multi);
+      } else {
+        const st = await mathocrStatus();
+        if (formulaReq !== req) return; // superseded while awaiting
+        if (!st.ready) {
+          setNotice(`Primo uso: scarico il modello formula (~${st.downloadMb} MB), attendi…`);
+        }
+        out = await formulaToLatex(formulaImg, multi);
       }
-      const out = await formulaToLatex(formulaImg, multi);
       if (formulaReq !== req) return;
       formulaLatex = out;
     } catch (err) {
@@ -752,6 +815,42 @@
       setNotice("Errore riconoscimento formula: " + err);
     } finally {
       if (formulaReq === req) formulaLoading = false;
+    }
+  }
+
+  async function selectTableEngine(engine: "native" | "ollama") {
+    tableEngine = engine; // highlight the picked toggle right away
+    if (engine === "ollama") {
+      tableLoading = true; // show progress while the model list loads
+      await ensureVisionModels();
+    }
+    runTable(engine);
+  }
+  /** (Re)build the extracted-table grid with the chosen engine. */
+  async function runTable(engine: "native" | "ollama" = tableEngine) {
+    const req = ++tableReq;
+    tableEngine = engine;
+    tableLoading = true;
+    tableGrid = [];
+    tableView = "grid";
+    tableError = "";
+    try {
+      let grid: string[][];
+      if (engine === "ollama") {
+        if (!tableImg) throw "Immagine della tabella non disponibile";
+        if (!visionModel) throw "Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).";
+        grid = await tableFromImageAi(tableImg, visionModel);
+      } else {
+        if (!tableRegion) throw "Regione non disponibile";
+        grid = await extractTable(id, tablePage, tableRegion);
+      }
+      if (tableReq !== req) return;
+      tableGrid = grid;
+    } catch (err) {
+      if (tableReq !== req) return;
+      tableError = String(err);
+    } finally {
+      if (tableReq === req) tableLoading = false;
     }
   }
   function formulaCopy() {
@@ -1622,6 +1721,17 @@
 
   onMount(() => {
     load();
+    // Remember the last-picked vision model; learn whether AI is even enabled.
+    try {
+      visionModel = localStorage.getItem("scriptorium-vision-model") ?? "";
+    } catch {
+      /* localStorage unavailable */
+    }
+    getAiSettings()
+      .then((s) => {
+        aiSettings = s;
+      })
+      .catch(() => {});
     // Non-passive so Ctrl+wheel zoom can preventDefault the page scroll/zoom.
     pagesEl?.addEventListener("wheel", onWheel, { passive: false });
     // Immersive chrome + right-click radial: single listeners on the viewer root.
@@ -1957,7 +2067,8 @@
           <li><kbd>I</kbd> <span>Modalità notte</span></li>
           <li><kbd>[</kbd> / <kbd>]</kbd> <span>Ruota</span></li>
           <li>Selezione testo <span>Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)</span></li>
-          <li>Formula → LaTeX <span>Da ⋯ Altro o dal radiale: trascina attorno a un'equazione, ottieni il LaTeX (Copia o → Appunti). «Più righe» riconosce più equazioni impilate come blocco gathered. Il primo uso scarica il modello locale ~180 MB</span></li>
+          <li>Formula → LaTeX <span>Da ⋯ Altro o dal radiale: trascina attorno a un'equazione, ottieni il LaTeX (Copia o → Appunti). Nella finestra scegli il motore: «Locale» (math-OCR integrato, il 1º uso scarica ~180 MB) o «Ollama» (un modello di visione locale). «Più righe» = più equazioni come blocco gathered</span></li>
+          <li>Estrai tabella <span>Nella finestra scegli il motore «Nativa» (dal testo del PDF) o «Ollama» (un modello di visione, utile per tabelle-immagine o PDF scansionati)</span></li>
           <li>⋯ Altro <span>Rotazione, note, estrazione tabella/testo/formula, stampa, condivisione</span></li>
           <li>Tasto destro <span>Menu radiale con i comandi di lettura</span></li>
           <li>Mouse fermo <span>La barra si nasconde; muovi il mouse per mostrarla</span></li>
@@ -1976,6 +2087,15 @@
       <div class="tablecard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
           <strong>Tabella estratta</strong>
+          <div class="viewtoggle" title="Motore di estrazione">
+            <button class:on={tableEngine === "native"} onclick={() => selectTableEngine("native")} title="Estrazione nativa dal testo del PDF">Nativa</button>
+            <button class:on={tableEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectTableEngine("ollama")} title={aiEnabled ? "Estrai con un modello di visione locale (Ollama / LM Studio)" : "Abilita l'AI locale nelle Impostazioni per usare Ollama"}>Ollama</button>
+          </div>
+          {#if tableEngine === "ollama" && visionModels.length}
+            <select class="vmodel" value={visionModel} onchange={(e) => pickVisionModel(e.currentTarget.value, "table")} title="Modello di visione">
+              {#each visionModels as m (m)}<option value={m}>{m}</option>{/each}
+            </select>
+          {/if}
           {#if !tableLoading && tableGrid.length}
             <span class="tdim">{tableGrid.length}×{tableGrid[0]?.length ?? 0}</span>
             <div class="viewtoggle">
@@ -1996,9 +2116,11 @@
         </div>
         <div class="tablebody">
           {#if tableLoading}
-            <p class="tdim">Estraggo la tabella…</p>
+            <p class="tdim">{tableEngine === "ollama" ? "Estraggo la tabella con il modello di visione…" : "Estraggo la tabella…"}</p>
+          {:else if tableError}
+            <p class="tdim">{tableError}</p>
           {:else if !tableGrid.length}
-            <p class="tdim">Nessun testo tabellare riconosciuto nell'area selezionata. Seleziona più precisamente attorno alla tabella, oppure usa un PDF con testo (non scansionato).</p>
+            <p class="tdim">Nessun testo tabellare riconosciuto nell'area selezionata. Seleziona più precisamente attorno alla tabella, prova il motore «Ollama», oppure usa un PDF con testo (non scansionato).</p>
           {:else if tableView === "latex"}
             <pre class="latexview">{tableToLatex(tableGrid)}</pre>
           {:else}
@@ -2060,6 +2182,15 @@
       <div class="tablecard textcard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
           <strong>Formula → LaTeX</strong>
+          <div class="viewtoggle" title="Motore di riconoscimento">
+            <button class:on={formulaEngine === "local"} onclick={() => selectFormulaEngine("local")} title="Math-OCR locale integrato (pix2tex)">Locale</button>
+            <button class:on={formulaEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectFormulaEngine("ollama")} title={aiEnabled ? "Riconosci con un modello di visione locale (Ollama / LM Studio)" : "Abilita l'AI locale nelle Impostazioni per usare Ollama"}>Ollama</button>
+          </div>
+          {#if formulaEngine === "ollama" && visionModels.length}
+            <select class="vmodel" value={visionModel} onchange={(e) => pickVisionModel(e.currentTarget.value, "formula")} title="Modello di visione">
+              {#each visionModels as m (m)}<option value={m}>{m}</option>{/each}
+            </select>
+          {/if}
           {#if !formulaLoading}
             <div class="viewtoggle">
               <button class:on={!formulaMulti} onclick={() => runFormula(false)} title="Una singola formula">Una</button>
@@ -2078,7 +2209,7 @@
             <img class="formulaimg" src={formulaImg} alt="Formula selezionata" />
           {/if}
           {#if formulaLoading}
-            <p class="tdim">Riconosco la formula in locale… (il primo uso scarica il modello, ~180 MB)</p>
+            <p class="tdim">{formulaEngine === "ollama" ? "Riconosco la formula con il modello di visione…" : "Riconosco la formula in locale… (il primo uso scarica il modello, ~180 MB)"}</p>
           {:else if formulaError}
             <p class="tdim">{formulaError}</p>
           {:else if !formulaLatex.trim()}
@@ -2289,6 +2420,11 @@
   .formulaimg {
     display: block; max-width: 100%; max-height: 190px; margin: 0 auto 12px;
     padding: 8px; background: #fff; border: 1px solid var(--border); border-radius: 8px;
+  }
+  .vmodel {
+    flex: 0 1 auto; min-width: 0; max-width: 190px; white-space: nowrap;
+    background: var(--field); color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 4px 8px; font-size: 12px; cursor: pointer;
   }
   .viewtoggle { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
   .viewtoggle button { flex: 0 0 auto; white-space: nowrap; border: none; border-radius: 0; padding: 4px 10px; font-size: 12px; }

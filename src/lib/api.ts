@@ -140,6 +140,12 @@ export const formulaToLatex = (imageBase64: string, multi = false) =>
 /** Whether the formula→LaTeX models are ready, and MB to download if not. */
 export const mathocrStatus = () =>
   invoke<{ ready: boolean; downloadMb: number }>("mathocr_status");
+/** Recognize a cropped formula image as LaTeX via a local vision LLM (Ollama/LM Studio). */
+export const formulaToLatexAi = (imageBase64: string, model: string, multi = false) =>
+  invoke<string>("formula_to_latex_ai", { imageBase64, model, multi });
+/** Extract a cropped table image into a grid via a local vision LLM. */
+export const tableFromImageAi = (imageBase64: string, model: string) =>
+  invoke<string[][]>("table_from_image_ai", { imageBase64, model });
 /** Write arbitrary text to a file. */
 export const writeTextFile = (path: string, content: string) =>
   invoke<void>("write_text_file", { path, content });

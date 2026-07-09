@@ -141,6 +141,79 @@ pub async fn generate(
     }
 }
 
+/// Single-shot multimodal generation: sends `prompt` together with one PNG image
+/// (`image_b64`, bare base64, no data-URL prefix) to a vision-capable model.
+/// Ollama takes an `images` array; LM Studio takes an OpenAI `image_url` part.
+/// Returns `(text, truncated)` where `truncated` is true if generation stopped
+/// because it hit `num_predict` (so the caller can warn about a cut-off result).
+pub async fn generate_vision(
+    client: &reqwest::Client,
+    provider: &str,
+    url: &str,
+    model: &str,
+    prompt: &str,
+    image_b64: &str,
+    num_predict: i64,
+) -> Result<(String, bool)> {
+    let base = base_url(url);
+    if is_lmstudio(provider) {
+        let data_url = format!("data:image/png;base64,{image_b64}");
+        let resp = client
+            .post(format!("{base}/v1/chat/completions"))
+            .json(&json!({
+                "model": model,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": prompt },
+                        { "type": "image_url", "image_url": { "url": data_url } }
+                    ]
+                }],
+                "max_tokens": num_predict,
+                "temperature": 0.1,
+                "stream": false
+            }))
+            .send()
+            .await
+            .context("richiesta vision a LM Studio fallita")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let txt = resp.text().await.unwrap_or_default();
+            anyhow::bail!("LM Studio HTTP {status}: {}", truncate(&txt, 300));
+        }
+        let body: Value = resp.json().await.context("risposta LM Studio non valida")?;
+        let truncated = body["choices"][0]["finish_reason"].as_str() == Some("length");
+        let text = body["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Ok((text, truncated))
+    } else {
+        let resp = client
+            .post(format!("{base}/api/generate"))
+            .json(&json!({
+                "model": model,
+                "prompt": prompt,
+                "images": [image_b64],
+                "stream": false,
+                "options": { "num_predict": num_predict, "temperature": 0.1 }
+            }))
+            .send()
+            .await
+            .context("richiesta vision a Ollama fallita")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let txt = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Ollama HTTP {status}: {}", truncate(&txt, 300));
+        }
+        let body: Value = resp.json().await.context("risposta Ollama non valida")?;
+        let truncated = body["done_reason"].as_str() == Some("length");
+        let text = body["response"].as_str().unwrap_or("").trim().to_string();
+        Ok((text, truncated))
+    }
+}
+
 /// Streaming generation: invokes `on_token` with each text delta as it arrives
 /// and returns the full text. Lets the RAG answer appear progressively.
 pub async fn generate_stream<F: FnMut(&str)>(

@@ -3363,6 +3363,121 @@ pub async fn formula_to_latex(
         .map_err(|e| e.to_string())
 }
 
+/// Take just the base64 payload of a possibly-data-URL image string.
+fn strip_data_url(s: &str) -> &str {
+    s.rsplit(',').next().unwrap_or(s).trim()
+}
+
+/// Clean a vision model's LaTeX: drop ```code fences``` and $…$ / $$…$$ / \[…\] wrappers.
+fn clean_vision_latex(s: &str) -> String {
+    let mut t = s.trim().to_string();
+    if t.starts_with("```") {
+        // Drop the opening fence: the ```lang line if multi-line, else the ``` token.
+        if let Some(nl) = t.find('\n') {
+            t = t[nl + 1..].to_string();
+        } else {
+            t = t.trim_start_matches('`').to_string();
+        }
+        if let Some(pos) = t.rfind("```") {
+            t = t[..pos].to_string();
+        }
+        t = t.trim().to_string();
+    }
+    for (open, close) in [("$$", "$$"), ("\\[", "\\]"), ("$", "$")] {
+        if t.len() >= open.len() + close.len() && t.starts_with(open) && t.ends_with(close) {
+            let inner = &t[open.len()..t.len() - close.len()];
+            // Only unwrap a single wrapping group: if the delimiter reappears inside,
+            // this is multiple inline pieces (e.g. "$a$ + $b$") and stripping the outer
+            // pair would corrupt it into "a$ + $b". Leave those untouched.
+            if !inner.contains(open) && !inner.contains(close) {
+                t = inner.trim().to_string();
+                break;
+            }
+        }
+    }
+    t
+}
+
+/// Resolve the AI provider/url and pick the vision model (explicit override or the
+/// configured model), erroring if AI is off or no model is available.
+fn vision_target(app: &AppHandle, model: String) -> Result<(String, String, String), String> {
+    let (enabled, provider, url, default_model) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let c = ai_config(&conn);
+        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone())
+    };
+    if !enabled {
+        return Err("Le funzioni AI sono disattivate (abilitale nelle Impostazioni)".into());
+    }
+    let model = if model.trim().is_empty() { default_model } else { model };
+    if model.trim().is_empty() {
+        return Err("Nessun modello di visione selezionato".into());
+    }
+    Ok((provider, url, model))
+}
+
+/// Recognize a cropped formula image as LaTeX via a local vision LLM (Ollama /
+/// LM Studio) instead of the bundled math-OCR. Needs a vision-capable model.
+#[tauri::command]
+pub async fn formula_to_latex_ai(
+    app: AppHandle,
+    image_base64: String,
+    model: String,
+    multi: bool,
+) -> Result<String, String> {
+    let (provider, url, model) = vision_target(&app, model)?;
+    let b64 = strip_data_url(&image_base64).to_string();
+    let prompt = if multi {
+        "You are an OCR engine for mathematics. Transcribe every equation in this image into LaTeX. \
+         If there are multiple stacked equations, output them inside \\begin{gathered} … \\end{gathered}, \
+         one per line separated by \\\\. Output ONLY the LaTeX for the math — no surrounding $ signs, \
+         no \\[ \\], no code fences, no explanation."
+    } else {
+        "You are an OCR engine for mathematics. Transcribe the equation in this image into a single line \
+         of LaTeX. Output ONLY the LaTeX for the math — no surrounding $ signs, no \\[ \\], no code fences, \
+         no explanation."
+    };
+    let client = ai::client().map_err(|e| e.to_string())?;
+    let (out, _truncated) = ai::generate_vision(&client, &provider, &url, &model, prompt, &b64, 512)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let latex = clean_vision_latex(&out);
+    if latex.trim().is_empty() {
+        return Err("Il modello non ha restituito LaTeX".into());
+    }
+    Ok(latex)
+}
+
+/// Extract a cropped table image into a grid via a local vision LLM (asks for CSV,
+/// parses it) instead of the native pdfium text extraction.
+#[tauri::command]
+pub async fn table_from_image_ai(
+    app: AppHandle,
+    image_base64: String,
+    model: String,
+) -> Result<Vec<Vec<String>>, String> {
+    let (provider, url, model) = vision_target(&app, model)?;
+    let b64 = strip_data_url(&image_base64).to_string();
+    let prompt = "You are an OCR engine for tables. Extract the table in this image and output it as CSV: \
+        one row per line, fields separated by commas, wrap a field in double quotes if it contains a comma. \
+        Preserve the original cell text. Output ONLY the CSV — no explanation, no code fences.";
+    let client = ai::client().map_err(|e| e.to_string())?;
+    let (out, truncated) = ai::generate_vision(&client, &provider, &url, &model, prompt, &b64, 4096)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    if truncated {
+        return Err("La tabella è troppo grande per il modello di visione (output troncato). \
+                    Usa il motore «Nativa» per tabelle grandi."
+            .into());
+    }
+    let grid = parse_csv(&out);
+    if grid.is_empty() {
+        return Err("Il modello non ha restituito una tabella".into());
+    }
+    Ok(grid)
+}
+
 /// Write arbitrary text to a file (used by "extract text" → Save .txt/.md).
 #[tauri::command]
 pub fn write_text_file(path: String, content: String) -> Result<(), String> {
