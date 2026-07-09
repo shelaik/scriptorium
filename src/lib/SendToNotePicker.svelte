@@ -80,7 +80,7 @@
       ondone?.({ slug, title });
       onclose();
     } catch (e) {
-      onstatus?.("Errore: non aggiunto alla nota (" + e + ")");
+      onstatus?.("Errore: non aggiunto all'appunto (" + e + ")");
       busy = false;
     }
   }
@@ -93,7 +93,7 @@
     try {
       slug = await createNote(name);
       await appendToNote(slug, buildQuoteBlock(payload));
-      onstatus?.(`Creata la nota «${name}» ✓`);
+      onstatus?.(`Creato l'appunto «${name}» ✓`);
       ondone?.({ slug, title: name });
       onclose();
     } catch (e) {
@@ -105,7 +105,7 @@
           /* best-effort */
         }
       }
-      onstatus?.("Errore: nota non creata (" + e + ")");
+      onstatus?.("Errore: appunto non creato (" + e + ")");
       busy = false;
     }
   }
@@ -114,7 +114,7 @@
 <svelte:window onclick={guardedClose} onkeydowncapture={onKeyCapture} />
 
 <div class="stnp" style="left:{box.x}px; top:{box.y}px; width:{box.w}px">
-  <div class="stnp-head">Manda a nota</div>
+  <div class="stnp-head">Manda agli Appunti</div>
 
   {#if currentNote}
     <button class="stnp-item open" disabled={busy} onclick={() => append(currentNote.slug, currentNote.title)}>
@@ -132,12 +132,12 @@
       </button>
     {/each}
   {:else if loaded && !currentNote}
-    <div class="stnp-empty">Nessuna nota ancora — creane una qui sotto.</div>
+    <div class="stnp-empty">Nessun appunto ancora — creane uno qui sotto.</div>
   {/if}
 
   <div class="stnp-sep"></div>
   <button class="stnp-item new" disabled={busy} onclick={toNew}>
-    ＋ Nuova nota{payload.title ? ` — «${payload.title}»` : ""}
+    ＋ Nuovo appunto{payload.title ? ` — «${payload.title}»` : ""}
   </button>
 </div>
 

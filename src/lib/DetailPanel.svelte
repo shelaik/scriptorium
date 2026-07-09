@@ -194,7 +194,7 @@
     <div class="psec">
       <div class="psechead">
         <h3>Riassunto AI</h3>
-        {#if onSendToNote}<button class="tonote" title="Manda il riassunto a una nota (con citazione a questo paper)" onclick={(e) => onSendToNote?.({ content: meta?.summary ?? "", label: "Riassunto AI di", collapse: false }, e)}>→ Nota</button>{/if}
+        {#if onSendToNote}<button class="tonote" title="Manda il riassunto agli Appunti (con citazione a questo paper)" onclick={(e) => onSendToNote?.({ content: meta?.summary ?? "", label: "Riassunto AI di", collapse: false }, e)}>→ Appunti</button>{/if}
       </div>
       <p class="pbody">{meta.summary}</p>
     </div>
@@ -209,7 +209,7 @@
     <div class="psec">
       <div class="psechead">
         <h3>Abstract</h3>
-        {#if onSendToNote}<button class="tonote" title="Manda l'abstract a una nota (con citazione a questo paper)" onclick={(e) => onSendToNote?.({ content: meta?.abstract_text ?? "", label: "Abstract di", collapse: true }, e)}>→ Nota</button>{/if}
+        {#if onSendToNote}<button class="tonote" title="Manda l'abstract agli Appunti (con citazione a questo paper)" onclick={(e) => onSendToNote?.({ content: meta?.abstract_text ?? "", label: "Abstract di", collapse: true }, e)}>→ Appunti</button>{/if}
       </div>
       <p class="pbody" class:clamp={!abstractOpen}>{meta.abstract_text}</p>
       {#if meta.abstract_text.length > 260}
@@ -220,7 +220,7 @@
 
   {#if meta?.notes}
     <div class="psec">
-      <h3>Le tue note</h3>
+      <h3>Nota del documento</h3>
       <p class="pbody pnotes">{meta.notes.length > 220 ? meta.notes.slice(0, 220) + "…" : meta.notes}</p>
     </div>
   {/if}

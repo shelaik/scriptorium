@@ -35,6 +35,7 @@
     initialPage = null,
     onClose,
     onSendToNote,
+    onOpenNotes,
   }: {
     id: number;
     title: string;
@@ -44,6 +45,8 @@
     onClose: () => void;
     /** Send the current selection (with its page) to a note; handled by +page. */
     onSendToNote?: (content: string, page: number | null, pos: { x: number; y: number }) => void;
+    /** Close the reader and jump to the Appunti (.md notes) surface; handled by +page. */
+    onOpenNotes?: () => void;
   } = $props();
 
   // ----- Zoom memory: remember the last used scale per document (localStorage) -----
@@ -742,7 +745,7 @@
       await setDocumentNotes(id, docNotes);
       notesSaved = true;
     } catch (e) {
-      setNotice("Note non salvate: " + e);
+      setNotice("Nota del documento non salvata: " + e);
     }
   }
 
@@ -805,7 +808,7 @@
   /** Render the document's annotations (+ notes) as a Markdown document, page-ordered. */
   function buildAnnoMarkdown(): string {
     const lines: string[] = [`# ${title} — evidenziazioni\n`];
-    if (docNotes.trim()) lines.push(`## Note\n\n${docNotes.trim()}\n`);
+    if (docNotes.trim()) lines.push(`## Nota del documento\n\n${docNotes.trim()}\n`);
     lines.push(`## Annotazioni\n`);
     for (const a of [...annos].sort((x, y) => x.page - y.page || x.id - y.id)) {
       const q = a.quote?.trim();
@@ -1265,7 +1268,7 @@
       ? docNotes + "\n\n> " + quoteSnippet + "\n" + answer
       : "> " + quoteSnippet + "\n" + answer;
     onNotesInput(); // marks unsaved + debounced flushNotes, exactly like typing
-    setNotice("Aggiunto alle note");
+    setNotice("Aggiunto alla Nota del documento");
   }
 
   // ----- "⋯ Altro": overflow menu for the regrouped toolbar -----
@@ -1346,8 +1349,8 @@
         const at = { x: radialAt.x, y: radialAt.y };
         items.push({
           id: "tonote",
-          label: "Manda a nota",
-          hint: "Manda la selezione a una nota, con citazione al paper",
+          label: "Manda agli Appunti",
+          hint: "Manda la selezione a un appunto, con citazione al paper",
           action: () => onSendToNote?.(selText, page, at),
         });
       }
@@ -1360,7 +1363,7 @@
       { id: "find", label: "Cerca", hint: "Cerca nel documento (Ctrl+F)", action: () => { openFind(); } },
       { id: "toc", label: "Indice", disabled: !outline.length, checked: showToc, hint: "Indice del documento", action: () => (showToc = !showToc) },
       { id: "annos", label: "Annotazioni", checked: panel === "annos", hint: "Pannello delle annotazioni (A)", action: () => (panel = panel === "annos" ? "none" : "annos") },
-      { id: "notes", label: "Note", checked: panel === "notes", hint: "Note libere sul documento (E)", action: () => (panel = panel === "notes" ? "none" : "notes") },
+      { id: "notes", label: "Nota del documento", checked: panel === "notes", hint: "Appunto libero su questo documento (E)", action: () => (panel = panel === "notes" ? "none" : "notes") },
       {
         id: "tools",
         label: "Strumenti",
@@ -1377,6 +1380,15 @@
       },
       { id: "close", label: "Chiudi lettore", danger: true, hint: "Torna alla libreria (Esc)", action: onClose },
     );
+    if (onOpenNotes) {
+      // Jump to the standalone Appunti (.md) surface, leaving the reader.
+      items.splice(items.length - 1, 0, {
+        id: "gotonotes",
+        label: "Vai agli Appunti",
+        hint: "Chiudi il lettore e apri gli Appunti (.md)",
+        action: () => onOpenNotes?.(),
+      });
+    }
     return items;
   }
 
@@ -1503,7 +1515,7 @@
         <button class:active={showToc} onclick={() => (showToc = !showToc)} title="Mostra/nascondi l'indice del documento">Indice</button>
       {/if}
       <button class:active={panel === "annos"} onclick={() => (panel = panel === "annos" ? "none" : "annos")} title="Indice delle annotazioni di questo documento (A)">Annotazioni</button>
-      <button class:active={panel === "notes"} onclick={() => (panel = panel === "notes" ? "none" : "notes")} title="Note libere su questo documento (E)">Note{#if !notesSaved}<span class="dot" aria-label="non salvate">•</span>{/if}</button>
+      <button class:active={panel === "notes"} onclick={() => (panel = panel === "notes" ? "none" : "notes")} title="Nota del documento: un appunto libero su questo paper (E)">Nota doc{#if !notesSaved}<span class="dot" aria-label="non salvate">•</span>{/if}</button>
       <span class="tsep"></span>
       <button class:active={!!moreOpen} onclick={toggleMore} title="Altri strumenti: rotazione, estrazione, stampa, condivisione…">⋯ Altro</button>
       <span class="tsep"></span>
@@ -1528,6 +1540,34 @@
       <ShareMenu ids={[id]} label={title} {link} variant="menuitem" onstatus={setNotice} onclose={() => (moreOpen = null)} />
       <div class="msep"></div>
       <button class="mitem" onclick={() => moreDo(() => (showHelp = true))} title="Scorciatoie da tastiera (?)"><span class="mck"></span>? Aiuto</button>
+    </div>
+  {/if}
+
+  {#if findOpen}
+    <div class="findbar">
+      <span class="findlbl">Cerca nel documento</span>
+      <input
+        bind:this={findInput}
+        bind:value={findQuery}
+        oninput={runFind}
+        onkeydown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); gotoHit(e.shiftKey ? -1 : 1); }
+          else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeFind(); }
+        }}
+        placeholder="Cerca nel documento…"
+      />
+      <span class="fcount">
+        {findQuery.length < 2
+          ? ""
+          : findPending
+            ? "…"
+            : findHits.length
+              ? `${findActive + 1}/${findHits.length}${findCapped ? "+" : ""}`
+              : "nessun risultato"}
+      </span>
+      <button onclick={() => gotoHit(-1)} disabled={!findHits.length} title="Precedente (Maiusc+Invio)">↑</button>
+      <button onclick={() => gotoHit(1)} disabled={!findHits.length} title="Successivo (Invio)">↓</button>
+      <button onclick={closeFind} title="Chiudi (Esc)">✕</button>
     </div>
   {/if}
 
@@ -1557,7 +1597,7 @@
       <aside class="sidepanel">
         <div class="sptabs">
           <button class:on={panel === "annos"} onclick={() => (panel = "annos")}>Annotazioni ({annos.length})</button>
-          <button class:on={panel === "notes"} onclick={() => (panel = "notes")}>Note</button>
+          <button class:on={panel === "notes"} onclick={() => (panel = "notes")}>Nota del documento</button>
           <button class="spclose" onclick={() => (panel = "none")} title="Chiudi pannello" aria-label="Chiudi">✕</button>
         </div>
 
@@ -1568,7 +1608,7 @@
               bind:value={docNotes}
               oninput={onNotesInput}
               onblur={flushNotes}
-              placeholder="Note libere su questo documento… (salvataggio automatico)"
+              placeholder="Appunto libero su questo documento… (salvataggio automatico)"
             ></textarea>
             <div class="notesfoot">{notesSaved ? "Salvato ✓" : "Salvataggio…"}</div>
           </div>
@@ -1633,32 +1673,6 @@
     <div class="dragrect" style="left:{dragRect.x}px; top:{dragRect.y}px; width:{dragRect.w}px; height:{dragRect.h}px"></div>
   {/if}
 
-  {#if findOpen}
-    <div class="findbar">
-      <input
-        bind:this={findInput}
-        bind:value={findQuery}
-        oninput={runFind}
-        onkeydown={(e) => {
-          if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); gotoHit(e.shiftKey ? -1 : 1); }
-          else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeFind(); }
-        }}
-        placeholder="Cerca nel documento…"
-      />
-      <span class="fcount">
-        {findQuery.length < 2
-          ? ""
-          : findPending
-            ? "…"
-            : findHits.length
-              ? `${findActive + 1}/${findHits.length}${findCapped ? "+" : ""}`
-              : "nessun risultato"}
-      </span>
-      <button onclick={() => gotoHit(-1)} disabled={!findHits.length} title="Precedente (Maiusc+Invio)">↑</button>
-      <button onclick={() => gotoHit(1)} disabled={!findHits.length} title="Successivo (Invio)">↓</button>
-      <button onclick={closeFind} title="Chiudi (Esc)">✕</button>
-    </div>
-  {/if}
 
   {#if loading}<div class="msg">Caricamento…</div>{/if}
   {#if error}<div class="msg err">{error}</div>{/if}
@@ -1687,7 +1701,7 @@
       {#if onSendToNote}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="hlnote" onmousedown={(e) => e.preventDefault()}>
-          <button onclick={sendSelToNote} title="Manda la selezione a una nota, con citazione a questo paper">→ Nota</button>
+          <button onclick={sendSelToNote} title="Manda la selezione agli Appunti, con citazione a questo paper">→ Appunti</button>
         </div>
       {/if}
       {#if aiEnabled}
@@ -1738,7 +1752,7 @@
       {/if}
       <div class="lensft">
         <button onclick={copyLensAnswer} disabled={!lens.answer || lens.busy}>Copia</button>
-        <button onclick={lensToNotes} disabled={!lens.answer || lens.busy}>→ Note</button>
+        <button onclick={lensToNotes} disabled={!lens.answer || lens.busy} title="Aggiungi la risposta alla Nota del documento">→ Nota doc</button>
         <span style="flex:1"></span>
         <button onclick={closeLens}>Chiudi</button>
       </div>
@@ -2399,18 +2413,19 @@
     text-align: center;
   }
   .findbar {
-    position: absolute;
-    top: 58px;
-    right: 22px;
-    z-index: 60;
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    padding: 6px 8px;
-    box-shadow: 0 6px 22px rgba(44, 46, 53, 0.25);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 22px;
+  }
+  .findbar .findlbl {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--dim);
   }
   .findbar input {
     background: var(--field);

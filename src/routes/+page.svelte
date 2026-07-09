@@ -504,7 +504,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.16";
+  const APP_VERSION = "0.8.17";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2895,7 +2895,7 @@
       if (ids.length >= 2 && ids.length <= 3)
         items.push({ id: "s-cmp", label: "Confronta (AI)", icon: I.near, disabled: aiBusyAny || wikiBusy, hint: "Tabella: obiettivo, metodo, dati, risultati, limiti — e cosa aggiunge ciascuno", action: () => runCompare() });
       if (ids.length >= 2)
-        items.push({ id: "s-rev", label: "Rassegna (AI)", icon: I.quote, disabled: aiBusyAny || wikiBusy, hint: "Mini related-work per temi (2-10 paper); salvabile come nota con backlink [[@citekey]]", action: () => runReview() });
+        items.push({ id: "s-rev", label: "Rassegna (AI)", icon: I.quote, disabled: aiBusyAny || wikiBusy, hint: "Mini related-work per temi (2-10 paper); salvabile come appunto con backlink [[@citekey]]", action: () => runReview() });
       items.push({ id: "s-res", label: "Tabella risultati (AI)", icon: I.grid, disabled: aiBusyAny || wikiBusy, hint: "Raccogli metriche e numeri dei paper in un'unica tabella (CSV/Excel)", action: () => runHarvest() });
       items.push({ id: "s-wiki", label: "Pagina wiki (AI)", icon: I.open, disabled: aiBusyAny || wikiBusy, hint: "Una pagina della Wiki con esattamente questi documenti come fonti (max 10)", action: () => (wikiFromSel = { ids: [...selected].slice(0, 10), concept: "" }) });
     }
@@ -2961,9 +2961,9 @@
       { id: "g-disc", label: "Cerca online", icon: I.globe, hint: "arXiv, OpenAlex, ADS e altre fonti", action: () => setFilter({ kind: "discover" }) },
       {
         id: "g-notes",
-        label: "Note",
+        label: "Appunti",
         icon: I.note,
-        hint: "Le tue note in Markdown (file .md) con [[collegamenti]]",
+        hint: "I tuoi appunti in Markdown (file .md) con [[collegamenti]]",
         action: () => openNotesView(),
       },
       { id: "g-redis", label: "Riscopri", icon: I.compass, hint: "Un documento dimenticato, pescato per te", action: () => rediscover() },
@@ -3290,7 +3290,7 @@
     pos: { x: number; y: number },
   ) {
     if (!d || !part.content.trim()) {
-      status = "Niente da mandare alla nota";
+      status = "Niente da mandare agli Appunti";
       return;
     }
     // If the open note has an unsaved edit, get it onto disk BEFORE any append, so
@@ -3300,7 +3300,7 @@
     if (noteView && !noteSaved) {
       await flushNote();
       if (!noteSaved) {
-        status = "Salvataggio della nota aperta non riuscito — riprova prima di mandarci del testo";
+        status = "Salvataggio dell'appunto aperto non riuscito — riprova prima di mandarci del testo";
         return;
       }
     }
@@ -3352,13 +3352,13 @@
     try {
       notesList = await listNotes();
     } catch (e) {
-      status = "Errore nel caricare le note: " + e;
+      status = "Errore nel caricare gli appunti: " + e;
     }
   }
   async function openNote(slug: string) {
     await flushNote(); // persist the note we're leaving
     if (noteView && !noteSaved) {
-      status = "Salvataggio non riuscito: riprova prima di cambiare nota";
+      status = "Salvataggio non riuscito: riprova prima di cambiare appunto";
       return; // don't overwrite the still-unsaved edits with another note
     }
     try {
@@ -3367,14 +3367,14 @@
       noteMode = "preview";
       noteSaved = true;
     } catch (e) {
-      status = "Errore nell'aprire la nota: " + e;
+      status = "Errore nell'aprire l'appunto: " + e;
     }
   }
   async function newNote() {
     const title = noteNewTitle.trim();
     await flushNote();
     if (noteView && !noteSaved) {
-      status = "Salvataggio non riuscito: riprova prima di creare una nota";
+      status = "Salvataggio non riuscito: riprova prima di creare un appunto";
       return;
     }
     try {
@@ -3384,7 +3384,7 @@
       await openNote(slug);
       noteMode = "edit"; // jump straight into writing
     } catch (e) {
-      status = "Errore nel creare la nota: " + e;
+      status = "Errore nel creare l'appunto: " + e;
     }
   }
   function onNoteInput() {
@@ -3411,7 +3411,7 @@
       try {
         meta = await saveNote(slug, snapshot);
       } catch (e) {
-        status = "Errore nel salvare la nota: " + e;
+        status = "Errore nel salvare l'appunto: " + e;
         return; // leave noteSaved=false → callers know the save failed
       }
       if (noteView?.slug !== slug) return; // switched away mid-save; the new note handles itself
@@ -3462,7 +3462,7 @@
       await loadNotes();
       // Follow the rename only if we're still viewing that same note.
       if (noteView?.slug === target) await openNote(newSlug);
-      status = "Nota rinominata ✓";
+      status = "Appunto rinominato ✓";
     } catch (e) {
       status = "Errore rinomina: " + e;
     }
@@ -3479,7 +3479,7 @@
   async function removeNote(slug: string) {
     if (noteView && noteView.slug !== slug) await flushNote(); // persist a different open note first
     const n = notesList.find((x) => x.slug === slug);
-    if (!(await confirmAsk(`Eliminare la nota «${n?.title ?? slug}»?`))) return;
+    if (!(await confirmAsk(`Eliminare l'appunto «${n?.title ?? slug}»?`))) return;
     try {
       await deleteNote(slug);
       if (noteView?.slug === slug) {
@@ -3716,7 +3716,7 @@
           /* best-effort */
         }
       }
-      status = "Errore nel salvare la nota: " + e;
+      status = "Errore nel salvare l'appunto: " + e;
       return;
     }
     aiDoc = null;
@@ -3726,7 +3726,7 @@
     } catch {
       /* the note is saved; just couldn't auto-open it */
     }
-    status = "Salvata nel repo note ✓";
+    status = "Salvato negli Appunti ✓";
   }
   async function runHarvest() {
     const ids = selected.slice(0, 8);
@@ -4184,7 +4184,7 @@
         {/if}
       </div>
 
-      <p class="sidehint" title="Chiedi alla libreria, Wiki, Note, Cerca online, Novità, Cura della libreria, Cestino, Terminale, Impostazioni, Aiuto e Informazioni sono ora nella barra strumenti in alto ↑ — tasto destro: menu radiale · Ctrl+K: palette">Gli strumenti sono nella barra in alto ↑</p>
+      <p class="sidehint" title="Chiedi alla libreria, Wiki, Appunti, Cerca online, Novità, Cura della libreria, Cestino, Terminale, Impostazioni, Aiuto e Informazioni sono ora nella barra strumenti in alto ↑ — tasto destro: menu radiale · Ctrl+K: palette">Gli strumenti sono nella barra in alto ↑</p>
     </aside>
 
     <main class="main">
@@ -4392,20 +4392,20 @@
           <aside class="wikinav">
             <div class="wikinew">
               <input
-                placeholder="Nuova nota: titolo…"
+                placeholder="Nuovo appunto: titolo…"
                 bind:value={noteNewTitle}
                 onkeydown={(e) => e.key === "Enter" && newNote()}
-                title="Crea una nuova nota .md"
+                title="Crea un nuovo appunto .md"
               />
-              <button class="ghost small" onclick={newNote} title="Crea la nota">Nuova</button>
+              <button class="ghost small" onclick={newNote} title="Crea l'appunto">Nuovo</button>
             </div>
-            <button class="ghost small wikiall" onclick={revealNotesDir} title="Apri la cartella delle note (.md) nel file explorer">
-              Apri cartella note
+            <button class="ghost small wikiall" onclick={revealNotesDir} title="Apri la cartella degli appunti (.md) nel file explorer">
+              Apri cartella appunti
             </button>
             {#if notesList.length > 1}
               <div class="notesort">
                 <label class="notesortlbl" for="notesort-sel">Ordina</label>
-                <select id="notesort-sel" class="notesortsel" bind:value={noteSort} title="Ordina l'elenco delle note">
+                <select id="notesort-sel" class="notesortsel" bind:value={noteSort} title="Ordina l'elenco degli appunti">
                   <option value="updated">Ultima modifica</option>
                   <option value="created">Data creazione</option>
                   <option value="title">Titolo (A→Z)</option>
@@ -4419,11 +4419,11 @@
                     <span class="notetitle">{n.title}</span>
                     {#if n.excerpt}<span class="noteexc">{n.excerpt}</span>{/if}
                   </button>
-                  <button class="x" title="Elimina questa nota" onclick={() => removeNote(n.slug)}>×</button>
+                  <button class="x" title="Elimina questo appunto" onclick={() => removeNote(n.slug)}>×</button>
                 </div>
               {/each}
               {#if !notesList.length}
-                <p class="wikiempty">Nessuna nota. Scrivi un titolo qui sopra e premi «Nuova». Le note sono file .md su disco: collega con [[Titolo nota]] oppure [[@citekey]] per un paper.</p>
+                <p class="wikiempty">Nessun appunto. Scrivi un titolo qui sopra e premi «Nuovo». Gli appunti sono file .md su disco: collega con [[Titolo appunto]] oppure [[@citekey]] per un paper.</p>
               {/if}
             </div>
           </aside>
@@ -4441,7 +4441,7 @@
                   />
                 {:else}
                   <h2 class="wikititle notetitleh" ondblclick={startRename} title="Doppio clic per rinominare">{noteView.title}</h2>
-                  <button class="ghost small" onclick={startRename} title="Rinomina la nota: cambia il titolo e il nome del file">Rinomina</button>
+                  <button class="ghost small" onclick={startRename} title="Rinomina l'appunto: cambia il titolo e il nome del file">Rinomina</button>
                 {/if}
                 <span class="notesaved" class:pending={!noteSaved}>{noteSaved ? "Salvato ✓" : "Salvo…"}</span>
                 <div class="notemodes">
@@ -4460,7 +4460,7 @@
                   bind:value={noteDraft}
                   oninput={onNoteInput}
                   onblur={flushNote}
-                  placeholder={"Scrivi in Markdown…\n\nUsa [[Titolo di un'altra nota]] per collegare una nota, [[@citekey]] o [[Titolo del paper]] per un documento."}
+                  placeholder={"Scrivi in Markdown…\n\nUsa [[Titolo di un altro appunto]] per collegare un appunto, [[@citekey]] o [[Titolo del paper]] per un documento."}
                   spellcheck="false"
                 ></textarea>
               {:else}
@@ -4470,7 +4470,7 @@
                 </article>
                 {#if noteView.backlinks.length}
                   <div class="notebacklinks">
-                    <h3>Collegata da</h3>
+                    <h3>Collegato da</h3>
                     {#each noteView.backlinks as b (b.slug)}
                       <button class="passchip" onclick={() => openNote(b.slug)} title={`Apri «${b.title}»`}>{b.title}</button>
                     {/each}
@@ -4479,9 +4479,9 @@
               {/if}
             {:else}
               <div class="empty wikiintro">
-                <p class="big">Le tue note</p>
-                <p>Note in <strong>Markdown</strong>, salvate come <strong>file .md veri</strong> nella cartella delle note — restano tue, leggibili e modificabili anche da terminale o da qualsiasi editor.</p>
-                <p class="dimtext">Collega con <code>[[Titolo nota]]</code> o un paper con <code>[[@citekey]]</code> / <code>[[Titolo del paper]]</code>. I backlink compaiono in fondo a ogni nota.</p>
+                <p class="big">I tuoi appunti</p>
+                <p>Appunti in <strong>Markdown</strong>, salvati come <strong>file .md veri</strong> nella cartella degli appunti — restano tuoi, leggibili e modificabili anche da terminale o da qualsiasi editor.</p>
+                <p class="dimtext">Collega con <code>[[Titolo appunto]]</code> o un paper con <code>[[@citekey]]</code> / <code>[[Titolo del paper]]</code>. I backlink compaiono in fondo a ogni appunto.</p>
               </div>
             {/if}
           </section>
@@ -4834,10 +4834,10 @@
         {/if}
         {#if query.trim() && noteResults.length && view !== "map"}
           <section class="noteresults">
-            <h2 class="shelfh">Note ({noteResults.length})</h2>
+            <h2 class="shelfh">Appunti ({noteResults.length})</h2>
             <div class="notehits">
               {#each noteResults as n (n.slug)}
-                <button class="notehit" onclick={() => openNoteHit(n.slug)} title="Apri la nota">
+                <button class="notehit" onclick={() => openNoteHit(n.slug)} title="Apri l'appunto">
                   <span class="nhtitle">{n.title}</span>
                   {#if n.snippet}<span class="nhsnip">{n.snippet}</span>{/if}
                 </button>
@@ -4874,7 +4874,7 @@
           <div class="empty">
             {#if query.trim()}
               {#if noteResults.length}
-                <p class="big">Nessun documento</p><p>Ma {noteResults.length === 1 ? "c'è 1 nota" : `ci sono ${noteResults.length} note`} qui sopra che corrispond{noteResults.length === 1 ? "e" : "ono"}.</p>
+                <p class="big">Nessun documento</p><p>Ma {noteResults.length === 1 ? "c'è 1 appunto" : `ci sono ${noteResults.length} appunti`} qui sopra che corrispond{noteResults.length === 1 ? "e" : "ono"}.</p>
               {:else}
                 <p class="big">Nessun risultato</p><p>Prova un'altra ricerca o cambia modalità.</p>
               {/if}
@@ -5032,6 +5032,7 @@
       initialPage={openDocPage}
       onClose={() => { openDoc = null; openDocPage = null; }}
       onSendToNote={(content, page, pos) => openSendToNote(openDoc, { content, page, collapse: true }, pos)}
+      onOpenNotes={() => { openDoc = null; openDocPage = null; openNotesView(); }}
     />
   {/if}
 
@@ -5151,7 +5152,7 @@
             <button class="ghost small" onclick={() => copyAiDoc("latex")} title={"Le [n] diventano \\cite{citekey}"}>Copia per LaTeX</button>
             <button class="ghost small" onclick={() => copyAiDoc("pandoc")} title="Le [n] diventano [@citekey]">Copia per Pandoc</button>
           {/if}
-          <button class="ghost small" onclick={aiDocToNote} title="Crea una nota .md nel repo note, con le fonti come backlink [[@citekey]] cliccabili">📝 Salva nel repo note</button>
+          <button class="ghost small" onclick={aiDocToNote} title="Crea un appunto .md, con le fonti come backlink [[@citekey]] cliccabili">📝 Salva negli Appunti</button>
           <button class="ghost small" onclick={saveAiDoc}>Salva .md…</button>
           <button class="primary" onclick={() => (aiDoc = null)}>Chiudi</button>
         </div>
@@ -5809,7 +5810,7 @@
         <div class="helpsec">
           <h3>Barra strumenti, menu radiale e palette — l'interfaccia</h3>
           <ul>
-            <li><strong>Barra strumenti</strong> (in alto, sotto il titolo): un'icona per ogni funzione — <strong>Importa</strong>, <strong>Vista</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Note</strong> (📝), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔, con il conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong> (Salute, Gap di citazioni, Duplicati, Rigenera anteprime), <strong>Indice semantico</strong>, <strong>Backup libreria</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Aspetto</strong> e <strong>Sistema</strong> (Impostazioni, Aiuto, Informazioni). Le voci con un menu si aprono al clic, le altre eseguono direttamente; l'icona si evidenzia quando sei nella vista corrispondente. Il <strong>Recupera metadati</strong> e la <strong>palette comandi</strong> (icona <kbd>Ctrl</kbd>+<kbd>K</kbd>) sono in alto accanto al contatore «✦ senza metadati». La <strong>barra laterale</strong> resta per la navigazione: filtri, tag, collezioni, ricerche salvate, cartella sorvegliata.</li>
+            <li><strong>Barra strumenti</strong> (in alto, sotto il titolo): un'icona per ogni funzione — <strong>Importa</strong>, <strong>Vista</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Appunti</strong> (📝), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔, con il conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong> (Salute, Gap di citazioni, Duplicati, Rigenera anteprime), <strong>Indice semantico</strong>, <strong>Backup libreria</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Aspetto</strong> e <strong>Sistema</strong> (Impostazioni, Aiuto, Informazioni). Le voci con un menu si aprono al clic, le altre eseguono direttamente; l'icona si evidenzia quando sei nella vista corrispondente. Il <strong>Recupera metadati</strong> e la <strong>palette comandi</strong> (icona <kbd>Ctrl</kbd>+<kbd>K</kbd>) sono in alto accanto al contatore «✦ senza metadati». La <strong>barra laterale</strong> resta per la navigazione: filtri, tag, collezioni, ricerche salvate, cartella sorvegliata.</li>
             <li><strong>Tasto destro</strong> su un documento → il <strong>menu radiale</strong>: le azioni disposte ad anello attorno al cursore, organizzate in orbite (Cita, AI, Organizza, Condividi…). Tasto destro sullo <strong>spazio vuoto</strong> → il menu radiale globale (gli stessi gruppi della barra). La barra, il radiale e la palette pescano dallo <strong>stesso registro</strong>: nessuna funzione è esclusiva di una sola.</li>
             <li><strong>Come si naviga</strong>: muovi il mouse verso un petalo (basta la direzione, non serve arrivarci) e clicca; oppure <strong>secondo clic destro</strong> per entrare nei sottomenu senza spostarti; <strong>rotella</strong> per ruotare la selezione; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; frecce + Invio da tastiera. <kbd>Esc</kbd> chiude, il centro torna indietro.</li>
             <li><kbd>Ctrl</kbd>+<kbd>K</kbd> → la <strong>palette comandi</strong>: ogni azione, documento, filtro e tema, digitando. <kbd>/</kbd> va alla ricerca, <kbd>Ctrl</kbd>+<kbd>B</kbd> mostra/nasconde la barra laterale.</li>
@@ -5840,7 +5841,7 @@
         <div class="helpsec">
           <h3>Ricerca</h3>
           <ul>
-            <li><strong>Locale</strong>: barra in alto, modalità <em>Testo</em>, <em>Semantica</em> (per significato) o <em>Ibrida</em>. Cerca anche nelle tue <strong>annotazioni</strong> e note sui documenti; le <strong>note .md</strong> che corrispondono compaiono in un gruppo <strong>«Note»</strong> sopra i risultati (clic → apre la nota).</li>
+            <li><strong>Locale</strong>: barra in alto, modalità <em>Testo</em>, <em>Semantica</em> (per significato) o <em>Ibrida</em>. Cerca anche nelle tue <strong>annotazioni</strong> e nelle <strong>note dei documenti</strong>; gli <strong>Appunti .md</strong> che corrispondono compaiono in un gruppo <strong>«Appunti»</strong> sopra i risultati (clic → apre l'appunto).</li>
             <li><strong>Online</strong> (<em>Scopri online</em>): arXiv, OpenAlex, ADS, Semantic Scholar, Europe PMC, CORE, DOAJ, <strong>HF Papers</strong> (il successore di Papers with Code: cerca nell'indice e mostra il repo GitHub di ogni paper). Filtri anno/autore/solo-OA e, sui risultati, chip <strong>Con codice</strong> / <strong>Peer-reviewed</strong> / <strong>Preprint</strong> (con conteggi) oltre alle colonne ordinabili. I PDF Open Access si scaricano, gli altri si aggiungono come riferimento.</li>
             <li><strong>Ricerche salvate</strong>: dopo una ricerca premi <em>★ Salva</em> → compare nella sidebar; cliccandola la rilancia. I risultati nuovi dall'ultima volta si raccolgono nella campana <strong>Novità</strong> (🔔 in alto, con il conteggio), ricontrollata a ogni avvio.</li>
             <li><strong>Riferimenti senza PDF</strong>: le voci aggiunte come sola citazione (da Scopri online, Esplora citazioni, BibTeX o per ID) mostrano «Riferimento — senza PDF» sulla copertina. Aprendole compare il pannello per allegare il file: <strong>Trova PDF</strong> (Open Access via Unpaywall/arXiv) oppure <strong>Allega</strong> da un link — il PDF si aggancia alla stessa voce, senza duplicati. Lo trovi anche nel radiale → Organizza → «Allega PDF…».</li>
@@ -5861,12 +5862,14 @@
         <div class="helpsec">
           <h3>Lettura (visualizzatore PDF)</h3>
           <ul>
-            <li><strong>Evidenzia</strong> selezionando il testo, poi aggiungi una nota; oppure modalità <strong>Nota</strong> per appunti “a spillo” in un punto qualsiasi.</li>
-            <li><strong>Cerca nel documento</strong>, <strong>indice</strong>, zoom/adatta, rotazione, due pagine, modalità notte; riprende dall'<strong>ultima pagina</strong> letta.</li>
+            <li><strong>Annotazioni</strong>: evidenzia selezionando il testo (con colore e commento), oppure modalità <strong>Nota puntuale</strong> per un appunto “a spillo” in un punto qualsiasi — sono <em>ancorate alla pagina</em> e le ritrovi nel pannello <strong>Annotazioni</strong> (tasto <kbd>A</kbd>).</li>
+            <li><strong>Nota del documento</strong> (pannello <strong>Nota doc</strong>, tasto <kbd>E</kbd>): un unico appunto libero legato all'<em>intero</em> paper — diverso dalle Annotazioni (ancorate a un punto) e dagli <strong>Appunti</strong> (i tuoi file .md indipendenti).</li>
+            <li><strong>Cerca nel documento</strong> (<kbd>Ctrl</kbd>+<kbd>F</kbd>): compare come <strong>fascia dedicata nella barra in alto</strong> del lettore, senza coprire la pagina; <kbd>Invio</kbd>/<kbd>Maiusc</kbd>+<kbd>Invio</kbd> scorrono i risultati. Più <strong>indice</strong>, zoom/adatta, rotazione, due pagine, modalità notte; riprende dall'<strong>ultima pagina</strong> letta.</li>
             <li><strong>Estrai tabella</strong> (icona griglia): trascina un rettangolo su una tabella → anteprima → esporta in CSV / Markdown / Excel (+ “migliora con AI”).</li>
             <li><strong>Estrai testo</strong> (icona testo): trascina un'area → copia il testo o salvalo in .txt/.md.</li>
-            <li><strong>Lente AI</strong>: seleziona un passaggio → <em>Spiega</em>, <em>Traduci</em> o <em>Chiedi</em> — la risposta arriva in una scheda accanto al testo e puoi salvarla nelle note (richiede l'AI locale attiva).</li>
-            <li><strong>→ Nota</strong>: manda il testo selezionato in una nota .md (radiale o barretta dell'evidenziazione) — arriva come citazione, con il riferimento al paper in coda. Vedi <em>Note</em>.</li>
+            <li><strong>Lente AI</strong>: seleziona un passaggio → <em>Spiega</em>, <em>Traduci</em> o <em>Chiedi</em> — la risposta arriva in una scheda accanto al testo e puoi salvarla nella <strong>Nota del documento</strong> (richiede l'AI locale attiva).</li>
+            <li><strong>→ Appunti</strong>: manda il testo selezionato in un appunto .md (radiale <em>Manda agli Appunti</em> o barretta dell'evidenziazione) — arriva come citazione, con il riferimento al paper in coda. Vedi <em>Appunti</em>.</li>
+            <li><strong>Vai agli Appunti</strong> (radiale del lettore): chiude il lettore e apre i tuoi Appunti .md.</li>
             <li>Le <strong>fonti numerate</strong> di «Chiedi alla libreria» aprono il PDF <strong>alla pagina giusta</strong>.</li>
           </ul>
           <table class="kbdtable">
@@ -5897,13 +5900,13 @@
         </div>
 
         <div class="helpsec">
-          <h3>Note</h3>
+          <h3>Appunti</h3>
           <ul>
-            <li>Appunti in <strong>Markdown</strong> salvati come <strong>file .md veri</strong> nella cartella dell'app: li puoi aprire e modificare anche da un editor esterno o dal terminale. Aprili dall'<strong>icona Note</strong> (📝) nella barra strumenti in alto (oppure <strong>Cerca → Note</strong>). L'elenco si può <strong>ordinare</strong> per ultima modifica, data di creazione o titolo.</li>
-            <li><strong>[[Collegamenti]]</strong> in stile wiki: <code>[[Titolo di un'altra nota]]</code> collega una nota; <code>[[@citekey]]</code> o <code>[[Titolo di un paper]]</code> collegano un documento della libreria (clic → apre la nota o il PDF). In fondo trovi i <strong>backlink</strong> (le note che rimandano a questa).</li>
+            <li><strong>Appunti</strong> in <strong>Markdown</strong> salvati come <strong>file .md veri</strong> nella cartella dell'app: li puoi aprire e modificare anche da un editor esterno o dal terminale. Aprili dall'<strong>icona Appunti</strong> (📝) nella barra strumenti in alto (o dal lettore: radiale → <em>Vai agli Appunti</em>). L'elenco si può <strong>ordinare</strong> per ultima modifica, data di creazione o titolo. <em>Sono diversi</em> dalle <strong>Annotazioni</strong> (evidenziazioni ancorate al PDF) e dalla <strong>Nota del documento</strong> (un appunto legato a un singolo paper, nel lettore).</li>
+            <li><strong>[[Collegamenti]]</strong> in stile wiki: <code>[[Titolo di un altro appunto]]</code> collega un appunto; <code>[[@citekey]]</code> o <code>[[Titolo di un paper]]</code> collegano un documento della libreria (clic → apre l'appunto o il PDF). In fondo trovi i <strong>backlink</strong> (gli appunti che rimandano a questo).</li>
             <li>Editor con <strong>anteprima</strong> e salvataggio automatico. <strong>Rinomina</strong> (o doppio clic sul titolo) cambia il titolo <em>e</em> il nome del file .md; sotto il titolo vedi il <strong>percorso</strong> del file, la data di creazione e l'ultima modifica.</li>
-            <li><strong>Cercabili</strong>: cerca dalla barra in alto e le note che contengono il termine compaiono in un gruppo <strong>«Note»</strong> sopra la griglia (anche quelle modificate da un editor esterno — l'indice si riallinea a ogni avvio).</li>
-            <li><strong>Manda a nota</strong>: dal lettore, seleziona del testo → radiale o <em>→ Nota</em> nella barretta dell'evidenziazione; oppure nel pannello dei dettagli i pulsanti <em>→ Nota</em> accanto ad <strong>Abstract</strong> e <strong>Riassunto AI</strong>. Scegli la destinazione (la nota aperta, una recente o una nuova) e il testo entra come <strong>citazione</strong> con, in coda, il <strong>riferimento al paper</strong> (<code>[[@citekey]]</code>) — che diventa subito un backlink cliccabile.</li>
+            <li><strong>Cercabili</strong>: cerca dalla barra in alto e gli appunti che contengono il termine compaiono in un gruppo <strong>«Appunti»</strong> sopra la griglia (anche quelli modificati da un editor esterno — l'indice si riallinea a ogni avvio).</li>
+            <li><strong>Manda agli Appunti</strong>: dal lettore, seleziona del testo → radiale o <em>→ Appunti</em> nella barretta dell'evidenziazione; oppure nel pannello dei dettagli i pulsanti <em>→ Appunti</em> accanto ad <strong>Abstract</strong> e <strong>Riassunto AI</strong>. Scegli la destinazione (l'appunto aperto, uno recente o uno nuovo) e il testo entra come <strong>citazione</strong> con, in coda, il <strong>riferimento al paper</strong> (<code>[[@citekey]]</code>) — che diventa subito un backlink cliccabile.</li>
           </ul>
         </div>
 
@@ -5911,7 +5914,7 @@
           <h3>Strumenti di sintesi sulla selezione</h3>
           <ul>
             <li><strong>Confronta (AI)</strong>: seleziona 2-3 paper → tasto destro → <em>Confronta</em>: tabella obiettivo/metodo/dati/risultati/limiti + cosa aggiunge ciascuno.</li>
-            <li><strong>Rassegna (AI)</strong>: <strong>seleziona da 2 a 10 paper</strong> → tasto destro → <em>Rassegna (AI)</em>. Ottieni una <strong>mini related-work</strong> (300-500 parole) <strong>organizzata per temi</strong> (non paper-per-paper): confronta gli approcci, evidenzia disaccordi e chiude con <em>«Lacune aperte»</em>. Ogni paper è citato con <strong>[n] cliccabili</strong> (aprono la fonte) e nessuna fonte viene omessa in silenzio (le non integrate finiscono in coda). Puoi copiarla pronta per <strong>LaTeX</strong> (<code>\cite&#123;citekey&#125;</code>) o <strong>Pandoc</strong> (<code>[@citekey]</code>), oppure <strong>«Salva nel repo note»</strong>: diventa una <strong>nota .md</strong> nel vault dove le <em>[n]</em> sono riscritte come <strong>backlink <code>[[@citekey]]</code></strong> — così ogni paper citato rimanda alla rassegna, ed è cercabile e modificabile come ogni nota. Richiede l'AI locale attiva.</li>
+            <li><strong>Rassegna (AI)</strong>: <strong>seleziona da 2 a 10 paper</strong> → tasto destro → <em>Rassegna (AI)</em>. Ottieni una <strong>mini related-work</strong> (300-500 parole) <strong>organizzata per temi</strong> (non paper-per-paper): confronta gli approcci, evidenzia disaccordi e chiude con <em>«Lacune aperte»</em>. Ogni paper è citato con <strong>[n] cliccabili</strong> (aprono la fonte) e nessuna fonte viene omessa in silenzio (le non integrate finiscono in coda). Puoi copiarla pronta per <strong>LaTeX</strong> (<code>\cite&#123;citekey&#125;</code>) o <strong>Pandoc</strong> (<code>[@citekey]</code>), oppure <strong>«Salva negli Appunti»</strong>: diventa un <strong>appunto .md</strong> dove le <em>[n]</em> sono riscritte come <strong>backlink <code>[[@citekey]]</code></strong> — così ogni paper citato rimanda alla rassegna, ed è cercabile e modificabile come ogni appunto. Richiede l'AI locale attiva.</li>
             <li><strong>Tabella risultati (AI)</strong>: raccoglie i numeri (metodo · dataset · metrica · valore) dei paper selezionati in un'unica tabella esportabile in CSV/Markdown/Excel. I valori sono estratti testualmente: verifica sempre sul PDF.</li>
             <li><strong>Percorso di lettura</strong> (tasto destro → AI): per capire un paper, cosa leggere prima — i fondamenti che cita (già tuoi), i vicini di contenuto precedenti, e i riferimenti mancanti da aggiungere con un click. Funziona <em>senza</em> LLM.</li>
           </ul>
