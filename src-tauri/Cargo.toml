@@ -1,6 +1,6 @@
 [package]
 name = "pdfmanage"
-version = "0.8.20"
+version = "0.8.21"
 description = "Lean, fast, local-first PDF & reference manager"
 authors = ["you"]
 edition = "2021"
@@ -70,6 +70,16 @@ image = "0.25"
 
 # --- Local embeddings (bge-m3 via ONNX, statically linked) ---
 fastembed = "5.17"
+
+# --- Formula OCR (pix2tex / LaTeX-OCR, ONNX): an image of an equation -> LaTeX.
+#     Reuses the ONNX Runtime already statically linked via fastembed; the `ort`
+#     feature set below is a subset of what fastembed already enables, so the
+#     resolved runtime build is unchanged (no extra DLL, no second download).
+#     The ~180 MB models are fetched on first use into app_data/mathocr, not
+#     bundled, so the installer stays lean (same pattern as bge-m3). ---
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-native", "ndarray"] }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+ndarray = "0.17"
 
 # --- Error handling / utilities ---
 anyhow = "1"

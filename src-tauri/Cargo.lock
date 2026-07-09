@@ -3445,7 +3445,7 @@ dependencies = [
 
 [[package]]
 name = "pdfmanage"
-version = "0.8.20"
+version = "0.8.21"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -3453,8 +3453,10 @@ dependencies = [
  "fastembed",
  "image",
  "keyring",
+ "ndarray",
  "notify",
  "once_cell",
+ "ort",
  "parking_lot",
  "pdfium-render",
  "portable-pty",
@@ -3472,6 +3474,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "thiserror 2.0.18",
  "tiny_http",
+ "tokenizers",
  "tokio",
  "windows",
  "zerocopy",

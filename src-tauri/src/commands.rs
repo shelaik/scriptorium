@@ -8,6 +8,7 @@ use crate::discovery;
 use crate::embed;
 use crate::github;
 use crate::import;
+use crate::mathocr;
 use crate::metadata;
 use crate::notes;
 use crate::obsidian;
@@ -3314,6 +3315,48 @@ pub fn extract_region_text(
     )
     .map_err(|e| e.to_string())?;
     Ok(table::join_text(&words))
+}
+
+/// Directory where the formula-OCR (pix2tex) models are cached. Downloaded once
+/// on first use, like the fastembed model, so the installer stays lean.
+fn mathocr_dir(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .map(|d| d.join("mathocr"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("pdfmanage_mathocr"))
+}
+
+/// Whether the formula→LaTeX models are already present, and if not, how many MB
+/// the first recognition will download. Lets the UI warn before the wait.
+#[tauri::command]
+pub fn mathocr_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    let dir = mathocr_dir(&app);
+    let ready = mathocr::models_present(&dir);
+    let mb = (mathocr::missing_bytes(&dir) as f64 / (1024.0 * 1024.0)).round() as u64;
+    Ok(serde_json::json!({ "ready": ready, "downloadMb": mb }))
+}
+
+/// Recognize a cropped formula image (base64 PNG from the reader canvas) as
+/// LaTeX. Downloads the ~140 MB pix2tex models on first use, then runs fully
+/// locally via the ONNX Runtime already linked into the app.
+#[tauri::command]
+pub async fn formula_to_latex(app: AppHandle, image_base64: String) -> Result<String, String> {
+    let dir = mathocr_dir(&app);
+    // Accept either a bare base64 string or a full `data:image/png;base64,…` URL.
+    let b64 = image_base64.rsplit(',').next().unwrap_or(&image_base64).trim();
+    let bytes = BASE64_STANDARD
+        .decode(b64)
+        .map_err(|e| format!("immagine non valida: {e}"))?;
+    if !mathocr::models_present(&dir) {
+        let client = ai::client().map_err(|e| e.to_string())?;
+        mathocr::ensure_models(&dir, &client)
+            .await
+            .map_err(|e| format!("scarico modelli formula: {e}"))?;
+    }
+    tauri::async_runtime::spawn_blocking(move || mathocr::recognize(&dir, &bytes))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 /// Write arbitrary text to a file (used by "extract text" → Save .txt/.md).

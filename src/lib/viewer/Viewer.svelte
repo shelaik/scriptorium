@@ -19,7 +19,7 @@
   } from "$lib/api";
   import { printDocument } from "$lib/print";
   import { revealDocument } from "$lib/share";
-  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, aiExplain } from "$lib/api";
+  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, aiExplain, formulaToLatex, mathocrStatus } from "$lib/api";
   import { escapeLatex, textToLatex, tableToLatex } from "$lib/latex";
   import { save } from "@tauri-apps/plugin-dialog";
   import ShareMenu from "$lib/ShareMenu.svelte";
@@ -182,6 +182,12 @@
   // Preview toggles in the extraction modals: raw vs. the generated LaTeX.
   let textView = $state<"text" | "latex">("text");
   let tableView = $state<"grid" | "latex">("grid");
+  // Formula → LaTeX (local math-OCR): drag a region over an equation, recognize it.
+  let formulaMode = $state(false);
+  let formulaModal = $state(false);
+  let formulaLoading = $state(false);
+  let formulaLatex = $state("");
+  let formulaImg = $state(""); // data URL of the cropped region, shown as a preview
   let printing = $state(false);
   let notice = $state("");
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -475,6 +481,7 @@
     if (tableMode) {
       noteMode = false;
       textMode = false;
+      formulaMode = false;
       clearSelection();
       setNotice("Modalità tabella: trascina un rettangolo attorno a una tabella");
     }
@@ -484,9 +491,53 @@
     if (textMode) {
       noteMode = false;
       tableMode = false;
+      formulaMode = false;
       clearSelection();
       setNotice("Estrai testo: trascina un rettangolo attorno al testo da copiare");
     }
+  }
+  function toggleFormula() {
+    formulaMode = !formulaMode;
+    if (formulaMode) {
+      noteMode = false;
+      tableMode = false;
+      textMode = false;
+      clearSelection();
+      setNotice("Formula → LaTeX: trascina un rettangolo attorno a una formula");
+    }
+  }
+  /** Crop a screen-space rectangle out of a page's rendered canvas to a PNG data
+   *  URL — used to hand a formula image to the local math-OCR. Copies the real
+   *  (non-inverted) pixels, so night mode doesn't affect recognition. */
+  function cropCanvasRegion(
+    wrap: HTMLDivElement,
+    rect: { x: number; y: number; w: number; h: number },
+  ): string | null {
+    const canvas = wrap.querySelector("canvas.pdfcanvas") as HTMLCanvasElement | null;
+    if (!canvas) return null;
+    const cb = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / cb.width;
+    const scaleY = canvas.height / cb.height;
+    const left = Math.max(rect.x, cb.left);
+    const top = Math.max(rect.y, cb.top);
+    const right = Math.min(rect.x + rect.w, cb.right);
+    const bottom = Math.min(rect.y + rect.h, cb.bottom);
+    const dw = right - left;
+    const dh = bottom - top;
+    if (dw < 2 || dh < 2) return null;
+    const sx = (left - cb.left) * scaleX;
+    const sy = (top - cb.top) * scaleY;
+    const sw = dw * scaleX;
+    const sh = dh * scaleY;
+    const out = document.createElement("canvas");
+    out.width = Math.max(1, Math.round(sw));
+    out.height = Math.max(1, Math.round(sh));
+    const ctx = out.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, out.width, out.height);
+    ctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, out.width, out.height);
+    return out.toDataURL("image/png");
   }
   function wrapAt(cx: number, cy: number): HTMLDivElement | undefined {
     for (const w of pageWraps) {
@@ -497,7 +548,7 @@
     return undefined;
   }
   function onTableDown(e: MouseEvent) {
-    if (!tableMode && !textMode) return;
+    if (!tableMode && !textMode && !formulaMode) return;
     const wrap = wrapAt(e.clientX, e.clientY);
     if (!wrap) return;
     e.preventDefault();
@@ -531,6 +582,31 @@
     // Query in the unrotated (rotation-0) frame, like annotations.
     const r0 = rotateRect(norm, (360 - rotation) % 360);
     const region = { x: r0[0], y: r0[1], w: r0[2], h: r0[3] };
+    if (formulaMode) {
+      formulaMode = false;
+      const dataUrl = cropCanvasRegion(start.wrap, rect);
+      if (!dataUrl) {
+        setNotice("Impossibile ritagliare la formula");
+        return;
+      }
+      formulaImg = dataUrl;
+      formulaModal = true;
+      formulaLoading = true;
+      formulaLatex = "";
+      try {
+        const st = await mathocrStatus();
+        if (!st.ready) {
+          setNotice(`Primo uso: scarico il modello formula (~${st.downloadMb} MB), attendi…`);
+        }
+        formulaLatex = await formulaToLatex(dataUrl);
+      } catch (err) {
+        error = "Errore riconoscimento formula: " + err;
+        formulaModal = false;
+      } finally {
+        formulaLoading = false;
+      }
+      return;
+    }
     if (textMode) {
       textMode = false;
       textModal = true;
@@ -660,6 +736,13 @@
   function textLatexToNote(e: MouseEvent) {
     textModal = false;
     latexToNote(textToLatex(textContent), "Testo (LaTeX) da", e);
+  }
+  function formulaCopy() {
+    copyLatex(formulaLatex);
+  }
+  function formulaToNote(e: MouseEvent) {
+    formulaModal = false;
+    latexToNote(formulaLatex, "Formula (LaTeX) da", e);
   }
 
   function onMouseUp(e: MouseEvent) {
@@ -1353,8 +1436,10 @@
       showHelp ||
       tableModal ||
       textModal ||
+      formulaModal ||
       tableMode ||
       textMode ||
+      formulaMode ||
       noteMode ||
       popover !== null ||
       lens !== null ||
@@ -1428,6 +1513,7 @@
           { id: "note", label: "Nota puntuale", checked: noteMode, action: toggleNote },
           { id: "table", label: "Estrai tabella", checked: tableMode, action: toggleTable },
           { id: "text", label: "Estrai testo", checked: textMode, action: toggleText },
+          { id: "formula", label: "Formula → LaTeX", checked: formulaMode, action: toggleFormula },
           { id: "rotl", label: "Ruota sx", action: () => rotate(-90) },
           { id: "rotr", label: "Ruota dx", action: () => rotate(90) },
           { id: "reveal", label: "Posizione", action: doReveal },
@@ -1451,7 +1537,7 @@
   function onViewerContext(e: MouseEvent) {
     if (viewerRadial) return; // the open radial owns its own right-clicks
     // Drag-to-extract and note placement keep the default flow untouched.
-    if (tableMode || textMode || noteMode) return;
+    if (tableMode || textMode || formulaMode || noteMode) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest(".hlpalette, .lenscard, .popover, .findbar, .morepop, .sharemenu, input, textarea")) return;
     e.preventDefault();
@@ -1474,8 +1560,10 @@
       else if (showHelp) showHelp = false;
       else if (tableModal) tableModal = false;
       else if (textModal) textModal = false;
+      else if (formulaModal) formulaModal = false;
       else if (tableMode) tableMode = false;
       else if (textMode) textMode = false;
+      else if (formulaMode) formulaMode = false;
       else if (noteMode) noteMode = false;
       else if (lens) closeLens();
       else if (findOpen) closeFind();
@@ -1590,6 +1678,7 @@
       <button class="mitem" onclick={() => moreDo(() => (night = !night))} title="Modalità notte: inverti i colori (I)"><span class="mck">{night ? "✓" : ""}</span>Notte</button>
       <button class="mitem" onclick={() => moreDo(toggleTable)} title="Estrai una tabella: trascina un rettangolo attorno alla tabella"><span class="mck">{tableMode ? "✓" : ""}</span>Estrai tabella</button>
       <button class="mitem" onclick={() => moreDo(toggleText)} title="Estrai testo: trascina un rettangolo attorno al testo"><span class="mck">{textMode ? "✓" : ""}</span>Estrai testo</button>
+      <button class="mitem" onclick={() => moreDo(toggleFormula)} title="Riconosci una formula come LaTeX: trascina un rettangolo attorno all'equazione"><span class="mck">{formulaMode ? "✓" : ""}</span>Formula → LaTeX</button>
       <div class="msep"></div>
       <button class="mitem" onclick={() => moreDo(doReveal)} title="Apri la posizione del PDF in Esplora risorse"><span class="mck"></span>Posizione</button>
       <button class="mitem" onclick={() => moreDo(doPrint)} disabled={printing} title="Stampa questo documento"><span class="mck"></span>{printing ? "Stampa…" : "Stampa"}</button>
@@ -1640,7 +1729,7 @@
       class:spread
       class:night
       class:notemode={noteMode}
-      class:tablemode={tableMode || textMode}
+      class:tablemode={tableMode || textMode || formulaMode}
       bind:this={pagesEl}
       onmousedown={onTableDown}
       onmousemove={onTableMove}
@@ -1851,7 +1940,8 @@
           <li><kbd>I</kbd> <span>Modalità notte</span></li>
           <li><kbd>[</kbd> / <kbd>]</kbd> <span>Ruota</span></li>
           <li>Selezione testo <span>Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)</span></li>
-          <li>⋯ Altro <span>Rotazione, note, estrazione, stampa, condivisione</span></li>
+          <li>Formula → LaTeX <span>Da ⋯ Altro o dal radiale: trascina attorno a un'equazione, ottieni il LaTeX (Copia o → Appunti). Il primo uso scarica il modello locale ~180 MB</span></li>
+          <li>⋯ Altro <span>Rotazione, note, estrazione tabella/testo/formula, stampa, condivisione</span></li>
           <li>Tasto destro <span>Menu radiale con i comandi di lettura</span></li>
           <li>Mouse fermo <span>La barra si nasconde; muovi il mouse per mostrarla</span></li>
           <li><kbd>Esc</kbd> <span>Chiudi / annulla</span></li>
@@ -1940,6 +2030,36 @@
             <pre class="latexview">{textToLatex(textContent)}</pre>
           {:else}
             <textarea class="exttext" bind:value={textContent} spellcheck="false"></textarea>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if formulaModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="tableback" onmousedown={(e) => { if (e.target === e.currentTarget) formulaModal = false; }} role="presentation">
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
+      <div class="tablecard textcard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+        <div class="tablehd">
+          <strong>Formula → LaTeX</strong>
+          <span style="flex:1"></span>
+          {#if !formulaLoading && formulaLatex.trim()}
+            <button onclick={formulaCopy} title="Copia il LaTeX della formula negli appunti di sistema">Copia LaTeX</button>
+            {#if onSendToNote}<button onclick={formulaToNote} title="Manda la formula in LaTeX a un appunto, con citazione al paper">→ Appunti</button>{/if}
+          {/if}
+          <button class="close" onclick={() => (formulaModal = false)}>Chiudi</button>
+        </div>
+        <div class="tablebody">
+          {#if formulaImg}
+            <img class="formulaimg" src={formulaImg} alt="Formula selezionata" />
+          {/if}
+          {#if formulaLoading}
+            <p class="tdim">Riconosco la formula in locale… (il primo uso scarica il modello, ~180 MB)</p>
+          {:else if !formulaLatex.trim()}
+            <p class="tdim">Nessuna formula riconosciuta. Riprova selezionando l'area più precisamente attorno all'equazione.</p>
+          {:else}
+            <textarea class="exttext" bind:value={formulaLatex} spellcheck="false"></textarea>
           {/if}
         </div>
       </div>
@@ -2141,6 +2261,10 @@
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   }
   .exttext:focus { border-color: var(--accent); }
+  .formulaimg {
+    display: block; max-width: 100%; max-height: 190px; margin: 0 auto 12px;
+    padding: 8px; background: #fff; border: 1px solid var(--border); border-radius: 8px;
+  }
   .viewtoggle { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
   .viewtoggle button { flex: 0 0 auto; white-space: nowrap; border: none; border-radius: 0; padding: 4px 10px; font-size: 12px; }
   .viewtoggle button.on, .viewtoggle button.on:hover { background: var(--accent); color: var(--on-accent); border-color: transparent; }

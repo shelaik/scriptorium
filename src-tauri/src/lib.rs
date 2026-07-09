@@ -8,6 +8,7 @@ mod discovery;
 mod embed;
 mod github;
 mod import;
+mod mathocr;
 mod metadata;
 mod model;
 mod notes;
@@ -218,6 +219,8 @@ pub fn run() {
             commands::export_table,
             commands::ai_clean_table,
             commands::extract_region_text,
+            commands::formula_to_latex,
+            commands::mathocr_status,
             commands::write_text_file,
             commands::get_discovery_settings,
             commands::set_discovery_settings,
