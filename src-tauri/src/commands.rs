@@ -6145,6 +6145,113 @@ fn read_vault(dir: &Path) -> Vec<(String, String, Option<i64>)> {
     out
 }
 
+/// Upsert a note's searchable text into the `notes` shadow index (FTS follows via
+/// triggers). Best-effort — indexing must never block the .md file write.
+fn index_note(conn: &Connection, slug: &str, body: &str, updated_at: Option<i64>) {
+    let title = notes::note_title(body);
+    let _ = conn.execute(
+        "INSERT INTO notes (slug, title, body, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(slug) DO UPDATE SET title = excluded.title, body = excluded.body, updated_at = excluded.updated_at",
+        params![slug, title, body, updated_at],
+    );
+}
+
+fn unindex_note(conn: &Connection, slug: &str) {
+    let _ = conn.execute("DELETE FROM notes WHERE slug = ?1", params![slug]);
+}
+
+/// Rebuild the notes search index from the vault: upsert every `.md` file and drop
+/// index rows whose file no longer exists. Called on startup so edits/deletes made
+/// outside the app (the files are the source of truth) are reflected in search.
+pub fn reindex_notes(app: &AppHandle) {
+    let dir = notes_dir(app);
+    // Enumerate the vault ONCE. If the directory can't be read (transient IO
+    // error, unmounted path, AV handle lock — or it simply doesn't exist yet),
+    // do nothing this launch: an unreadable dir must never be mistaken for an
+    // empty one and trigger a prune of the whole index. The .md files are the
+    // source of truth, but a failed read is not evidence they're gone.
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let conn = state.db.lock();
+    let mut on_disk: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in entries.flatten() {
+        let path = e.path();
+        let is_md = path
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|s| s.eq_ignore_ascii_case("md"))
+            .unwrap_or(false);
+        if !is_md {
+            continue;
+        }
+        let Some(slug) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            continue;
+        };
+        // A present file — even one we momentarily can't read — stays "on disk"
+        // so it is never pruned; we only refresh its indexed content when the
+        // read succeeds.
+        on_disk.insert(slug.clone());
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let mtime = e
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64);
+            index_note(&conn, &slug, &content, mtime);
+        }
+    }
+    // Drop index rows whose .md file no longer exists (dir was read cleanly).
+    let indexed: Vec<String> = match conn.prepare("SELECT slug FROM notes") {
+        Ok(mut stmt) => stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    for slug in indexed {
+        if !on_disk.contains(&slug) {
+            unindex_note(&conn, &slug);
+        }
+    }
+}
+
+/// A note that matched a full-text search.
+#[derive(serde::Serialize)]
+pub struct NoteHit {
+    pub slug: String,
+    pub title: String,
+    pub snippet: String,
+}
+
+/// Full-text search over the standalone notes vault (title + body).
+#[tauri::command]
+pub fn search_notes(app: AppHandle, query: String) -> Result<Vec<NoteHit>, String> {
+    let expr = fts_query(&query);
+    if expr.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let state = app.state::<AppState>();
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT n.slug, n.title, snippet(notes_fts, -1, '', '', '…', 12)
+             FROM notes_fts JOIN notes n ON n.id = notes_fts.rowid
+             WHERE notes_fts MATCH ?1 ORDER BY rank LIMIT 20",
+        )
+        .map_err(|e| e.to_string())?;
+    let hits: Vec<NoteHit> = stmt
+        .query_map(params![expr], |r| {
+            Ok(NoteHit { slug: r.get(0)?, title: r.get(1)?, snippet: r.get(2)? })
+        })
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    Ok(hits)
+}
+
 /// List all notes (metadata only), newest first.
 #[tauri::command]
 pub fn list_notes(app: AppHandle) -> Result<Vec<NoteMeta>, String> {
@@ -6285,6 +6392,14 @@ pub fn rename_note(app: AppHandle, slug: String, new_title: String) -> Result<St
         std::fs::rename(&old_path, &new_path).map_err(|e| format!("Rinomina file: {e}"))?;
     }
     std::fs::write(&new_path, &new_content).map_err(|e| format!("Scrittura nota: {e}"))?;
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        if new_slug != slug {
+            unindex_note(&conn, &slug);
+        }
+        index_note(&conn, &new_slug, &new_content, None);
+    }
     Ok(new_slug)
 }
 
@@ -6306,7 +6421,12 @@ pub fn create_note(app: AppHandle, title: String) -> Result<String, String> {
     } else {
         format!("# {title}\n\n")
     };
-    std::fs::write(dir.join(format!("{slug}.md")), body).map_err(|e| format!("Creazione nota: {e}"))?;
+    std::fs::write(dir.join(format!("{slug}.md")), &body).map_err(|e| format!("Creazione nota: {e}"))?;
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        index_note(&conn, &slug, &body, None);
+    }
     Ok(slug)
 }
 
@@ -6322,6 +6442,11 @@ pub fn save_note(app: AppHandle, slug: String, content_md: String) -> Result<Not
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64);
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        index_note(&conn, &slug, &content_md, mtime);
+    }
     Ok(NoteMeta {
         slug,
         title: notes::note_title(&content_md),
@@ -6336,6 +6461,11 @@ pub fn delete_note(app: AppHandle, slug: String) -> Result<(), String> {
     let path = note_path(&dir, &slug)?;
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("Eliminazione nota: {e}"))?;
+    }
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        unindex_note(&conn, &slug);
     }
     Ok(())
 }

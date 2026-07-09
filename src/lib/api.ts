@@ -484,6 +484,16 @@ export type SearchMode = "fulltext" | "semantic" | "hybrid";
 export const searchDocuments = (query: string, mode: SearchMode) =>
   invoke<DocumentItem[]>("search", { query, mode });
 
+/** A standalone note that matched a full-text search. */
+export interface NoteHit {
+  slug: string;
+  title: string;
+  snippet: string;
+}
+/** Full-text search over the standalone Markdown notes vault. */
+export const searchNotes = (query: string) =>
+  invoke<NoteHit[]>("search_notes", { query });
+
 /** Documents semantically similar to the given one (by embedding). */
 export const relatedDocuments = (id: number) =>
   invoke<DocumentItem[]>("related_documents", { id });

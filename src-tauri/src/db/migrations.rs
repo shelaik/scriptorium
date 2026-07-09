@@ -169,6 +169,39 @@ BEGIN
     VALUES (new.id, new.title, new.abstract, new.fulltext);
 END;
 
+-- ===== Standalone notes: a rebuildable search index over the .md vault =====
+-- The `.md` files remain the source of truth; this shadow table exists only so
+-- notes are full-text searchable. It's reconciled from disk on startup and on
+-- every note CRUD, so it can always be dropped and rebuilt.
+CREATE TABLE IF NOT EXISTS notes (
+  id         INTEGER PRIMARY KEY,
+  slug       TEXT NOT NULL UNIQUE,
+  title      TEXT,
+  body       TEXT,
+  updated_at INTEGER
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+  title, body,
+  content='notes', content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
+  INSERT INTO notes_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
+  INSERT INTO notes_fts(notes_fts, rowid, title, body) VALUES ('delete', old.id, old.title, old.body);
+END;
+-- WHEN guard (mirrors documents_au): a re-save / startup reindex that doesn't
+-- change the text is a no-op, so notes aren't re-tokenized on every launch.
+-- DROP first so an existing DB picks up the guarded definition.
+DROP TRIGGER IF EXISTS notes_au;
+CREATE TRIGGER notes_au AFTER UPDATE ON notes
+WHEN old.title IS NOT new.title OR old.body IS NOT new.body
+BEGIN
+  INSERT INTO notes_fts(notes_fts, rowid, title, body) VALUES ('delete', old.id, old.title, old.body);
+  INSERT INTO notes_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
+END;
+
 -- ===== Vector store (sqlite-vec vec0), bge-m3 dense 1024-dim, cosine =====
 -- Kept in sync from Rust after embedding (not via trigger). At <200 docs the
 -- brute-force KNN is sub-millisecond. Metadata/partition columns intentionally

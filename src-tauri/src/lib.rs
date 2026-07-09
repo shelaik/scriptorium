@@ -98,6 +98,10 @@ pub fn run() {
                 // Catch up on PDFs added while the app was closed.
                 watch::scan_existing(app.handle().clone(), dir);
             }
+            // Reconcile the notes search index with the .md vault on disk (the
+            // files are the source of truth), so external edits/deletes and any
+            // notes created before this feature become searchable.
+            commands::reindex_notes(app.handle());
             // Start the browser connector (loopback bookmarklet endpoint) unless
             // the user disabled it. Non-fatal if the port can't be bound.
             commands::start_connector(app.handle());
@@ -197,6 +201,7 @@ pub fn run() {
             commands::save_note,
             commands::rename_note,
             commands::delete_note,
+            commands::search_notes,
             commands::reveal_notes_dir,
             commands::find_pdf,
             commands::attach_from_url,

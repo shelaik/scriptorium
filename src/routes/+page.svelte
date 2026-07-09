@@ -11,6 +11,8 @@
     enrichAll,
     repairMetadata,
     searchDocuments,
+    searchNotes,
+    type NoteHit,
     relatedDocuments,
     ragIndexStatus,
     buildRagIndex,
@@ -226,6 +228,7 @@
     return pool[(day + rediscoverTick) % pool.length];
   });
   let results = $state<DocumentItem[]>([]);
+  let noteResults = $state<NoteHit[]>([]); // standalone-note hits for the current search
   let thumbs = $state<Record<number, string>>({});
   let rebuildingThumbs = $state(false);
   let tags = $state<Tag[]>([]);
@@ -488,7 +491,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.6";
+  const APP_VERSION = "0.8.7";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -639,6 +642,7 @@
     clearTimeout(searchTimer);
     if (!q.trim()) {
       searchSeq++;
+      noteResults = [];
       return;
     }
     searchTimer = setTimeout(async () => {
@@ -653,6 +657,13 @@
         if (myId === searchSeq) status = "Errore ricerca: " + e;
       } finally {
         if (myId === searchSeq) searching = false;
+      }
+      // Notes are a best-effort, separate source — never block the doc results.
+      try {
+        const nr = await searchNotes(q);
+        if (myId === searchSeq) noteResults = nr;
+      } catch {
+        /* ignore */
       }
     }, 250);
   });
@@ -3205,6 +3216,11 @@
     setFilter({ kind: "notes" });
     await loadNotes();
   }
+  /** Open a note from a search hit: switch to the Note view and load it. */
+  async function openNoteHit(slug: string) {
+    await openNotesView();
+    await openNote(slug);
+  }
   async function loadNotes() {
     try {
       notesList = await listNotes();
@@ -4640,6 +4656,19 @@
             </div>
           </section>
         {/if}
+        {#if query.trim() && noteResults.length && view !== "map"}
+          <section class="noteresults">
+            <h2 class="shelfh">Note ({noteResults.length})</h2>
+            <div class="notehits">
+              {#each noteResults as n (n.slug)}
+                <button class="notehit" onclick={() => openNoteHit(n.slug)} title="Apri la nota">
+                  <span class="nhtitle">{n.title}</span>
+                  {#if n.snippet}<span class="nhsnip">{n.snippet}</span>{/if}
+                </button>
+              {/each}
+            </div>
+          </section>
+        {/if}
         {#if view === "map"}
           <div class="mapwrap">
             <Constellation
@@ -4668,7 +4697,11 @@
         {:else if displayed.length === 0}
           <div class="empty">
             {#if query.trim()}
-              <p class="big">Nessun risultato</p><p>Prova un'altra ricerca o cambia modalità.</p>
+              {#if noteResults.length}
+                <p class="big">Nessun documento</p><p>Ma {noteResults.length === 1 ? "c'è 1 nota" : `ci sono ${noteResults.length} note`} qui sopra che corrispond{noteResults.length === 1 ? "e" : "ono"}.</p>
+              {:else}
+                <p class="big">Nessun risultato</p><p>Prova un'altra ricerca o cambia modalità.</p>
+              {/if}
             {:else if tagFilter.length}
               <p class="big">Nessun documento con questi tag</p><p>Prova a togliere un tag{tagFilter.length > 1 ? " o passa a «qualsiasi»" : ""}, oppure premi «Azzera».</p>
             {:else if filter.kind !== "all"}
@@ -5608,7 +5641,7 @@
         <div class="helpsec">
           <h3>Ricerca</h3>
           <ul>
-            <li><strong>Locale</strong>: barra in alto, modalità <em>Testo</em>, <em>Semantica</em> (per significato) o <em>Ibrida</em>. Cerca anche nelle tue <strong>note e annotazioni</strong>.</li>
+            <li><strong>Locale</strong>: barra in alto, modalità <em>Testo</em>, <em>Semantica</em> (per significato) o <em>Ibrida</em>. Cerca anche nelle tue <strong>annotazioni</strong> e note sui documenti; le <strong>note .md</strong> che corrispondono compaiono in un gruppo <strong>«Note»</strong> sopra i risultati (clic → apre la nota).</li>
             <li><strong>Online</strong> (<em>Scopri online</em>): arXiv, OpenAlex, ADS, Semantic Scholar, Europe PMC, CORE, DOAJ, <strong>HF Papers</strong> (il successore di Papers with Code: cerca nell'indice e mostra il repo GitHub di ogni paper). Filtri anno/autore/solo-OA e, sui risultati, chip <strong>Con codice</strong> / <strong>Peer-reviewed</strong> / <strong>Preprint</strong> (con conteggi) oltre alle colonne ordinabili. I PDF Open Access si scaricano, gli altri si aggiungono come riferimento.</li>
             <li><strong>Ricerche salvate</strong>: dopo una ricerca premi <em>★ Salva</em> → compare nella sidebar; cliccandola la rilancia. I risultati nuovi dall'ultima volta si raccolgono nella campana <strong>Novità</strong> (🔔 in alto, con il conteggio), ricontrollata a ogni avvio.</li>
             <li><strong>Riferimenti senza PDF</strong>: le voci aggiunte come sola citazione (da Scopri online, Esplora citazioni, BibTeX o per ID) mostrano «Riferimento — senza PDF» sulla copertina. Aprendole compare il pannello per allegare il file: <strong>Trova PDF</strong> (Open Access via Unpaywall/arXiv) oppure <strong>Allega</strong> da un link — il PDF si aggancia alla stessa voce, senza duplicati. Lo trovi anche nel radiale → Organizza → «Allega PDF…».</li>
@@ -5669,6 +5702,7 @@
             <li>Appunti in <strong>Markdown</strong> salvati come <strong>file .md veri</strong> nella cartella dell'app: li puoi aprire e modificare anche da un editor esterno o dal terminale. Aprili dalla barra: <strong>Cerca → Note</strong>.</li>
             <li><strong>[[Collegamenti]]</strong> in stile wiki: <code>[[Titolo di un'altra nota]]</code> collega una nota; <code>[[@citekey]]</code> o <code>[[Titolo di un paper]]</code> collegano un documento della libreria (clic → apre la nota o il PDF). In fondo trovi i <strong>backlink</strong> (le note che rimandano a questa).</li>
             <li>Editor con <strong>anteprima</strong> e salvataggio automatico. <strong>Rinomina</strong> (o doppio clic sul titolo) cambia il titolo <em>e</em> il nome del file .md; sotto il titolo vedi il <strong>percorso</strong> del file, la data di creazione e l'ultima modifica.</li>
+            <li><strong>Cercabili</strong>: cerca dalla barra in alto e le note che contengono il termine compaiono in un gruppo <strong>«Note»</strong> sopra la griglia (anche quelle modificate da un editor esterno — l'indice si riallinea a ogni avvio).</li>
           </ul>
         </div>
 
@@ -7110,6 +7144,17 @@
   }
   .noteinfopath:hover { color: var(--accent); text-decoration: underline; }
   .noteinfodate { white-space: nowrap; }
+  /* "Note" group shown above the grid when a search matches standalone notes */
+  .noteresults { max-width: 1100px; margin: 4px 0 18px; }
+  .notehits { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .notehit {
+    display: flex; flex-direction: column; gap: 2px; text-align: left; width: 100%;
+    background: var(--surface); border: 1px solid var(--border-soft); border-radius: var(--r-sm);
+    padding: 8px 12px; cursor: pointer; transition: border-color var(--ease), background var(--ease);
+  }
+  .notehit:hover { border-color: var(--accent); background: var(--hover); }
+  .nhtitle { font-family: var(--serif); font-size: 14px; color: var(--text); }
+  .nhsnip { font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wikiintro code { background: var(--accent-soft); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
 
   /* ===== Esplora citazioni: mappa a due ali + indicatore in-libreria ===== */
