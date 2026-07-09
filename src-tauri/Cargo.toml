@@ -1,6 +1,6 @@
 [package]
 name = "pdfmanage"
-version = "0.8.10"
+version = "0.8.11"
 description = "Lean, fast, local-first PDF & reference manager"
 authors = ["you"]
 edition = "2021"

@@ -499,7 +499,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.10";
+  const APP_VERSION = "0.8.11";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3249,6 +3249,35 @@
 
   // ----- Note (.md vault) -----
   let notesList = $state<NoteMeta[]>([]);
+  // How the notes sidebar is ordered; remembered across sessions.
+  type NoteSortKey = "updated" | "created" | "title";
+  const noteSortStored =
+    typeof localStorage !== "undefined" ? localStorage.getItem("scriptorium-notesort") : null;
+  let noteSort = $state<NoteSortKey>(
+    noteSortStored === "created" || noteSortStored === "title" ? noteSortStored : "updated",
+  );
+  $effect(() => {
+    try {
+      localStorage.setItem("scriptorium-notesort", noteSort);
+    } catch {
+      /* ignore */
+    }
+  });
+  // The rendered order. Derived (not a mutation of notesList) so any refresh —
+  // list reload, autosave prepend, append — re-sorts consistently.
+  const notesSorted = $derived.by(() => {
+    const byTitle = (a: NoteMeta, b: NoteMeta) =>
+      a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+    const arr = [...notesList];
+    if (noteSort === "title") {
+      arr.sort(byTitle);
+    } else if (noteSort === "created") {
+      arr.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0) || byTitle(a, b));
+    } else {
+      arr.sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0) || byTitle(a, b));
+    }
+    return arr;
+  });
   let noteView = $state<NoteView | null>(null);
   let noteDraft = $state(""); // raw markdown in the editor
   let noteMode = $state<"edit" | "preview">("preview");
@@ -4344,8 +4373,18 @@
             <button class="ghost small wikiall" onclick={revealNotesDir} title="Apri la cartella delle note (.md) nel file explorer">
               Apri cartella note
             </button>
+            {#if notesList.length > 1}
+              <div class="notesort">
+                <label class="notesortlbl" for="notesort-sel">Ordina</label>
+                <select id="notesort-sel" class="notesortsel" bind:value={noteSort} title="Ordina l'elenco delle note">
+                  <option value="updated">Ultima modifica</option>
+                  <option value="created">Data creazione</option>
+                  <option value="title">Titolo (A→Z)</option>
+                </select>
+              </div>
+            {/if}
             <div class="wikilist">
-              {#each notesList as n (n.slug)}
+              {#each notesSorted as n (n.slug)}
                 <div class="navrow">
                   <button class="navitem noteitem" class:active={noteView?.slug === n.slug} onclick={() => openNote(n.slug)} title={n.excerpt || n.title}>
                     <span class="notetitle">{n.title}</span>
@@ -5830,7 +5869,7 @@
         <div class="helpsec">
           <h3>Note</h3>
           <ul>
-            <li>Appunti in <strong>Markdown</strong> salvati come <strong>file .md veri</strong> nella cartella dell'app: li puoi aprire e modificare anche da un editor esterno o dal terminale. Aprili dall'<strong>icona Note</strong> (📝) nella barra strumenti in alto (oppure <strong>Cerca → Note</strong>).</li>
+            <li>Appunti in <strong>Markdown</strong> salvati come <strong>file .md veri</strong> nella cartella dell'app: li puoi aprire e modificare anche da un editor esterno o dal terminale. Aprili dall'<strong>icona Note</strong> (📝) nella barra strumenti in alto (oppure <strong>Cerca → Note</strong>). L'elenco si può <strong>ordinare</strong> per ultima modifica, data di creazione o titolo.</li>
             <li><strong>[[Collegamenti]]</strong> in stile wiki: <code>[[Titolo di un'altra nota]]</code> collega una nota; <code>[[@citekey]]</code> o <code>[[Titolo di un paper]]</code> collegano un documento della libreria (clic → apre la nota o il PDF). In fondo trovi i <strong>backlink</strong> (le note che rimandano a questa).</li>
             <li>Editor con <strong>anteprima</strong> e salvataggio automatico. <strong>Rinomina</strong> (o doppio clic sul titolo) cambia il titolo <em>e</em> il nome del file .md; sotto il titolo vedi il <strong>percorso</strong> del file, la data di creazione e l'ultima modifica.</li>
             <li><strong>Cercabili</strong>: cerca dalla barra in alto e le note che contengono il termine compaiono in un gruppo <strong>«Note»</strong> sopra la griglia (anche quelle modificate da un editor esterno — l'indice si riallinea a ogni avvio).</li>
@@ -7217,6 +7256,13 @@
   }
   .wikinew input:focus { border-color: var(--accent); }
   .wikiall { width: 100%; }
+  .notesort { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+  .notesortlbl { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.03em; }
+  .notesortsel {
+    flex: 1; min-width: 0; background: var(--field); border: 1px solid var(--border); color: var(--text);
+    border-radius: var(--r-sm); padding: 5px 8px; font-size: 12px; outline: none; cursor: pointer;
+  }
+  .notesortsel:focus { border-color: var(--accent); }
   .wikiprog { display: flex; flex-direction: column; gap: 6px; padding: 8px; background: var(--panel); border-radius: var(--r-sm); }
   .wikiprog .bar { width: 100%; }
   .wikilist { flex: 1; overflow: auto; margin-top: 4px; }

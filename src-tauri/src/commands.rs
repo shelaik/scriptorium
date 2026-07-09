@@ -6217,6 +6217,8 @@ pub struct NoteMeta {
     pub slug: String,
     pub title: String,
     pub excerpt: String,
+    /// File creation time as epoch milliseconds (formatted by the frontend).
+    pub created_at: Option<i64>,
     /// File mtime as epoch milliseconds (formatted by the frontend).
     pub updated_at: Option<i64>,
 }
@@ -6248,8 +6250,8 @@ fn systime_ms(t: std::io::Result<std::time::SystemTime>) -> Option<i64> {
         .map(|d| d.as_millis() as i64)
 }
 
-/// Read every `.md` file in the vault into (slug, raw content, mtime-millis).
-fn read_vault(dir: &Path) -> Vec<(String, String, Option<i64>)> {
+/// Read every `.md` file in the vault into (slug, raw content, created-millis, mtime-millis).
+fn read_vault(dir: &Path) -> Vec<(String, String, Option<i64>, Option<i64>)> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
@@ -6270,13 +6272,11 @@ fn read_vault(dir: &Path) -> Vec<(String, String, Option<i64>)> {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let mtime = e
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64);
-        out.push((slug, content, mtime));
+        let (created, mtime) = match e.metadata() {
+            Ok(m) => (systime_ms(m.created()), systime_ms(m.modified())),
+            Err(_) => (None, None),
+        };
+        out.push((slug, content, created, mtime));
     }
     out
 }
@@ -6394,13 +6394,15 @@ pub fn list_notes(app: AppHandle) -> Result<Vec<NoteMeta>, String> {
     let dir = notes_dir(&app);
     let mut metas: Vec<NoteMeta> = read_vault(&dir)
         .into_iter()
-        .map(|(slug, content, mtime)| NoteMeta {
+        .map(|(slug, content, created, mtime)| NoteMeta {
             slug,
             title: notes::note_title(&content),
             excerpt: notes::note_excerpt(&content),
+            created_at: created,
             updated_at: mtime,
         })
         .collect();
+    // A sensible default order (newest edit first); the frontend re-sorts on demand.
     metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase())));
     Ok(metas)
 }
@@ -6437,7 +6439,7 @@ pub fn get_note(app: AppHandle, slug: String) -> Result<NoteView, String> {
 
     // Lookup for note targets: slug (lower) and title (lower) → (slug, title).
     let mut note_by_key: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
-    for (s, c, _) in &vault {
+    for (s, c, _, _) in &vault {
         let title = notes::note_title(c);
         note_by_key.entry(s.to_lowercase()).or_insert_with(|| (s.clone(), title.clone()));
         note_by_key.entry(title.to_lowercase()).or_insert_with(|| (s.clone(), title.clone()));
@@ -6468,7 +6470,7 @@ pub fn get_note(app: AppHandle, slug: String) -> Result<NoteView, String> {
     let this_title = notes::note_title(&content).to_lowercase();
     let slug_lower = slug.to_lowercase();
     let mut backlinks: Vec<NoteLink> = Vec::new();
-    for (s, c, _) in &vault {
+    for (s, c, _, _) in &vault {
         if *s == slug {
             continue;
         }
@@ -6573,11 +6575,9 @@ pub fn save_note(app: AppHandle, slug: String, content_md: String) -> Result<Not
     let _ = std::fs::create_dir_all(&dir);
     let path = note_path(&dir, &slug)?;
     std::fs::write(&path, &content_md).map_err(|e| format!("Salvataggio nota: {e}"))?;
-    let mtime = std::fs::metadata(&path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64);
+    let m = std::fs::metadata(&path).ok();
+    let created = m.as_ref().and_then(|m| systime_ms(m.created()));
+    let mtime = m.as_ref().and_then(|m| systime_ms(m.modified()));
     {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
@@ -6587,6 +6587,7 @@ pub fn save_note(app: AppHandle, slug: String, content_md: String) -> Result<Not
         slug,
         title: notes::note_title(&content_md),
         excerpt: notes::note_excerpt(&content_md),
+        created_at: created,
         updated_at: mtime,
     })
 }
@@ -6606,11 +6607,9 @@ pub fn append_to_note(app: AppHandle, slug: String, markdown: String) -> Result<
         format!("{}\n\n{block}\n", existing.trim_end_matches(['\n', '\r']))
     };
     std::fs::write(&path, &new_content).map_err(|e| format!("Salvataggio nota: {e}"))?;
-    let mtime = std::fs::metadata(&path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64);
+    let m = std::fs::metadata(&path).ok();
+    let created = m.as_ref().and_then(|m| systime_ms(m.created()));
+    let mtime = m.as_ref().and_then(|m| systime_ms(m.modified()));
     {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
@@ -6620,6 +6619,7 @@ pub fn append_to_note(app: AppHandle, slug: String, markdown: String) -> Result<
         slug,
         title: notes::note_title(&new_content),
         excerpt: notes::note_excerpt(&new_content),
+        created_at: created,
         updated_at: mtime,
     })
 }

@@ -779,6 +779,8 @@ export interface NoteMeta {
   slug: string;
   title: string;
   excerpt: string;
+  /** File creation time as epoch milliseconds. */
+  created_at: number | null;
   /** File mtime as epoch milliseconds. */
   updated_at: number | null;
 }
