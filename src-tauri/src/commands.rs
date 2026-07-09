@@ -3340,7 +3340,11 @@ pub fn mathocr_status(app: AppHandle) -> Result<serde_json::Value, String> {
 /// LaTeX. Downloads the ~140 MB pix2tex models on first use, then runs fully
 /// locally via the ONNX Runtime already linked into the app.
 #[tauri::command]
-pub async fn formula_to_latex(app: AppHandle, image_base64: String) -> Result<String, String> {
+pub async fn formula_to_latex(
+    app: AppHandle,
+    image_base64: String,
+    multi: bool,
+) -> Result<String, String> {
     let dir = mathocr_dir(&app);
     // Accept either a bare base64 string or a full `data:image/png;base64,…` URL.
     let b64 = image_base64.rsplit(',').next().unwrap_or(&image_base64).trim();
@@ -3353,7 +3357,7 @@ pub async fn formula_to_latex(app: AppHandle, image_base64: String) -> Result<St
             .await
             .map_err(|e| format!("scarico modelli formula: {e}"))?;
     }
-    tauri::async_runtime::spawn_blocking(move || mathocr::recognize(&dir, &bytes))
+    tauri::async_runtime::spawn_blocking(move || mathocr::recognize(&dir, &bytes, multi))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())

@@ -188,6 +188,9 @@
   let formulaLoading = $state(false);
   let formulaLatex = $state("");
   let formulaImg = $state(""); // data URL of the cropped region, shown as a preview
+  let formulaMulti = $state(false); // recognize several stacked equations as one block
+  let formulaError = $state(""); // a hard error (download/decode), distinct from "no formula"
+  let formulaReq = 0; // epoch token: a stale recognition must not overwrite a newer one
   let printing = $state(false);
   let notice = $state("");
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -590,21 +593,9 @@
         return;
       }
       formulaImg = dataUrl;
+      formulaMulti = false;
       formulaModal = true;
-      formulaLoading = true;
-      formulaLatex = "";
-      try {
-        const st = await mathocrStatus();
-        if (!st.ready) {
-          setNotice(`Primo uso: scarico il modello formula (~${st.downloadMb} MB), attendi…`);
-        }
-        formulaLatex = await formulaToLatex(dataUrl);
-      } catch (err) {
-        error = "Errore riconoscimento formula: " + err;
-        formulaModal = false;
-      } finally {
-        formulaLoading = false;
-      }
+      runFormula(false);
       return;
     }
     if (textMode) {
@@ -736,6 +727,32 @@
   function textLatexToNote(e: MouseEvent) {
     textModal = false;
     latexToNote(textToLatex(textContent), "Testo (LaTeX) da", e);
+  }
+  /** Recognize the currently-cropped formula image (in the modal) as LaTeX.
+   *  `multi` segments several stacked equations into one aligned block. */
+  async function runFormula(multi: boolean) {
+    if (!formulaImg) return;
+    const req = ++formulaReq; // this run's epoch; a later run invalidates it
+    formulaMulti = multi;
+    formulaLoading = true;
+    formulaLatex = "";
+    formulaError = "";
+    try {
+      const st = await mathocrStatus();
+      if (formulaReq !== req) return; // superseded while awaiting
+      if (!st.ready) {
+        setNotice(`Primo uso: scarico il modello formula (~${st.downloadMb} MB), attendi…`);
+      }
+      const out = await formulaToLatex(formulaImg, multi);
+      if (formulaReq !== req) return;
+      formulaLatex = out;
+    } catch (err) {
+      if (formulaReq !== req) return;
+      formulaError = String(err);
+      setNotice("Errore riconoscimento formula: " + err);
+    } finally {
+      if (formulaReq === req) formulaLoading = false;
+    }
   }
   function formulaCopy() {
     copyLatex(formulaLatex);
@@ -1940,7 +1957,7 @@
           <li><kbd>I</kbd> <span>Modalità notte</span></li>
           <li><kbd>[</kbd> / <kbd>]</kbd> <span>Ruota</span></li>
           <li>Selezione testo <span>Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)</span></li>
-          <li>Formula → LaTeX <span>Da ⋯ Altro o dal radiale: trascina attorno a un'equazione, ottieni il LaTeX (Copia o → Appunti). Il primo uso scarica il modello locale ~180 MB</span></li>
+          <li>Formula → LaTeX <span>Da ⋯ Altro o dal radiale: trascina attorno a un'equazione, ottieni il LaTeX (Copia o → Appunti). «Più righe» riconosce più equazioni impilate come blocco gathered. Il primo uso scarica il modello locale ~180 MB</span></li>
           <li>⋯ Altro <span>Rotazione, note, estrazione tabella/testo/formula, stampa, condivisione</span></li>
           <li>Tasto destro <span>Menu radiale con i comandi di lettura</span></li>
           <li>Mouse fermo <span>La barra si nasconde; muovi il mouse per mostrarla</span></li>
@@ -2043,6 +2060,12 @@
       <div class="tablecard textcard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
           <strong>Formula → LaTeX</strong>
+          {#if !formulaLoading}
+            <div class="viewtoggle">
+              <button class:on={!formulaMulti} onclick={() => runFormula(false)} title="Una singola formula">Una</button>
+              <button class:on={formulaMulti} onclick={() => runFormula(true)} title="Più equazioni impilate → un blocco gathered">Più righe</button>
+            </div>
+          {/if}
           <span style="flex:1"></span>
           {#if !formulaLoading && formulaLatex.trim()}
             <button onclick={formulaCopy} title="Copia il LaTeX della formula negli appunti di sistema">Copia LaTeX</button>
@@ -2056,6 +2079,8 @@
           {/if}
           {#if formulaLoading}
             <p class="tdim">Riconosco la formula in locale… (il primo uso scarica il modello, ~180 MB)</p>
+          {:else if formulaError}
+            <p class="tdim">{formulaError}</p>
           {:else if !formulaLatex.trim()}
             <p class="tdim">Nessuna formula riconosciuta. Riprova selezionando l'area più precisamente attorno all'equazione.</p>
           {:else}
