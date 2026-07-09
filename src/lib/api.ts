@@ -73,10 +73,12 @@ export interface LatexImportSummary {
   bib_entries: number;
   references_linked: number;
   refs_without_doi: number;
+  dois_resolved: number;
   errors: string[];
 }
 /** Import a LaTeX project .zip: add its compiled PDF(s) as own work and link the
- *  .bib bibliography as the paper's citation graph. Entirely local. */
+ *  .bib bibliography as the paper's citation graph. If online discovery is on,
+ *  recovers missing DOIs (title → Crossref) so the gap-finder can see them. */
 export const importLatexZip = (path: string) =>
   invoke<LatexImportSummary>("import_latex_zip", { path });
 /** Try to attach an Open-Access PDF to a reference-only doc. "attached"|"already"|"not_found". */

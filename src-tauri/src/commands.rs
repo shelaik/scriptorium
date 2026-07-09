@@ -2407,13 +2407,50 @@ pub async fn add_by_identifiers(app: AppHandle, identifiers: Vec<String>) -> Res
 }
 
 /// Convert a parsed BibTeX entry into a reference (None if it has no usable data).
+/// Strip TeX control sequences and math/brace punctuation from a bibliography
+/// title so an online title search isn't polluted by markup (e.g. `\emph{Attn}$x$`
+/// → `Attn x`). Recall-only: precision stays enforced by the Crossref title gate.
+fn detex_title(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if chars.peek().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+                // control word (\emph, \textbf…) → drop it, leave a word boundary
+                while chars.peek().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+                    chars.next();
+                }
+                out.push(' ');
+            } else {
+                // control symbol (accent like \" \' \`) → drop it, keep the letter attached
+                chars.next();
+            }
+        } else if c == '{' || c == '}' || c == '$' {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn bib_to_ref(e: &bibtex::BibEntry) -> Option<metadata::ResolvedRef> {
     let f = &e.fields;
     let get = |k: &str| f.get(k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let title = get("title");
     // Route the DOI field through extract_doi so any wrapper (doi.org, dx.doi.org,
-    // "doi:", trailing punctuation) is normalized to a bare lowercase DOI.
-    let doi = get("doi").and_then(|d| metadata::extract_doi(&d)).map(|d| d.to_lowercase());
+    // "doi:", trailing punctuation) is normalized to a bare lowercase DOI. Fall back
+    // to a DOI embedded in the `url` field (e.g. url = {https://doi.org/10.x/y}).
+    let doi = get("doi")
+        .and_then(|d| metadata::extract_doi(&d))
+        // Only mine a DOI from a genuine doi.org link — a DOI-shaped token buried in
+        // some other URL (proxy path, etc.) may not be the work's real DOI.
+        .or_else(|| {
+            get("url")
+                .filter(|u| u.to_lowercase().contains("doi.org/"))
+                .and_then(|u| metadata::extract_doi(&u))
+        })
+        .map(|d| d.to_lowercase());
     if title.is_none() && doi.is_none() {
         return None;
     }
@@ -2495,6 +2532,9 @@ pub struct LatexImportSummary {
     pub references_linked: usize,
     /// Of those, how many lack a DOI (won't match citation-gap analysis yet).
     pub refs_without_doi: usize,
+    /// DOIs recovered online (title → Crossref) for entries that had none, so the
+    /// gap-finder can see them.
+    pub dois_resolved: usize,
     pub errors: Vec<String>,
 }
 
@@ -2677,11 +2717,21 @@ fn import_latex_zip_inner(app: &AppHandle, zip_path: &str) -> Result<LatexImport
     }
 
     // --- 4. Link each new paper to its bibliography (the document_references graph).
-    let mut references_linked = 0usize;
-    let mut refs_without_doi = 0usize;
+    //
+    // Collect the rows first (no DB, no network); then, if online discovery is on,
+    // recover a DOI for the entries that lack one (title → Crossref) so they become
+    // visible to the citation-gap finder; only then take the lock and insert. Network
+    // I/O never happens while the DB mutex is held.
+    struct PendingRef {
+        doc_id: i64,
+        raw: String,
+        doi: Option<String>,
+        title: Option<String>,
+        resolved: bool, // DOI came from the online recovery (for an accurate count)
+    }
+    let mut pending: Vec<PendingRef> = Vec::new();
     if !own_papers.is_empty() {
         let single = own_papers.len() == 1;
-        let conn = state.db.lock();
         for (doc_id, pdf_dir) in &own_papers {
             // Dedupe within a paper: the same citation can be reachable via two
             // overlapping .bib dirs (root + subdir), or via `single` accepting all.
@@ -2701,20 +2751,93 @@ fn import_latex_zip_inner(app: &AppHandle, zip_path: &str) -> Result<LatexImport
                     if !seen.insert(key) {
                         continue;
                     }
-                    let raw = latex_ref_raw(&rref);
-                    let doi = rref.doi.as_deref();
-                    if conn
-                        .execute(
-                            "INSERT INTO document_references (document_id, ref_doi, raw) VALUES (?1, ?2, ?3)",
-                            params![doc_id, doi, raw],
-                        )
-                        .is_ok()
-                    {
-                        references_linked += 1;
-                        if doi.is_none() {
-                            refs_without_doi += 1;
+                    pending.push(PendingRef {
+                        doc_id: *doc_id,
+                        raw: latex_ref_raw(&rref),
+                        doi: rref.doi.clone(),
+                        title: rref.meta.title.clone(),
+                        resolved: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // Online DOI recovery for the entries still missing one (de-TeX'd title →
+    // Crossref DOI, precision-gated inside crossref_search_title). Gated on the
+    // discovery opt-in. A per-paper budget keeps it fair across papers, plus a hard
+    // total backstop so a pathological archive can't stall the import.
+    let mut dois_resolved = 0usize; // counted at insert time below (after dedup)
+    let need_resolve = pending.iter().filter(|p| p.doi.is_none() && p.title.is_some()).count();
+    if need_resolve > 0 {
+        let (online, email) = {
+            let conn = state.db.lock();
+            let online = setting(&conn, "discovery_enabled").as_deref() == Some("1");
+            let email = setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty());
+            (online, email)
+        };
+        if online {
+            if let Ok(client) = metadata::http_client(email.as_deref()) {
+                const PER_DOC_MAX: usize = 150;
+                const TOTAL_MAX: usize = 600;
+                tauri::async_runtime::block_on(async {
+                    let mut per_doc: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+                    let mut total = 0usize;
+                    for p in pending.iter_mut() {
+                        if p.doi.is_some() {
+                            continue;
                         }
+                        let Some(title) = p.title.clone() else { continue };
+                        if total >= TOTAL_MAX {
+                            break;
+                        }
+                        let n = per_doc.entry(p.doc_id).or_insert(0);
+                        if *n >= PER_DOC_MAX {
+                            continue;
+                        }
+                        *n += 1;
+                        total += 1;
+                        let r = tokio::time::timeout(
+                            std::time::Duration::from_secs(20),
+                            metadata::crossref_search_title(&client, &detex_title(&title), email.as_deref()),
+                        )
+                        .await;
+                        if let Ok(Ok(Some((doi, _)))) = r {
+                            p.doi = Some(doi.to_lowercase());
+                            p.resolved = true;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     }
+                });
+            }
+        }
+    }
+
+    // --- Insert the (possibly DOI-enriched) references. Dedupe a resolved DOI that
+    // now collides with another entry of the same paper.
+    let mut references_linked = 0usize;
+    let mut refs_without_doi = 0usize;
+    if !pending.is_empty() {
+        let conn = state.db.lock();
+        let mut inserted_doi: std::collections::HashSet<(i64, String)> = std::collections::HashSet::new();
+        for p in &pending {
+            if let Some(d) = &p.doi {
+                if !inserted_doi.insert((p.doc_id, d.clone())) {
+                    continue;
+                }
+            }
+            if conn
+                .execute(
+                    "INSERT INTO document_references (document_id, ref_doi, raw) VALUES (?1, ?2, ?3)",
+                    params![p.doc_id, p.doi.as_deref(), p.raw],
+                )
+                .is_ok()
+            {
+                references_linked += 1;
+                if p.doi.is_none() {
+                    refs_without_doi += 1;
+                } else if p.resolved {
+                    dois_resolved += 1;
                 }
             }
         }
@@ -2730,6 +2853,7 @@ fn import_latex_zip_inner(app: &AppHandle, zip_path: &str) -> Result<LatexImport
         bib_entries,
         references_linked,
         refs_without_doi,
+        dois_resolved,
         errors,
     })
 }
@@ -7252,6 +7376,22 @@ pub fn reading_path(state: State<'_, AppState>, id: i64) -> Result<Vec<PathStep>
         );
     }
     Ok(steps)
+}
+
+#[cfg(test)]
+mod detex_tests {
+    use super::detex_title;
+
+    #[test]
+    fn strips_tex_markup_from_titles() {
+        assert_eq!(detex_title("\\emph{Attention} Is All You Need"), "Attention Is All You Need");
+        // $…$ math and a \log control word become word boundaries.
+        assert_eq!(detex_title("A $O(n\\log n)$ Sort"), "A O(n n) Sort");
+        // An accent control symbol is dropped but its letter stays attached.
+        assert_eq!(detex_title("Sch\\\"olkopf on Kernels"), "Scholkopf on Kernels");
+        // A plain title is returned unchanged.
+        assert_eq!(detex_title("Plain Title 2024"), "Plain Title 2024");
+    }
 }
 
 #[cfg(test)]

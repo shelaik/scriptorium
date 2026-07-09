@@ -488,7 +488,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.5";
+  const APP_VERSION = "0.8.6";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1045,6 +1045,7 @@
       if (res.imported) parts.push(`${res.imported} tuoi paper aggiunti`);
       if (res.duplicates) parts.push(`${res.duplicates} già presenti`);
       if (res.references_linked) parts.push(`${res.references_linked} riferimenti collegati`);
+      if (res.dois_resolved) parts.push(`${res.dois_resolved} DOI recuperati`);
       if (!res.pdfs_found) parts.push("nessun PDF nel .zip");
       if (res.errors.length) parts.push(`${res.errors.length} errori`);
       status = "LaTeX: " + (parts.length ? parts.join(" · ") : "niente da importare");
