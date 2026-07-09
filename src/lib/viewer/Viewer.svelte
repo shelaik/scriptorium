@@ -2118,10 +2118,11 @@
     box-shadow: var(--shadow-lg, 0 16px 48px rgba(0, 0, 0, 0.3));
     overflow: auto; resize: both; min-width: 420px; min-height: 280px;
   }
-  .tablehd { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .tablehd { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; row-gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
   .tablehd strong { font-family: var(--serif); font-size: 15px; }
   .tdim { color: var(--dim); font-size: 12px; }
   .tablehd button {
+    flex: 0 0 auto; white-space: nowrap;
     background: var(--field); border: 1px solid var(--border); color: var(--accent);
     border-radius: 7px; padding: 5px 11px; font-size: 13px; cursor: pointer;
   }
@@ -2140,8 +2141,8 @@
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   }
   .exttext:focus { border-color: var(--accent); }
-  .viewtoggle { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
-  .viewtoggle button { border: none; border-radius: 0; padding: 4px 10px; font-size: 12px; }
+  .viewtoggle { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .viewtoggle button { flex: 0 0 auto; white-space: nowrap; border: none; border-radius: 0; padding: 4px 10px; font-size: 12px; }
   .viewtoggle button.on, .viewtoggle button.on:hover { background: var(--accent); color: var(--on-accent); border-color: transparent; }
   .latexview {
     width: 100%; min-height: 320px; max-height: 62vh; box-sizing: border-box; margin: 0;
