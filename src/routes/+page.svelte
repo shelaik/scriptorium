@@ -275,7 +275,8 @@
     if (careModal) return "g-tools";
     switch (filter.kind) {
       case "novita": return "g-novita";
-      case "ask": case "wiki": case "notes": case "discover": return "g-search";
+      case "notes": return "g-notes";
+      case "ask": case "wiki": case "discover": return "g-search";
       case "trash": case "terminal": case "duplicates": return "g-tools";
       default: return null;
     }
@@ -498,7 +499,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.9";
+  const APP_VERSION = "0.8.10";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2666,6 +2667,7 @@
     near: "M12 8a4 4 0 1 0 .01 0M12 2v2M12 20v2M2 12h2M20 12h2",
     heal: "M22 12h-4l-3 9L9 3l-3 9H2",
     bell: "M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0",
+    note: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8",
     x: "M18 6L6 18M6 6l12 12",
   };
 
@@ -2956,6 +2958,13 @@
           { id: "gq-notes", label: "Note", icon: I.open, hint: "Note in Markdown (file .md) con [[collegamenti]]", action: () => openNotesView() },
           { id: "gq-disc", label: "Scopri online", hint: "arXiv, OpenAlex, ADS e altre fonti", action: () => setFilter({ kind: "discover" }) },
         ],
+      },
+      {
+        id: "g-notes",
+        label: "Note",
+        icon: I.note,
+        hint: "Le tue note in Markdown (file .md) con [[collegamenti]]",
+        action: () => openNotesView(),
       },
       { id: "g-redis", label: "Riscopri", icon: I.compass, hint: "Un documento dimenticato, pescato per te", action: () => rediscover() },
       {
@@ -5821,7 +5830,7 @@
         <div class="helpsec">
           <h3>Note</h3>
           <ul>
-            <li>Appunti in <strong>Markdown</strong> salvati come <strong>file .md veri</strong> nella cartella dell'app: li puoi aprire e modificare anche da un editor esterno o dal terminale. Aprili dalla barra: <strong>Cerca → Note</strong>.</li>
+            <li>Appunti in <strong>Markdown</strong> salvati come <strong>file .md veri</strong> nella cartella dell'app: li puoi aprire e modificare anche da un editor esterno o dal terminale. Aprili dall'<strong>icona Note</strong> (📝) nella barra strumenti in alto (oppure <strong>Cerca → Note</strong>).</li>
             <li><strong>[[Collegamenti]]</strong> in stile wiki: <code>[[Titolo di un'altra nota]]</code> collega una nota; <code>[[@citekey]]</code> o <code>[[Titolo di un paper]]</code> collegano un documento della libreria (clic → apre la nota o il PDF). In fondo trovi i <strong>backlink</strong> (le note che rimandano a questa).</li>
             <li>Editor con <strong>anteprima</strong> e salvataggio automatico. <strong>Rinomina</strong> (o doppio clic sul titolo) cambia il titolo <em>e</em> il nome del file .md; sotto il titolo vedi il <strong>percorso</strong> del file, la data di creazione e l'ultima modifica.</li>
             <li><strong>Cercabili</strong>: cerca dalla barra in alto e le note che contengono il termine compaiono in un gruppo <strong>«Note»</strong> sopra la griglia (anche quelle modificate da un editor esterno — l'indice si riallinea a ogni avvio).</li>
