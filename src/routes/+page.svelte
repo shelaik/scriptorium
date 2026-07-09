@@ -504,7 +504,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.15";
+  const APP_VERSION = "0.8.16";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2473,6 +2473,7 @@
   /** Tool-bar icon click: open the group's dropdown, or run it if it's a leaf. */
   function openTool(e: MouseEvent, g: RadialItem) {
     e.stopPropagation();
+    if (g.disabled) return; // defensive: a disabled top-level icon does nothing
     headerMenu = null;
     sortPop = false;
     indexPop = false;
@@ -2676,6 +2677,7 @@
     globe: "M12 2a10 10 0 1 0 .01 0M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10",
     term: "M4 17l6-6-6-6M12 19h8",
     backup: "M22 12H2M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01",
+    layers: "M12 2l9 5-9 5-9-5zM3 12l9 5 9-5M3 17l9 5 9-5",
     x: "M18 6L6 18M6 6l12 12",
   };
 
@@ -2984,25 +2986,17 @@
       },
       {
         id: "g-tools",
-        label: "Strumenti",
-        icon: I.tools,
-        hint: "Manutenzione e diagnostica",
+        label: "Cura della libreria",
+        icon: I.heal,
+        hint: "Salute, gap di citazioni, duplicati e manutenzione",
         children: [
-          {
-            id: "gt-care",
-            label: "Cura della libreria",
-            icon: I.heal,
-            hint: "Salute, gap di citazioni e duplicati in un posto solo",
-            children: [
-              { id: "gc-health", label: "Salute libreria", hint: "File mancanti, PDF senza testo, metadati incompleti…", action: () => openCare("salute") },
-              { id: "gc-gaps", label: "Gap di citazioni", hint: "I DOI più citati dai tuoi paper che ancora non possiedi", action: () => openCare("gap") },
-              { id: "gc-dup", label: "Duplicati", hint: "Trova e unisci le copie dello stesso lavoro", action: () => openCare("duplicati") },
-            ],
-          },
-          { id: "gt-thumb", label: "Rigenera anteprime", disabled: rebuildingThumbs, action: () => rebuildThumbs() },
-          { id: "gt-emb", label: "Indice semantico", hint: `${emb.embedded}/${emb.total} documenti indicizzati`, disabled: generating || emb.embedded >= emb.total || emb.total === 0, action: () => generateIndex() },
+          { id: "gc-health", label: "Salute libreria", hint: "File mancanti, PDF senza testo, metadati incompleti…", action: () => openCare("salute") },
+          { id: "gc-gaps", label: "Gap di citazioni", hint: "I DOI più citati dai tuoi paper che ancora non possiedi", action: () => openCare("gap") },
+          { id: "gc-dup", label: "Duplicati", hint: "Trova e unisci le copie dello stesso lavoro", action: () => openCare("duplicati") },
+          { id: "gt-thumb", label: "Rigenera anteprime", hint: "Ricrea le copertine dal PDF ad alta risoluzione", disabled: rebuildingThumbs, action: () => rebuildThumbs() },
         ],
       },
+      { id: "g-emb", label: "Indice semantico", icon: I.layers, hint: `${emb.embedded}/${emb.total} indicizzati — abilita ricerca per significato, Correlati e Costellazione`, disabled: generating || emb.embedded >= emb.total || emb.total === 0, action: () => generateIndex() },
       { id: "g-backup", label: "Backup libreria", icon: I.backup, hint: "Copia completa della libreria (PDF + database) in una cartella", action: () => doBackup() },
       { id: "g-trash", label: "Cestino", icon: I.trash, hint: "I documenti eliminati (ripristinabili)", action: () => setFilter({ kind: "trash" }) },
       { id: "g-term", label: "Terminale", icon: I.term, hint: "PowerShell integrato nella cartella dei PDF", action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
@@ -3994,6 +3988,7 @@
         class:active={activeToolGroup === g.id}
         title={g.hint ? g.label + " — " + g.hint : g.label}
         aria-label={g.label}
+        disabled={g.disabled}
         onclick={(e) => openTool(e, g)}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d={g.icon} /></svg>
@@ -5814,7 +5809,7 @@
         <div class="helpsec">
           <h3>Barra strumenti, menu radiale e palette — l'interfaccia</h3>
           <ul>
-            <li><strong>Barra strumenti</strong> (in alto, sotto il titolo): un'icona per ogni funzione — <strong>Importa</strong>, <strong>Vista</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Note</strong> (📝), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔, con il conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Strumenti</strong> (Cura della libreria, Rigenera anteprime, Indice semantico), <strong>Backup libreria</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Aspetto</strong> e <strong>Sistema</strong> (Impostazioni, Aiuto, Informazioni). Le voci con un menu si aprono al clic, le altre eseguono direttamente; l'icona si evidenzia quando sei nella vista corrispondente. Il <strong>Recupera metadati</strong> e la <strong>palette comandi</strong> (icona <kbd>Ctrl</kbd>+<kbd>K</kbd>) sono in alto accanto al contatore «✦ senza metadati». La <strong>barra laterale</strong> resta per la navigazione: filtri, tag, collezioni, ricerche salvate, cartella sorvegliata.</li>
+            <li><strong>Barra strumenti</strong> (in alto, sotto il titolo): un'icona per ogni funzione — <strong>Importa</strong>, <strong>Vista</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Note</strong> (📝), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔, con il conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong> (Salute, Gap di citazioni, Duplicati, Rigenera anteprime), <strong>Indice semantico</strong>, <strong>Backup libreria</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Aspetto</strong> e <strong>Sistema</strong> (Impostazioni, Aiuto, Informazioni). Le voci con un menu si aprono al clic, le altre eseguono direttamente; l'icona si evidenzia quando sei nella vista corrispondente. Il <strong>Recupera metadati</strong> e la <strong>palette comandi</strong> (icona <kbd>Ctrl</kbd>+<kbd>K</kbd>) sono in alto accanto al contatore «✦ senza metadati». La <strong>barra laterale</strong> resta per la navigazione: filtri, tag, collezioni, ricerche salvate, cartella sorvegliata.</li>
             <li><strong>Tasto destro</strong> su un documento → il <strong>menu radiale</strong>: le azioni disposte ad anello attorno al cursore, organizzate in orbite (Cita, AI, Organizza, Condividi…). Tasto destro sullo <strong>spazio vuoto</strong> → il menu radiale globale (gli stessi gruppi della barra). La barra, il radiale e la palette pescano dallo <strong>stesso registro</strong>: nessuna funzione è esclusiva di una sola.</li>
             <li><strong>Come si naviga</strong>: muovi il mouse verso un petalo (basta la direzione, non serve arrivarci) e clicca; oppure <strong>secondo clic destro</strong> per entrare nei sottomenu senza spostarti; <strong>rotella</strong> per ruotare la selezione; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; frecce + Invio da tastiera. <kbd>Esc</kbd> chiude, il centro torna indietro.</li>
             <li><kbd>Ctrl</kbd>+<kbd>K</kbd> → la <strong>palette comandi</strong>: ogni azione, documento, filtro e tema, digitando. <kbd>/</kbd> va alla ricerca, <kbd>Ctrl</kbd>+<kbd>B</kbd> mostra/nasconde la barra laterale.</li>
@@ -5836,7 +5831,7 @@
             <li><strong>Viste</strong>: griglia (copertine ridimensionabili con − ▭ +), lista a colonne, e <strong>Costellazione</strong> — la libreria come mappa semantica: ogni stella un documento, i legami sono la somiglianza di significato. Clic per aprire, tasto destro per il menu, Ctrl+clic per selezionare.</li>
             <li><strong>Continua a leggere</strong>: in “Tutti” trovi in alto gli ultimi PDF aperti. Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
             <li><strong>Riscopri</strong> (barra <em>Riscopri</em>, radiale o palette): ti ripesca un documento dimenticato o mai letto.</li>
-            <li><strong>Cura della libreria</strong> (barra strumenti in alto o radiale → Strumenti) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi; il pulsante <strong>«Risolvi DOI dei riferimenti»</strong> recupera online — precision-first, mai un abbinamento incerto — i DOI mancanti dei riferimenti già importati, così entrano nel conteggio) e <strong>Duplicati</strong> (unione). Il <strong>Cestino</strong> ha la sua icona dedicata sulla barra.</li>
+            <li><strong>Cura della libreria</strong> (icona propria sulla barra in alto o dal radiale) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi; il pulsante <strong>«Risolvi DOI dei riferimenti»</strong> recupera online — precision-first, mai un abbinamento incerto — i DOI mancanti dei riferimenti già importati, così entrano nel conteggio) e <strong>Duplicati</strong> (unione); nel suo menu c'è anche <strong>Rigenera anteprime</strong>. L'<strong>Indice semantico</strong>, il <strong>Cestino</strong> e il <strong>Backup</strong> hanno la loro icona dedicata sulla barra.</li>
             <li><strong>Tag</strong>: la <strong>matitina ✎</strong> accanto a un tag nella barra laterale lo <strong>rinomina o ricolora</strong>; la <strong>×</strong> lo elimina. Dal pannello di dettaglio aggiungi/togli tag al volo.</li>
             <li>Nella vista <strong>Tutti</strong>, la <strong>Panoramica</strong> in alto (comprimibile) mostra quanti documenti hai da leggere, in lettura e aggiunti questo mese, e ti propone un paper da <strong>riscoprire</strong> ogni giorno.</li>
           </ul>
@@ -5925,7 +5920,7 @@
         <div class="helpsec">
           <h3>Metadati & manutenzione</h3>
           <ul>
-            <li><strong>Metadati</strong>: quando ci sono schede incomplete compare in alto il suggerimento «✦ N senza metadati» — un clic recupera titolo, autori, anno, rivista, abstract e riferimenti (lo trovi anche nel radiale → Strumenti). L'identità del paper si risolve dal suo <strong>titolo</strong> (ricerca su Crossref e arXiv), non solo dal primo DOI nel testo: così un <strong>DOI di un lavoro citato</strong> non può più far scambiare il paper per un altro. Se il paper non è indicizzato da nessuna parte viene lasciato com'è, senza etichette sbagliate.</li>
+            <li><strong>Metadati</strong>: quando ci sono schede incomplete compare in alto il suggerimento «✦ N senza metadati» — un clic recupera titolo, autori, anno, rivista, abstract e riferimenti. L'identità del paper si risolve dal suo <strong>titolo</strong> (ricerca su Crossref e arXiv), non solo dal primo DOI nel testo: così un <strong>DOI di un lavoro citato</strong> non può più far scambiare il paper per un altro. Se il paper non è indicizzato da nessuna parte viene lasciato com'è, senza etichette sbagliate.</li>
             <li><strong>Impostazioni → Manutenzione → «Ripara metadati errati»</strong>: ricontrolla tutta la libreria e corregge le schede il cui titolo non corrisponde al PDF. Per ognuna cerca il record giusto <strong>online per titolo</strong> (Crossref/arXiv); i paper <strong>arXiv</strong> si recuperano dall'ID nel nome file; se non è indicizzato, ricava almeno il titolo dalla prima riga del PDF. I documenti già corretti non vengono toccati. Sicuro e ripetibile.</li>
             <li>Le schede senza metadati mostrano <strong>ⓘ</strong>: premi «Metadati» per recuperarli, oppure usa il <strong>clic destro → Modifica metadati</strong> per inserirli/correggerli a mano.</li>
           </ul>
@@ -7182,6 +7177,8 @@
     border-bottom: 1px solid var(--border-soft);
   }
   .toolbar .iconbtn { position: relative; width: 36px; height: 32px; }
+  .toolbar .iconbtn:disabled { opacity: 0.4; cursor: default; }
+  .toolbar .iconbtn:disabled:hover { background: transparent; color: inherit; border-color: transparent; }
   .toolbar .iconbtn.active { color: var(--accent); }
   .toolbar .iconbtn.active::after {
     content: ""; position: absolute; left: 8px; right: 8px; bottom: 1px; height: 2px;
