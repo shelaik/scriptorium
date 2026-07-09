@@ -276,7 +276,9 @@
     switch (filter.kind) {
       case "novita": return "g-novita";
       case "notes": return "g-notes";
-      case "ask": case "wiki": case "discover": return "g-search";
+      case "ask": return "g-ask";
+      case "wiki": return "g-wiki";
+      case "discover": return "g-disc";
       case "trash": case "terminal": case "duplicates": return "g-tools";
       default: return null;
     }
@@ -499,7 +501,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.11";
+  const APP_VERSION = "0.8.12";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2668,6 +2670,7 @@
     heal: "M22 12h-4l-3 9L9 3l-3 9H2",
     bell: "M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0",
     note: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8",
+    globe: "M12 2a10 10 0 1 0 .01 0M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10",
     x: "M18 6L6 18M6 6l12 12",
   };
 
@@ -2946,19 +2949,9 @@
           })),
         ],
       },
-      {
-        id: "g-search",
-        label: "Cerca",
-        icon: I.search,
-        children: [
-          { id: "gq-focus", label: "Cerca in libreria", hint: "Vai alla casella di ricerca", action: () => searchEl?.focus() },
-          { id: "gq-pal", label: "Palette comandi", hint: "Ctrl+K — ogni azione, digitando", action: () => (paletteOpen = true) },
-          { id: "gq-ask", label: "Chiedi alla libreria", icon: I.ask, hint: "Risposte con citazioni dai tuoi PDF (AI locale)", action: () => { setFilter({ kind: "ask" }); loadRagStatus(); } },
-          { id: "gq-wiki", label: "Wiki della libreria", icon: I.open, hint: "La tua enciclopedia privata, generata dai tuoi paper", action: () => openWikiView() },
-          { id: "gq-notes", label: "Note", icon: I.open, hint: "Note in Markdown (file .md) con [[collegamenti]]", action: () => openNotesView() },
-          { id: "gq-disc", label: "Scopri online", hint: "arXiv, OpenAlex, ADS e altre fonti", action: () => setFilter({ kind: "discover" }) },
-        ],
-      },
+      { id: "g-ask", label: "Chiedi alla libreria", icon: I.ask, hint: "Risposte con citazioni dai tuoi PDF (AI locale)", action: () => { setFilter({ kind: "ask" }); loadRagStatus(); } },
+      { id: "g-wiki", label: "Wiki della libreria", icon: I.open, hint: "La tua enciclopedia privata, generata dai tuoi paper", action: () => openWikiView() },
+      { id: "g-disc", label: "Cerca online", icon: I.globe, hint: "arXiv, OpenAlex, ADS e altre fonti", action: () => setFilter({ kind: "discover" }) },
       {
         id: "g-notes",
         label: "Note",
@@ -4155,7 +4148,7 @@
         {/if}
       </div>
 
-      <p class="sidehint" title="Chiedi alla libreria, Wiki, Note, Scopri online, Novità, Cura della libreria, Cestino, Terminale, Impostazioni, Aiuto e Informazioni sono ora nella barra strumenti in alto ↑ — tasto destro: menu radiale · Ctrl+K: palette">Gli strumenti sono nella barra in alto ↑</p>
+      <p class="sidehint" title="Chiedi alla libreria, Wiki, Note, Cerca online, Novità, Cura della libreria, Cestino, Terminale, Impostazioni, Aiuto e Informazioni sono ora nella barra strumenti in alto ↑ — tasto destro: menu radiale · Ctrl+K: palette">Gli strumenti sono nella barra in alto ↑</p>
     </aside>
 
     <main class="main">
