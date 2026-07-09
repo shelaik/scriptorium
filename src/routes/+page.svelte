@@ -280,7 +280,8 @@
       case "ask": return "g-ask";
       case "wiki": return "g-wiki";
       case "discover": return "g-disc";
-      case "trash": case "terminal": case "duplicates": return "g-tools";
+      case "terminal": return "g-term";
+      case "trash": case "duplicates": return "g-tools";
       default: return null;
     }
   });
@@ -502,7 +503,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.13";
+  const APP_VERSION = "0.8.14";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2672,6 +2673,7 @@
     bell: "M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0",
     note: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8",
     globe: "M12 2a10 10 0 1 0 .01 0M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10",
+    term: "M4 17l6-6-6-6M12 19h8",
     x: "M18 6L6 18M6 6l12 12",
   };
 
@@ -3000,9 +3002,9 @@
           { id: "gt-emb", label: "Indice semantico", hint: `${emb.embedded}/${emb.total} documenti indicizzati`, disabled: generating || emb.embedded >= emb.total || emb.total === 0, action: () => generateIndex() },
           { id: "gt-backup", label: "Backup libreria…", action: () => doBackup() },
           { id: "gt-trash", label: "Cestino", icon: I.trash, action: () => setFilter({ kind: "trash" }) },
-          { id: "gt-term", label: "Terminale", hint: "PowerShell integrato nella cartella dei PDF", action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
         ],
       },
+      { id: "g-term", label: "Terminale", icon: I.term, hint: "PowerShell integrato nella cartella dei PDF", action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
       {
         id: "g-theme",
         label: "Aspetto",
@@ -5811,7 +5813,7 @@
         <div class="helpsec">
           <h3>Barra strumenti, menu radiale e palette — l'interfaccia</h3>
           <ul>
-            <li><strong>Barra strumenti</strong> (in alto, sotto il titolo): un'icona per ogni gruppo di funzioni — <strong>Importa</strong>, <strong>Vista</strong>, <strong>Cerca</strong> (Chiedi alla libreria, Wiki, Note, Scopri online), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔, con il conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Strumenti</strong> (Cura della libreria, Cestino, Terminale, Backup, indice semantico…), <strong>Aspetto</strong> e <strong>Sistema</strong> (Impostazioni, Aiuto, Informazioni). Clic su un'icona → menu con le sue azioni; l'icona si evidenzia quando sei nella vista corrispondente. La <strong>barra laterale</strong> resta per la navigazione: filtri, tag, collezioni, ricerche salvate, cartella sorvegliata.</li>
+            <li><strong>Barra strumenti</strong> (in alto, sotto il titolo): un'icona per ogni funzione — <strong>Importa</strong>, <strong>Vista</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Note</strong> (📝), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔, con il conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Strumenti</strong> (Recupera metadati, Cura della libreria, Cestino, Backup, indice semantico…), <strong>Terminale</strong> (&gt;_), <strong>Aspetto</strong> e <strong>Sistema</strong> (Impostazioni, Aiuto, Informazioni). Le voci con un menu si aprono al clic, le altre eseguono direttamente; l'icona si evidenzia quando sei nella vista corrispondente. La <strong>palette comandi</strong> (icona <kbd>Ctrl</kbd>+<kbd>K</kbd>) è accanto al contatore «senza metadati». La <strong>barra laterale</strong> resta per la navigazione: filtri, tag, collezioni, ricerche salvate, cartella sorvegliata.</li>
             <li><strong>Tasto destro</strong> su un documento → il <strong>menu radiale</strong>: le azioni disposte ad anello attorno al cursore, organizzate in orbite (Cita, AI, Organizza, Condividi…). Tasto destro sullo <strong>spazio vuoto</strong> → il menu radiale globale (gli stessi gruppi della barra). La barra, il radiale e la palette pescano dallo <strong>stesso registro</strong>: nessuna funzione è esclusiva di una sola.</li>
             <li><strong>Come si naviga</strong>: muovi il mouse verso un petalo (basta la direzione, non serve arrivarci) e clicca; oppure <strong>secondo clic destro</strong> per entrare nei sottomenu senza spostarti; <strong>rotella</strong> per ruotare la selezione; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; frecce + Invio da tastiera. <kbd>Esc</kbd> chiude, il centro torna indietro.</li>
             <li><kbd>Ctrl</kbd>+<kbd>K</kbd> → la <strong>palette comandi</strong>: ogni azione, documento, filtro e tema, digitando. <kbd>/</kbd> va alla ricerca, <kbd>Ctrl</kbd>+<kbd>B</kbd> mostra/nasconde la barra laterale.</li>
@@ -5934,7 +5936,7 @@
             <li><strong>Esporta</strong> (barra <em>Esporta</em>, radiale o Ctrl+K): <em>Citazioni</em> (BibTeX / RIS / CSL) dei documenti mostrati, oppure <em>In Obsidian</em> (note Markdown nel tuo vault).</li>
             <li><strong>AI locale</strong> (Ollama / LM Studio): riassunti, tag automatici, lente di lettura — opzionali, mai automatici, disattivabili. Impostazioni → AI locale.</li>
             <li>Le schede con un <strong>riassunto AI</strong> mostrano il bollino <strong>✦ AI</strong>; nel menu radiale le voci AI indicano ✓ ciò che c'è già. Il <strong>batch</strong> sulla selezione <strong>salta</strong> chi ha già riassunto/tag (te lo dice: «N saltati»); per rigenerare un riassunto usa il tasto destro sul singolo documento.</li>
-            <li><strong>Terminale</strong> integrato (es. per <code>claude code</code>) e <strong>Backup</strong> completo (barra → <em>Strumenti</em>); <strong>11 temi</strong> dell'interfaccia (barra → <em>Aspetto</em>, radiale o palette).</li>
+            <li><strong>Terminale</strong> integrato (es. per <code>claude code</code>) con la <strong>sua icona (&gt;_) sulla barra</strong> in alto; <strong>Backup</strong> completo (barra → <em>Strumenti</em>); <strong>11 temi</strong> dell'interfaccia (barra → <em>Aspetto</em>, radiale o palette).</li>
             <li>Suggerimento: le finestre si <strong>ridimensionano</strong> trascinando l'angolo in basso a destra.</li>
           </ul>
         </div>
