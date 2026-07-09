@@ -129,6 +129,7 @@
     listNotes,
     getNote,
     createNote,
+    appendToNote,
     saveNote,
     renameNote,
     deleteNote,
@@ -160,7 +161,7 @@
   import CitationMap from "$lib/CitationMap.svelte";
   import DetailPanel from "$lib/DetailPanel.svelte";
   import SendToNotePicker from "$lib/SendToNotePicker.svelte";
-  import type { NotePayload } from "$lib/notecite";
+  import { refToken, type NotePayload } from "$lib/notecite";
 
   type Filter = {
     kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita" | "mywork" | "notes";
@@ -501,7 +502,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.12";
+  const APP_VERSION = "0.8.13";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2888,7 +2889,7 @@
       if (ids.length >= 2 && ids.length <= 3)
         items.push({ id: "s-cmp", label: "Confronta (AI)", icon: I.near, disabled: aiBusyAny || wikiBusy, hint: "Tabella: obiettivo, metodo, dati, risultati, limiti — e cosa aggiunge ciascuno", action: () => runCompare() });
       if (ids.length >= 2)
-        items.push({ id: "s-rev", label: "Rassegna (AI)", icon: I.quote, disabled: aiBusyAny || wikiBusy, hint: "Mini related-work per temi, con citazioni [n] e citekey pronti", action: () => runReview() });
+        items.push({ id: "s-rev", label: "Rassegna (AI)", icon: I.quote, disabled: aiBusyAny || wikiBusy, hint: "Mini related-work per temi (2-10 paper); salvabile come nota con backlink [[@citekey]]", action: () => runReview() });
       items.push({ id: "s-res", label: "Tabella risultati (AI)", icon: I.grid, disabled: aiBusyAny || wikiBusy, hint: "Raccogli metriche e numeri dei paper in un'unica tabella (CSV/Excel)", action: () => runHarvest() });
       items.push({ id: "s-wiki", label: "Pagina wiki (AI)", icon: I.open, disabled: aiBusyAny || wikiBusy, hint: "Una pagina della Wiki con esattamente questi documenti come fonti (max 10)", action: () => (wikiFromSel = { ids: [...selected].slice(0, 10), concept: "" }) });
     }
@@ -2984,7 +2985,6 @@
         hint: "Manutenzione e diagnostica",
         children: [
           { id: "gt-meta", label: "Recupera metadati", badge: needsMeta > 0 ? String(needsMeta) : undefined, disabled: enriching || docs.length === 0, hint: "Da Crossref via DOI: autori, anno, rivista, riferimenti", action: () => enrichMeta() },
-          { id: "gt-rev", label: "Rassegna della vista (AI)", disabled: displayed.length < 2 || wikiBusy, hint: "Mini related-work dei documenti mostrati (max 10)", action: () => runReview(displayed.map((d) => d.id)) },
           {
             id: "gt-care",
             label: "Cura della libreria",
@@ -3675,11 +3675,15 @@
       wikiProg = null;
     }
   }
-  async function runReview(onlyIds?: number[]) {
-    const ids = (onlyIds ?? (selected.length ? selected : displayed.map((d) => d.id))).slice(0, 10);
-    if (ids.length < 2) {
-      status = "Servono almeno 2 documenti per una rassegna";
+  async function runReview() {
+    const picked = selected.length ? selected : [];
+    if (picked.length < 2) {
+      status = "Seleziona da 2 a 10 paper per una rassegna";
       return;
+    }
+    const ids = picked.slice(0, 10);
+    if (picked.length > 10) {
+      status = `Rassegna sui primi 10 di ${picked.length} paper selezionati (il massimo)`;
     }
     if (wikiBusy) return;
     wikiBusy = true;
@@ -3692,6 +3696,40 @@
       wikiBusy = false;
       wikiProg = null;
     }
+  }
+  /** Turn the open AI doc (rassegna/confronto) into a real .md note in the vault:
+   *  rewrite each [n] to a live [[@citekey]] backlink, then create + open it. */
+  async function aiDocToNote() {
+    if (!aiDoc) return;
+    let body = aiDoc.md;
+    for (const s of aiDoc.sources) {
+      body = body.split(`[${s.n}]`).join(refToken(s.citekey, s.title));
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    let slug: string | null = null;
+    try {
+      slug = await createNote(`${aiDoc.title} — ${today}`);
+      await appendToNote(slug, body); // seeded "# title" + the synthesis with backlinks
+    } catch (e) {
+      // Roll back the just-created (content-less) note so nothing dangles.
+      if (slug) {
+        try {
+          await deleteNote(slug);
+        } catch {
+          /* best-effort */
+        }
+      }
+      status = "Errore nel salvare la nota: " + e;
+      return;
+    }
+    aiDoc = null;
+    try {
+      await openNotesView(); // switch to the Notes surface…
+      await openNote(slug); // …and open the fresh note
+    } catch {
+      /* the note is saved; just couldn't auto-open it */
+    }
+    status = "Salvata nel repo note ✓";
   }
   async function runHarvest() {
     const ids = selected.slice(0, 8);
@@ -5115,6 +5153,7 @@
             <button class="ghost small" onclick={() => copyAiDoc("latex")} title={"Le [n] diventano \\cite{citekey}"}>Copia per LaTeX</button>
             <button class="ghost small" onclick={() => copyAiDoc("pandoc")} title="Le [n] diventano [@citekey]">Copia per Pandoc</button>
           {/if}
+          <button class="ghost small" onclick={aiDocToNote} title="Crea una nota .md nel repo note, con le fonti come backlink [[@citekey]] cliccabili">📝 Salva nel repo note</button>
           <button class="ghost small" onclick={saveAiDoc}>Salva .md…</button>
           <button class="primary" onclick={() => (aiDoc = null)}>Chiudi</button>
         </div>
@@ -5874,7 +5913,7 @@
           <h3>Strumenti di sintesi sulla selezione</h3>
           <ul>
             <li><strong>Confronta (AI)</strong>: seleziona 2-3 paper → tasto destro → <em>Confronta</em>: tabella obiettivo/metodo/dati/risultati/limiti + cosa aggiunge ciascuno.</li>
-            <li><strong>Rassegna (AI)</strong>: da una selezione (2-10 paper) o dall'intera vista (radiale → Strumenti → <em>Rassegna della vista</em>): mini related-work organizzata per temi, con citazioni [n] cliccabili e copia pronta per <strong>LaTeX</strong> (<code>\cite&#123;citekey&#125;</code>) o <strong>Pandoc</strong> (<code>[@citekey]</code>).</li>
+            <li><strong>Rassegna (AI)</strong>: <strong>seleziona da 2 a 10 paper</strong> → tasto destro → <em>Rassegna (AI)</em>. Ottieni una <strong>mini related-work</strong> (300-500 parole) <strong>organizzata per temi</strong> (non paper-per-paper): confronta gli approcci, evidenzia disaccordi e chiude con <em>«Lacune aperte»</em>. Ogni paper è citato con <strong>[n] cliccabili</strong> (aprono la fonte) e nessuna fonte viene omessa in silenzio (le non integrate finiscono in coda). Puoi copiarla pronta per <strong>LaTeX</strong> (<code>\cite&#123;citekey&#125;</code>) o <strong>Pandoc</strong> (<code>[@citekey]</code>), oppure <strong>«Salva nel repo note»</strong>: diventa una <strong>nota .md</strong> nel vault dove le <em>[n]</em> sono riscritte come <strong>backlink <code>[[@citekey]]</code></strong> — così ogni paper citato rimanda alla rassegna, ed è cercabile e modificabile come ogni nota. Richiede l'AI locale attiva.</li>
             <li><strong>Tabella risultati (AI)</strong>: raccoglie i numeri (metodo · dataset · metrica · valore) dei paper selezionati in un'unica tabella esportabile in CSV/Markdown/Excel. I valori sono estratti testualmente: verifica sempre sul PDF.</li>
             <li><strong>Percorso di lettura</strong> (tasto destro → AI): per capire un paper, cosa leggere prima — i fondamenti che cita (già tuoi), i vicini di contenuto precedenti, e i riferimenti mancanti da aggiungere con un click. Funziona <em>senza</em> LLM.</li>
           </ul>
