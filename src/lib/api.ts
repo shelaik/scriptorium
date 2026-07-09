@@ -809,6 +809,9 @@ export const createNote = (title: string) => invoke<string>("create_note", { tit
 /** Overwrite a note's body; returns refreshed metadata. */
 export const saveNote = (slug: string, contentMd: string) =>
   invoke<NoteMeta>("save_note", { slug, contentMd });
+/** Append a Markdown block to a note (never overwrites); returns refreshed metadata. */
+export const appendToNote = (slug: string, markdown: string) =>
+  invoke<NoteMeta>("append_to_note", { slug, markdown });
 /** Rename a note (new title + renamed .md file); returns the new slug. */
 export const renameNote = (slug: string, newTitle: string) =>
   invoke<string>("rename_note", { slug, newTitle });

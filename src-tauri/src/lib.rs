@@ -204,6 +204,7 @@ pub fn run() {
             commands::get_note,
             commands::create_note,
             commands::save_note,
+            commands::append_to_note,
             commands::rename_note,
             commands::delete_note,
             commands::search_notes,

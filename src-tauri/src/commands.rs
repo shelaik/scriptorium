@@ -6591,6 +6591,39 @@ pub fn save_note(app: AppHandle, slug: String, content_md: String) -> Result<Not
     })
 }
 
+/// Append a Markdown block to an existing note (used by "send selection/abstract/
+/// summary to a note"). The file stays the source of truth: read → concat with a
+/// blank-line separator → write → re-index. Never overwrites existing content.
+#[tauri::command]
+pub fn append_to_note(app: AppHandle, slug: String, markdown: String) -> Result<NoteMeta, String> {
+    let dir = notes_dir(&app);
+    let path = note_path(&dir, &slug)?;
+    let existing = std::fs::read_to_string(&path).map_err(|e| format!("Lettura nota: {e}"))?;
+    let block = markdown.trim_end_matches(['\n', '\r']);
+    let new_content = if existing.trim().is_empty() {
+        format!("{block}\n")
+    } else {
+        format!("{}\n\n{block}\n", existing.trim_end_matches(['\n', '\r']))
+    };
+    std::fs::write(&path, &new_content).map_err(|e| format!("Salvataggio nota: {e}"))?;
+    let mtime = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        index_note(&conn, &slug, &new_content, mtime);
+    }
+    Ok(NoteMeta {
+        slug,
+        title: notes::note_title(&new_content),
+        excerpt: notes::note_excerpt(&new_content),
+        updated_at: mtime,
+    })
+}
+
 #[tauri::command]
 pub fn delete_note(app: AppHandle, slug: String) -> Result<(), String> {
     let dir = notes_dir(&app);

@@ -34,6 +34,7 @@
     aiEnabled = false,
     initialPage = null,
     onClose,
+    onSendToNote,
   }: {
     id: number;
     title: string;
@@ -41,6 +42,8 @@
     aiEnabled?: boolean;
     initialPage?: number | null;
     onClose: () => void;
+    /** Send the current selection (with its page) to a note; handled by +page. */
+    onSendToNote?: (content: string, page: number | null, pos: { x: number; y: number }) => void;
   } = $props();
 
   // ----- Zoom memory: remember the last used scale per document (localStorage) -----
@@ -687,6 +690,16 @@
     }
   }
 
+  /** Send the current selection (with its first page) to a note, via +page. */
+  function sendSelToNote(e: MouseEvent) {
+    if (!pending) return;
+    const quote = pending.quote?.trim() ?? "";
+    const page = [...pending.byPage.keys()][0] ?? null;
+    const pos = { x: e.clientX, y: e.clientY };
+    clearSelection();
+    if (quote) onSendToNote?.(quote, page, pos);
+  }
+
   async function saveNote() {
     if (!popover) return;
     const pid = popover.id;
@@ -1319,6 +1332,7 @@
 
   // ----- Right-click radial menu (coerenza con il resto dell'app) -----
   let viewerRadial = $state<{ x: number; y: number; items: RadialItem[] } | null>(null);
+  let radialAt = { x: 0, y: 0 }; // pointer at right-click, for a "Manda a nota" picker
 
   function buildViewerRadial(): RadialItem[] {
     const sel = currentSelection();
@@ -1326,6 +1340,17 @@
     if (sel) {
       const preview = sel.length > 40 ? sel.slice(0, 40) + "…" : sel;
       items.push({ id: "copysel", label: "Copia", hint: `Copia il testo selezionato: “${preview}”`, action: () => copySelection(sel) });
+      if (onSendToNote) {
+        const selText = sel;
+        const page = pending ? [...pending.byPage.keys()][0] ?? null : null;
+        const at = { x: radialAt.x, y: radialAt.y };
+        items.push({
+          id: "tonote",
+          label: "Manda a nota",
+          hint: "Manda la selezione a una nota, con citazione al paper",
+          action: () => onSendToNote?.(selText, page, at),
+        });
+      }
     }
     items.push(
       { id: "fitw", label: "Adatta larghezza", hint: "Larghezza pagina = finestra (W)", action: fitWidth },
@@ -1362,6 +1387,7 @@
     const t = e.target as HTMLElement | null;
     if (t?.closest(".hlpalette, .lenscard, .popover, .findbar, .morepop, .sharemenu, input, textarea")) return;
     e.preventDefault();
+    radialAt = { x: e.clientX, y: e.clientY }; // where a "Manda a nota" picker should open
     viewerRadial = { x: e.clientX, y: e.clientY, items: buildViewerRadial() };
   }
 
@@ -1658,6 +1684,12 @@
           <button class="hlc" style="background:{p.color}" onclick={() => saveHighlight(p.color)} title={p.label} aria-label={p.label}></button>
         {/each}
       </div>
+      {#if onSendToNote}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="hlnote" onmousedown={(e) => e.preventDefault()}>
+          <button onclick={sendSelToNote} title="Manda la selezione a una nota, con citazione a questo paper">→ Nota</button>
+        </div>
+      {/if}
       {#if aiEnabled}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="hlai" onmousedown={(e) => e.preventDefault()}>
@@ -2137,6 +2169,13 @@
   }
   .hlai button:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .hlai button:disabled { opacity: 0.55; cursor: default; }
+  .hlnote { display: flex; padding-left: 8px; border-left: 1px solid var(--border); }
+  .hlnote button {
+    height: 24px; padding: 0 8px; font-size: 12px; cursor: pointer;
+    background: var(--field); color: var(--accent);
+    border: 1px solid var(--border); border-radius: 6px; white-space: nowrap;
+  }
+  .hlnote button:hover { background: var(--accent-soft); border-color: var(--accent); }
 
   /* ---- Lente AI: floating result card ---- */
   .lenscard {

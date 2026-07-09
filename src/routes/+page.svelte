@@ -159,6 +159,8 @@
   import Constellation from "$lib/Constellation.svelte";
   import CitationMap from "$lib/CitationMap.svelte";
   import DetailPanel from "$lib/DetailPanel.svelte";
+  import SendToNotePicker from "$lib/SendToNotePicker.svelte";
+  import type { NotePayload } from "$lib/notecite";
 
   type Filter = {
     kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita" | "mywork" | "notes";
@@ -496,7 +498,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.8";
+  const APP_VERSION = "0.8.9";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3248,6 +3250,67 @@
   let noteRenaming = $state(false);
   let noteRenameValue = $state("");
 
+  // ----- "Manda a nota": send a selection / abstract / summary into a .md note -----
+  let sendNote = $state<{ payload: NotePayload; pos: { x: number; y: number } } | null>(null);
+  const sendNoteCurrent = $derived(
+    noteView ? { slug: noteView.slug, title: noteView.title } : null,
+  );
+  /** Open the destination picker for a piece of text originating from `d`. */
+  async function openSendToNote(
+    d: DocumentItem | null,
+    part: { content: string; label?: string; page?: number | null; collapse?: boolean },
+    pos: { x: number; y: number },
+  ) {
+    if (!d || !part.content.trim()) {
+      status = "Niente da mandare alla nota";
+      return;
+    }
+    // If the open note has an unsaved edit, get it onto disk BEFORE any append, so
+    // the append reads the flushed copy (not a stale one) and a later autosave
+    // can't overwrite the block. If the flush fails, abort rather than risk the
+    // draft — same discipline as openNote/newNote/commitRename.
+    if (noteView && !noteSaved) {
+      await flushNote();
+      if (!noteSaved) {
+        status = "Salvataggio della nota aperta non riuscito — riprova prima di mandarci del testo";
+        return;
+      }
+    }
+    sendNote = {
+      payload: {
+        content: part.content,
+        citekey: d.citekey ?? null,
+        title: d.title ?? "senza titolo",
+        page: part.page ?? null,
+        label: part.label ?? null,
+        collapse: part.collapse ?? false,
+      },
+      pos,
+    };
+  }
+  /** After an append: refresh the notes list, and reload the open note if it was the target. */
+  async function afterSendToNote(info: { slug: string; title: string }) {
+    try {
+      notesList = await listNotes();
+    } catch {
+      /* ignore */
+    }
+    // If we appended to the note currently open in the editor, reload it from disk
+    // (which now holds the flushed draft + the new block) so the editor shows it.
+    // Guard on noteSaved: if the user started a fresh edit while the picker was up,
+    // reloading would discard that unsaved draft — keep it, exactly like
+    // openNote/newNote/commitRename/refreshNotePreview.
+    if (noteView?.slug === info.slug && noteSaved) {
+      try {
+        noteView = await getNote(info.slug);
+        noteDraft = noteView.content_md;
+        noteSaved = true;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   async function openNotesView() {
     setFilter({ kind: "notes" });
     await loadNotes();
@@ -4859,6 +4922,7 @@
           await loadDocs();
           await loadSidebar();
         }}
+        onSendToNote={(p, ev) => { ev.stopPropagation(); openSendToNote(panelDoc, p, { x: ev.clientX, y: ev.clientY }); }}
       />
     {/if}
   </div>
@@ -4890,6 +4954,18 @@
       aiEnabled={!!aiStat?.enabled}
       initialPage={openDocPage}
       onClose={() => { openDoc = null; openDocPage = null; }}
+      onSendToNote={(content, page, pos) => openSendToNote(openDoc, { content, page, collapse: true }, pos)}
+    />
+  {/if}
+
+  {#if sendNote}
+    <SendToNotePicker
+      payload={sendNote.payload}
+      pos={sendNote.pos}
+      currentNote={sendNoteCurrent}
+      onstatus={(s) => (status = s)}
+      onclose={() => (sendNote = null)}
+      ondone={afterSendToNote}
     />
   {/if}
 
@@ -5712,6 +5788,7 @@
             <li><strong>Estrai tabella</strong> (icona griglia): trascina un rettangolo su una tabella → anteprima → esporta in CSV / Markdown / Excel (+ “migliora con AI”).</li>
             <li><strong>Estrai testo</strong> (icona testo): trascina un'area → copia il testo o salvalo in .txt/.md.</li>
             <li><strong>Lente AI</strong>: seleziona un passaggio → <em>Spiega</em>, <em>Traduci</em> o <em>Chiedi</em> — la risposta arriva in una scheda accanto al testo e puoi salvarla nelle note (richiede l'AI locale attiva).</li>
+            <li><strong>→ Nota</strong>: manda il testo selezionato in una nota .md (radiale o barretta dell'evidenziazione) — arriva come citazione, con il riferimento al paper in coda. Vedi <em>Note</em>.</li>
             <li>Le <strong>fonti numerate</strong> di «Chiedi alla libreria» aprono il PDF <strong>alla pagina giusta</strong>.</li>
           </ul>
           <table class="kbdtable">
@@ -5748,6 +5825,7 @@
             <li><strong>[[Collegamenti]]</strong> in stile wiki: <code>[[Titolo di un'altra nota]]</code> collega una nota; <code>[[@citekey]]</code> o <code>[[Titolo di un paper]]</code> collegano un documento della libreria (clic → apre la nota o il PDF). In fondo trovi i <strong>backlink</strong> (le note che rimandano a questa).</li>
             <li>Editor con <strong>anteprima</strong> e salvataggio automatico. <strong>Rinomina</strong> (o doppio clic sul titolo) cambia il titolo <em>e</em> il nome del file .md; sotto il titolo vedi il <strong>percorso</strong> del file, la data di creazione e l'ultima modifica.</li>
             <li><strong>Cercabili</strong>: cerca dalla barra in alto e le note che contengono il termine compaiono in un gruppo <strong>«Note»</strong> sopra la griglia (anche quelle modificate da un editor esterno — l'indice si riallinea a ogni avvio).</li>
+            <li><strong>Manda a nota</strong>: dal lettore, seleziona del testo → radiale o <em>→ Nota</em> nella barretta dell'evidenziazione; oppure nel pannello dei dettagli i pulsanti <em>→ Nota</em> accanto ad <strong>Abstract</strong> e <strong>Riassunto AI</strong>. Scegli la destinazione (la nota aperta, una recente o una nuova) e il testo entra come <strong>citazione</strong> con, in coda, il <strong>riferimento al paper</strong> (<code>[[@citekey]]</code>) — che diventa subito un backlink cliccabile.</li>
           </ul>
         </div>
 

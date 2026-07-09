@@ -31,6 +31,7 @@
     onAttach,
     onSummarize,
     onChanged,
+    onSendToNote,
   }: {
     doc: DocumentItem;
     tags: Tag[];
@@ -48,6 +49,11 @@
     onAttach: () => void;
     onSummarize: () => void;
     onChanged: () => void;
+    /** Send the abstract or AI summary to a note (with a citation to this paper). */
+    onSendToNote?: (
+      p: { content: string; label: string; collapse: boolean },
+      ev: MouseEvent,
+    ) => void;
   } = $props();
 
   let meta = $state<EditableMeta | null>(null);
@@ -186,7 +192,10 @@
 
   {#if meta?.summary}
     <div class="psec">
-      <h3>Riassunto AI</h3>
+      <div class="psechead">
+        <h3>Riassunto AI</h3>
+        {#if onSendToNote}<button class="tonote" title="Manda il riassunto a una nota (con citazione a questo paper)" onclick={(e) => onSendToNote?.({ content: meta?.summary ?? "", label: "Riassunto AI di", collapse: false }, e)}>→ Nota</button>{/if}
+      </div>
       <p class="pbody">{meta.summary}</p>
     </div>
   {:else if aiEnabled}
@@ -198,7 +207,10 @@
 
   {#if meta?.abstract_text}
     <div class="psec">
-      <h3>Abstract</h3>
+      <div class="psechead">
+        <h3>Abstract</h3>
+        {#if onSendToNote}<button class="tonote" title="Manda l'abstract a una nota (con citazione a questo paper)" onclick={(e) => onSendToNote?.({ content: meta?.abstract_text ?? "", label: "Abstract di", collapse: true }, e)}>→ Nota</button>{/if}
+      </div>
       <p class="pbody" class:clamp={!abstractOpen}>{meta.abstract_text}</p>
       {#if meta.abstract_text.length > 260}
         <button class="pmore plink" onclick={() => (abstractOpen = !abstractOpen)}>{abstractOpen ? "meno" : "tutto"}</button>
@@ -288,6 +300,13 @@
 
   .psec { margin-top: 16px; border-top: 1px solid var(--border-soft); padding-top: 10px; }
   .psec h3 { margin: 0 0 6px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; color: var(--faint); }
+  .psechead { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .psechead h3 { margin-bottom: 6px; }
+  .tonote {
+    background: transparent; border: 1px solid var(--border-soft); border-radius: 6px;
+    color: var(--accent); font-size: 11px; padding: 2px 8px; cursor: pointer; white-space: nowrap;
+  }
+  .tonote:hover { border-color: var(--accent); background: var(--accent-soft); }
   .pbody { margin: 0 0 6px; font-size: 12.5px; line-height: 1.55; color: var(--text); white-space: pre-line; }
   .pbody.dim { color: var(--faint); }
   .pbody.clamp { display: -webkit-box; -webkit-line-clamp: 5; line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
