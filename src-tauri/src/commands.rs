@@ -3429,18 +3429,28 @@ pub async fn formula_to_latex_ai(
 ) -> Result<String, String> {
     let (provider, url, model) = vision_target(&app, model)?;
     let b64 = strip_data_url(&image_base64).to_string();
+    // Ask explicitly for upright \mathrm on differentials/operators/units, which
+    // vision models otherwise emit as italic letters (e.g. `dx` instead of
+    // `\mathrm{d}x`), and reproduce faithfully whatever the source typesets upright.
+    let upright = "Match the source's upright vs italic exactly: use \\mathrm{...} for anything typeset \
+         upright — differentials (write \\mathrm{d}x, not dx), the constants e and i when upright, \
+         multi-letter operators, and units. Use \\operatorname{...} for named operators.";
     let prompt = if multi {
-        "You are an OCR engine for mathematics. Transcribe every equation in this image into LaTeX. \
-         If there are multiple stacked equations, output them inside \\begin{gathered} … \\end{gathered}, \
-         one per line separated by \\\\. Output ONLY the LaTeX for the math — no surrounding $ signs, \
-         no \\[ \\], no code fences, no explanation."
+        format!(
+            "You are an OCR engine for mathematics. Transcribe every equation in this image into LaTeX. \
+             If there are multiple stacked equations, output them inside \\begin{{gathered}} … \\end{{gathered}}, \
+             one per line separated by \\\\. {upright} Output ONLY the LaTeX for the math — no surrounding $ signs, \
+             no \\[ \\], no code fences, no explanation."
+        )
     } else {
-        "You are an OCR engine for mathematics. Transcribe the equation in this image into a single line \
-         of LaTeX. Output ONLY the LaTeX for the math — no surrounding $ signs, no \\[ \\], no code fences, \
-         no explanation."
+        format!(
+            "You are an OCR engine for mathematics. Transcribe the equation in this image into a single line \
+             of LaTeX. {upright} Output ONLY the LaTeX for the math — no surrounding $ signs, no \\[ \\], \
+             no code fences, no explanation."
+        )
     };
     let client = ai::client().map_err(|e| e.to_string())?;
-    let (out, _truncated) = ai::generate_vision(&client, &provider, &url, &model, prompt, &b64, 512)
+    let (out, _truncated) = ai::generate_vision(&client, &provider, &url, &model, &prompt, &b64, 512)
         .await
         .map_err(|e| format!("{e:#}"))?;
     let latex = clean_vision_latex(&out);

@@ -626,13 +626,47 @@ static RE_LET_NOLET: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"([a-zA-Z])\s+?([\W_^\d])").unwrap());
 static RE_NOLET_NOLET: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"([\W_^\d])\s+?([\W_^\d])").unwrap());
+// Math text-mode commands whose braced argument holds letters/operators with no
+// meaningful spaces: `\mathrm{d}` (differentials), `\operatorname{sign}`,
+// `\mathbf{v}` etc. Reference pix2tex collapses the spacing inside these up front
+// and treats them as atomic — without it, `\mathrm { d }` keeps spurious spaces
+// and a multi-letter `\operatorname{s i g n}` never rejoins (the generic passes
+// below never collapse a space between two letters), so the command around a
+// differential ends up looking mangled. `\text{…}` is deliberately excluded: its
+// spaces are literal, and the generic passes already leave letter-letter spaces
+// untouched, so it needs no protection.
+static RE_MATH_CMD: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\\(?:operatorname|mathrm|mathbf|mathbb|mathcal|mathsf|mathtt|mathfrak)\s*\*?\s*\{[^{}]*\}").unwrap()
+});
+// A space that MUST be kept: it terminates a control word (`\mu`, `\Sigma`) right
+// before a letter — dropping it would fuse them into an undefined command
+// (`\mu m` → `\mum`). Everything else inside a math command is safe to compact.
+static RE_KEEP_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\\[A-Za-z]+) +([A-Za-z])").unwrap());
+
+/// Compact the spacing inside a matched `\mathrm{…}`-style command: drop every
+/// space except the one that terminates a control word before a letter.
+fn compact_math_arg(m: &str) -> String {
+    // Protect required spaces with a sentinel (SOH, never in LaTeX), strip the rest,
+    // then restore. `\u{1}` can't appear in OCR output, so this is unambiguous.
+    RE_KEEP_SPACE
+        .replace_all(m, "$1\u{1}$2")
+        .replace(' ', "")
+        .replace('\u{1}', " ")
+}
 
 fn post_process(s: &str) -> String {
-    let mut s = s
+    let s = s
         .replace('Ġ', " ")
         .replace("[BOS]", "")
         .replace("[EOS]", "")
         .replace("[PAD]", "");
+    // Collapse the inner spacing of `\mathrm{…}` & math friends atomically so the
+    // generic passes below can't leave stray spaces — keeps e.g. `\mathrm { d } x`
+    // as `\mathrm{d}x` and `\operatorname{s i g n}` as `\operatorname{sign}`
+    // (pix2tex reference step).
+    let mut s = RE_MATH_CMD
+        .replace_all(&s, |c: &regex::Captures| compact_math_arg(&c[0]))
+        .into_owned();
     // Iterate the three space-collapsing passes until stable (pix2tex).
     for _ in 0..8 {
         let a = RE_NOLET_LET.replace_all(&s, "$1$2").into_owned();
@@ -713,6 +747,22 @@ mod tests {
     fn post_process_compacts_spacing() {
         assert_eq!(post_process("\\frac { 1 } { 2 }"), "\\frac{1}{2}");
         assert_eq!(post_process("x ^ { 2 } + y"), "x^{2}+y");
+    }
+
+    #[test]
+    fn post_process_preserves_mathrm() {
+        // The command survives and its inner spaces are compacted (differential `d`).
+        assert_eq!(post_process("\\int f \\mathrm { d } x"), "\\int f\\mathrm{d}x");
+        // A leading \mathrm must never be dropped or split from its backslash.
+        assert_eq!(post_process("\\mathrm { d } y"), "\\mathrm{d}y");
+        // Multi-letter operator names rejoin (the generic passes never would).
+        assert_eq!(post_process("\\operatorname { s i g n } ( x )"), "\\operatorname{sign}(x)");
+        // \mathbb / \mathbf single letters stay intact.
+        assert_eq!(post_process("\\mathbb { R } ^ { n }"), "\\mathbb{R}^{n}");
+        // A control word inside the arg keeps its terminating space: `\mu m`
+        // (micrometers) must NOT fuse into the undefined `\mum`.
+        assert_eq!(post_process("\\mathrm { \\mu m }"), "\\mathrm{\\mu m}");
+        assert_eq!(post_process("\\mathbf { \\Sigma x }"), "\\mathbf{\\Sigma x}");
     }
 
     /// Spike: end-to-end recognition against a real image. Runs only when
