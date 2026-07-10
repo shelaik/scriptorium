@@ -6790,7 +6790,7 @@ pub fn get_note(app: AppHandle, slug: String) -> Result<NoteView, String> {
     // Inline assets/ image references back into data-URIs so the preview renders
     // them (the webview can't resolve vault-relative paths). A missing image just
     // shows broken in the preview — only exports hard-fail on it.
-    let html = wiki::render_html(&notes::inline_assets(&woven, &dir).0);
+    let html = wiki::render_html_live(&notes::inline_assets(&woven, &dir).0);
 
     // Backlinks: other notes whose body references this note's slug or title.
     let this_title = notes::note_title(&content).to_lowercase();
@@ -6873,12 +6873,13 @@ pub fn export_note(app: AppHandle, slug: String, format: String, path: String) -
     }
 }
 
-/// Render draft Markdown to sanitized HTML for the live editor preview (math as
-/// MathML, images inline). No DB/weaving — `[[links]]` resolve on save/full preview.
+/// Render draft Markdown to sanitized HTML for the live editor preview (math as KaTeX
+/// placeholders the webview fills in, images inline). No DB/weaving — `[[links]]`
+/// resolve on save/full preview.
 #[tauri::command]
 pub fn preview_markdown(app: AppHandle, md: String) -> String {
     // The draft references images as assets/… — inline them so they render live.
-    wiki::render_html(&notes::inline_assets(&md, &notes_dir(&app)).0)
+    wiki::render_html_live(&notes::inline_assets(&md, &notes_dir(&app)).0)
 }
 
 /// The note as a self-contained HTML document (used to print it to PDF).
@@ -7292,7 +7293,7 @@ pub fn wiki_get(state: State<'_, AppState>, slug: String) -> Result<WikiPage, St
     };
     let md = wiki::link_citations(&content_md);
     let md = wiki::weave_links(&md, &others);
-    let html = wiki::render_html(&md);
+    let html = wiki::render_html_live(&md);
     let sources: Vec<WikiSource> = serde_json::from_str(&sources_json).unwrap_or_default();
     Ok(WikiPage { slug, concept, title, html, sources, generated_at, model })
 }
@@ -7743,7 +7744,7 @@ fn synth_sources(docs: &[SynthDoc]) -> Vec<ReviewSource> {
 }
 
 fn ai_doc_result(md: String, docs: &[SynthDoc]) -> AiDocResult {
-    let html = wiki::render_html(&wiki::link_citations(&md));
+    let html = wiki::render_html_live(&wiki::link_citations(&md));
     AiDocResult { md, html, sources: synth_sources(docs) }
 }
 

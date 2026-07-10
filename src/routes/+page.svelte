@@ -155,6 +155,7 @@
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
   import MetaEditor from "$lib/MetaEditor.svelte";
+  import { mathRender } from "$lib/math";
   import { printDocument, printDocuments, printHtml } from "$lib/print";
   import ShareMenu from "$lib/ShareMenu.svelte";
   import { revealDocument, openInBrowser, shareTo, type ShareTarget } from "$lib/share";
@@ -510,7 +511,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.32";
+  const APP_VERSION = "0.8.33";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -4713,7 +4714,7 @@
                 <span class="wikimeta">{wikiPage.sources.length} fonti · {wikiPage.model ?? ""}</span>
                 <button class="ghost small" onclick={() => runWikiGenerate(wikiPage!.concept)} disabled={wikiBusy} title="Rigenera la pagina con lo stato attuale della libreria">Rigenera</button>
               </header>
-              <article class="wikihtml" use:wikiLinksAction>
+              <article class="wikihtml" use:wikiLinksAction use:mathRender={wikiPage.html}>
                 <!-- eslint-disable-next-line svelte/no-at-html-tags -- HTML sanificato dal backend (ammonia) -->
                 {@html wikiPage.html}
               </article>
@@ -4829,7 +4830,7 @@
                   <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("- ")} title="Elenco puntato">•</button>
                   <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("1. ")} title="Elenco numerato">1.</button>
                   <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("> ")} title="Citazione">❝</button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdInsert("\n\n$$\n\n$$\n\n")} title="Blocco formula (LaTeX → MathML)">∑</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdInsert("\n\n$$\n\n$$\n\n")} title="Blocco formula LaTeX ($$…$$)">∑</button>
                   <button onmousedown={keepEditorFocus} onclick={() => mdInsert("\n\n---\n\n")} title="Separatore orizzontale">―</button>
                   <span class="edsep"></span>
                   <button onmousedown={keepEditorFocus} onclick={() => mdMoveBlock(-1)} title="Sposta su il blocco (paragrafo/immagine)">↑</button>
@@ -4849,14 +4850,14 @@
                     spellcheck="false"
                   ></textarea>
                   {#if noteMode === "split"}
-                    <article class="wikihtml notehtml livepreview">
+                    <article class="wikihtml notehtml livepreview" use:mathRender={livePreviewHtml}>
                       <!-- eslint-disable-next-line svelte/no-at-html-tags -- HTML sanificato dal backend (ammonia) -->
                       {@html livePreviewHtml}
                     </article>
                   {/if}
                 </div>
               {:else}
-                <article class="wikihtml notehtml" use:noteLinksAction>
+                <article class="wikihtml notehtml" use:noteLinksAction use:mathRender={noteView.html}>
                   <!-- eslint-disable-next-line svelte/no-at-html-tags -- HTML sanificato dal backend (ammonia) -->
                   {@html noteView.html}
                 </article>
@@ -5530,7 +5531,7 @@
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) aiDoc = null; }} role="presentation">
       <div class="idmodal aidocmodal" role="dialog" tabindex="-1" aria-label={aiDoc.title} onclick={(e) => e.stopPropagation()}>
         <h2>{aiDoc.title}</h2>
-        <article class="wikihtml aidochtml" use:aiDocLinksAction>
+        <article class="wikihtml aidochtml" use:aiDocLinksAction use:mathRender={aiDoc.html}>
           <!-- HTML sanificato dal backend (ammonia) -->
           {@html aiDoc.html}
         </article>
@@ -7774,7 +7775,10 @@
     .noteedwrap.split .noteeditor, .livepreview { height: 44vh; }
   }
   .notehtml { margin-top: 14px; }
-  /* Rendered math (MathML) and the raw-LaTeX fallback in the note/wiki preview. */
+  /* KaTeX math (in-app) — display math on its own centered line; long formulas scroll. */
+  :global(span.tex.block) { display: block; margin: 0.4em 0; }
+  :global(span.tex.block .katex-display) { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+  /* Rendered math (MathML, exports) and the raw-LaTeX fallback in the note/wiki preview. */
   .notehtml :global(math[display="block"]), .wikihtml :global(math[display="block"]) {
     display: block; margin: 1em 0; overflow-x: auto; font-size: 1.08em;
   }

@@ -19,8 +19,9 @@
   } from "$lib/api";
   import { printDocument } from "$lib/print";
   import { revealDocument } from "$lib/share";
-  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, writeBinaryFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, textFromImageAi, getAiSettings, aiListModels, previewMarkdown } from "$lib/api";
+  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, writeBinaryFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, textFromImageAi, getAiSettings, aiListModels } from "$lib/api";
   import { escapeLatex, textToLatex, tableToLatex, tableToMarkdown, tableToCsv } from "$lib/latex";
+  import { renderMathString } from "$lib/math";
   import { save } from "@tauri-apps/plugin-dialog";
   import ShareMenu from "$lib/ShareMenu.svelte";
   import RadialMenu from "$lib/RadialMenu.svelte";
@@ -216,40 +217,35 @@
   let formulaEmpty = $state(false); // OCR ran and recognized nothing (an emptied EDITOR must stay mounted)
   let formulaReq = 0; // epoch token: a stale recognition must not overwrite a newer one
   let formulaEngine = $state<"local" | "ollama">("local"); // bundled math-OCR vs vision LLM
-  // Rendered (MathML) preview of the recognized LaTeX, updated live while editing
-  // so OCR mistakes can be spotted and corrected on the spot.
+  // KaTeX preview of the recognized LaTeX, updated live while editing so OCR mistakes
+  // can be spotted and corrected on the spot. `formulaInvalid` carries KaTeX's parse
+  // error (empty when the formula is valid) → the editor flags a broken formula.
   let formulaPreviewHtml = $state("");
+  let formulaInvalid = $state("");
   let formulaPrevTimer: ReturnType<typeof setTimeout> | undefined;
-  let formulaPrevSeq = 0; // guards against a slow render landing after a newer edit
   function scheduleFormulaPreview() {
     clearTimeout(formulaPrevTimer);
-    formulaPrevTimer = setTimeout(renderFormulaPreview, 300);
+    formulaPrevTimer = setTimeout(renderFormulaPreview, 200);
   }
-  async function renderFormulaPreview() {
-    const seq = ++formulaPrevSeq;
-    // Normalize before wrapping in $$…$$: strip delimiters the user may have
-    // pasted back (a $$ inside would split the block), and collapse blank lines
-    // (they'd break the markdown paragraph and kill the math parsing). Keep the
-    // line structure when a % comment is present — it's line-scoped in LaTeX.
-    let l = formulaLatex.trim().replace(/^\$\$\s*/, "").replace(/\s*\$\$$/, "").trim();
-    l = l.includes("%") ? l.replace(/\n[ \t]*\n\s*/g, "\n") : l.replace(/\s+/g, " ");
+  function renderFormulaPreview() {
+    // The editor holds pure LaTeX — render it straight with KaTeX (no markdown round-trip):
+    // richer coverage than MathML, correct upright \mathrm (fractions/scripts included),
+    // native gathered/aligned. Strip any math delimiters the user may have pasted back.
+    const l = formulaLatex
+      .trim()
+      .replace(/^\$\$?\s*/, "")
+      .replace(/\s*\$\$?$/, "")
+      .replace(/^\\\[\s*/, "")
+      .replace(/\s*\\\]$/, "")
+      .trim();
     if (!l) {
       formulaPreviewHtml = "";
+      formulaInvalid = "";
       return;
     }
-    try {
-      // Same pipeline as the notes preview: $$…$$ → MathML via latex2mathml
-      // (multi-line gathered blocks are split into stacked equations).
-      let html = await previewMarkdown(`$$\n${l}\n$$`);
-      // latex2mathml only makes *top-level* letters upright for \mathrm{…}; nested
-      // ones (fractions, sub/superscripts, roots) stay italic. Real LaTeX/KaTeX make
-      // the whole group upright, so when the entire formula is \mathrm-wrapped we mark
-      // every plain <mi> (italic default) normal, matching the exported LaTeX.
-      if (isWrappedInMathrm(formulaLatex.trim())) html = html.replaceAll("<mi>", '<mi mathvariant="normal">');
-      if (seq === formulaPrevSeq) formulaPreviewHtml = html;
-    } catch {
-      /* keep the last good preview */
-    }
+    const { html, error } = renderMathString(l, true);
+    formulaPreviewHtml = html;
+    formulaInvalid = error;
   }
 
   /** Makes a modal card draggable by its header (.tablehd): the extraction windows
@@ -1089,9 +1085,8 @@
     formulaError = "";
     formulaEmpty = false;
     formulaPreviewHtml = "";
-    // Invalidate any in-flight/scheduled preview from the previous formula, so a
-    // slow render can't land in this run's modal.
-    ++formulaPrevSeq;
+    formulaInvalid = "";
+    // Cancel any scheduled preview from the previous formula.
     clearTimeout(formulaPrevTimer);
     try {
       let out: string;
@@ -2570,12 +2565,15 @@
                 <span class="felbl">Anteprima resa {formulaFormat === "md" ? "(blocco $$…$$)" : ""}</span>
                 <div class="formulaprev">
                   {#if formulaPreviewHtml}
-                    <!-- eslint-disable-next-line svelte/no-at-html-tags -- HTML sanificato dal backend (ammonia) -->
+                    <!-- eslint-disable-next-line svelte/no-at-html-tags -- resa da KaTeX (trust:false, nessuno script) -->
                     {@html formulaPreviewHtml}
                   {:else}
-                    <p class="tdim">Rendo la formula…</p>
+                    <p class="tdim">{formulaInvalid ? "Impossibile rendere la formula." : "Anteprima vuota."}</p>
                   {/if}
                 </div>
+                {#if formulaInvalid}
+                  <p class="feinvalid" title={formulaInvalid}>⚠ LaTeX non valido — controlla la formula</p>
+                {/if}
               </div>
             </div>
           {/if}
@@ -2816,7 +2814,7 @@
     display: block; max-width: 100%; max-height: 190px; margin: 0 auto 12px;
     padding: 8px; background: #fff; border: 1px solid var(--border); border-radius: 8px;
   }
-  /* Formula: editable LaTeX on the left, live rendered (MathML) preview right. */
+  /* Formula: editable LaTeX on the left, live KaTeX-rendered preview on the right. */
   .formulaedit { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: stretch; }
   .fecol { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
   .felbl { font-size: 11px; color: var(--dim); }
@@ -2826,14 +2824,10 @@
     background: var(--field); border: 1px solid var(--border); border-radius: 8px;
     padding: 12px 14px; display: flex; flex-direction: column; justify-content: center;
   }
-  .formulaprev :global(math) { font-size: 1.3em; }
-  .formulaprev :global(math[display="block"]) { display: block; margin: 0.5em 0; overflow-x: auto; }
-  .formulaprev :global(.mathraw) {
-    background: var(--accent-soft); color: var(--accent); padding: 1px 5px;
-    border-radius: 4px; font-family: ui-monospace, Consolas, monospace; font-size: 0.85em;
-    word-break: break-all;
-  }
+  .formulaprev :global(.katex) { font-size: 1.35em; }
+  .formulaprev :global(.katex-display) { margin: 0.3em 0; overflow-x: auto; overflow-y: hidden; }
   .formulaprev :global(p) { margin: 0; }
+  .feinvalid { font-size: 12px; color: var(--warn, #b45309); margin: 4px 0 0; }
   @media (max-width: 760px) {
     .formulaedit { grid-template-columns: 1fr; }
   }

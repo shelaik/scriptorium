@@ -288,18 +288,62 @@ fn render_one(latex: &str, block: bool) -> String {
     }
 }
 
-/// Markdown → sanitized HTML (same recipe as the GitHub README preview: pulldown-cmark
-/// then ammonia, which keeps fragment hrefs like `#src-1`). `$…$` / `$$…$$` math is
-/// rendered to MathML; embedded `data:image/…` figures are kept on `<img src>`.
+/// How `$…$` / `$$…$$` math is emitted by the markdown renderer.
+enum MathMode {
+    /// Self-contained MathML (latex2mathml) — for the HTML/PDF exports, which open
+    /// outside the app and must render with no JavaScript.
+    MathML,
+    /// A `<span class="tex">` placeholder carrying the raw LaTeX. The in-app webview
+    /// fills it in with KaTeX after injection (richer coverage than MathML: correct
+    /// upright `\mathrm`, native gathered/aligned). Never put this in an exported file.
+    Live,
+}
+
+/// A raw-LaTeX placeholder the frontend renders with KaTeX. The TeX is the span's text
+/// content (HTML-escaped so it survives sanitization intact); `block` → display math.
+fn tex_placeholder(tex: &str, block: bool) -> String {
+    let esc = tex.trim().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let cls = if block { "tex block" } else { "tex" };
+    format!("<span class=\"{cls}\">{esc}</span>")
+}
+
+/// Markdown → sanitized HTML with math as **self-contained MathML**. Used by the HTML
+/// and PDF exports (`mdexport`), which must display formulas without any JavaScript.
 pub fn render_html(md: &str) -> String {
+    render_html_mode(md, MathMode::MathML)
+}
+
+/// Markdown → sanitized HTML for **in-app display**: math is left as a `<span class="tex">`
+/// placeholder that the webview renders with KaTeX. Do NOT use for a file leaving the app
+/// (the placeholders are inert without the app's bundled KaTeX).
+pub fn render_html_live(md: &str) -> String {
+    render_html_mode(md, MathMode::Live)
+}
+
+/// Shared markdown→HTML pipeline (pulldown-cmark then ammonia, which keeps fragment
+/// hrefs like `#src-1`). `math` selects how `$…$` / `$$…$$` are emitted; embedded
+/// `data:image/…` figures are kept on `<img src>`.
+fn render_html_mode(md: &str, math: MathMode) -> String {
     use pulldown_cmark::{html, Event, Options, Parser};
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_MATH);
     let parser = Parser::new_ext(md, opts).map(|ev| match ev {
-        Event::InlineMath(tex) => Event::InlineHtml(render_math(&tex, false).into()),
-        Event::DisplayMath(tex) => Event::Html(render_math(&tex, true).into()),
+        Event::InlineMath(tex) => Event::InlineHtml(
+            match math {
+                MathMode::MathML => render_math(&tex, false),
+                MathMode::Live => tex_placeholder(&tex, false),
+            }
+            .into(),
+        ),
+        Event::DisplayMath(tex) => Event::Html(
+            match math {
+                MathMode::MathML => render_math(&tex, true),
+                MathMode::Live => tex_placeholder(&tex, true),
+            }
+            .into(),
+        ),
         other => other,
     });
     let mut unsafe_html = String::new();
@@ -312,6 +356,9 @@ pub fn render_html(md: &str) -> String {
     b.add_url_schemes(["data"]);
     b.add_tags(MATHML_TAGS);
     b.add_generic_attributes(MATHML_ATTRS);
+    // Keep `class` so the KaTeX placeholders (`<span class="tex">`) and the raw-LaTeX
+    // fallback (`<code class="mathraw">`) survive sanitization. `class` is inert.
+    b.add_generic_attributes(["class"]);
     b.attribute_filter(|element, attribute, value| {
         // Normalize like the URL parser (trim leading whitespace, lowercase the
         // scheme) so a mixed-case `DATA:` or ` data:` can't slip past on a non-img
@@ -352,6 +399,24 @@ mod tests {
         // A data: image survives, code fences are NOT math-rendered.
         let c = render_html("```\n$x=1$\n```\n");
         assert!(!c.contains("<math"), "math inside a code fence must stay literal: {c}");
+    }
+
+    #[test]
+    fn live_math_is_a_katex_placeholder() {
+        // In-app rendering leaves math as a `<span class="tex">RAW LaTeX</span>` for KaTeX:
+        // no MathML, the raw LaTeX preserved verbatim (escaped), block math flagged.
+        let h = render_html_live("Inline $a<b$ e blocco:\n\n$$\\frac{a}{b}$$\n");
+        assert!(!h.contains("<math"), "live mode must not emit MathML: {h}");
+        assert!(h.contains("<span class=\"tex\">a&lt;b</span>"), "inline placeholder, escaped: {h}");
+        assert!(h.contains("<span class=\"tex block\">"), "display math flagged block: {h}");
+        assert!(h.contains("\\frac{a}{b}"), "raw LaTeX preserved for KaTeX: {h}");
+        // Multi-line environments are handed to KaTeX whole (it does gathered/aligned).
+        let g = render_html_live("$$\\begin{gathered} a=b \\\\ c=d \\end{gathered}$$");
+        assert!(g.contains("\\begin{gathered}"), "environment kept intact for KaTeX: {g}");
+        assert_eq!(g.matches("<span class=\"tex").count(), 1, "one placeholder, not pre-split: {g}");
+        // Code fences are still never treated as math.
+        let c = render_html_live("```\n$x=1$\n```\n");
+        assert!(!c.contains("class=\"tex\""), "math inside a code fence stays literal: {c}");
     }
 
     #[test]
