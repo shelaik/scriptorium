@@ -157,9 +157,10 @@ export const writeTextFile = (path: string, content: string) =>
 /** Write raw bytes (from a base64/data-URL string) to a file — used to save a PNG. */
 export const writeBinaryFile = (path: string, base64: string) =>
   invoke<void>("write_binary_file", { path, base64 });
-/** Read an image file from disk as a `data:<mime>;base64,…` URL (for OS drag&drop into a note). */
-export const readImageDataUrl = (path: string) =>
-  invoke<string>("read_image_data_url", { path });
+/** Store a pasted image (base64 data-URL) in the notes vault's assets/; returns the short `assets/…` ref. */
+export const saveNoteAsset = (base64: string) => invoke<string>("save_note_asset", { base64 });
+/** Copy an image file from disk into the notes vault's assets/ (OS drag&drop); returns the `assets/…` ref. */
+export const importNoteAsset = (path: string) => invoke<string>("import_note_asset", { path });
 
 /** List documents, newest first, optionally filtered by tag, collection or flag. */
 export const listDocuments = (filter?: {

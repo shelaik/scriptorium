@@ -101,7 +101,8 @@
     discoverAdd,
     exploreCitations,
     writeTextFile,
-    readImageDataUrl,
+    saveNoteAsset,
+    importNoteAsset,
     type CitationNeighbors,
     getObsidianVault,
     setObsidianVault,
@@ -509,7 +510,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.27";
+  const APP_VERSION = "0.8.28";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3325,6 +3326,10 @@
   });
   let noteView = $state<NoteView | null>(null);
   let noteDraft = $state(""); // raw markdown in the editor
+  /** Normalize newlines when loading a note from disk: the textarea's value/API
+   *  is LF-only (the DOM normalizes CRLF), so a CRLF file edited in Notepad would
+   *  desync every selection offset from noteDraft and corrupt toolbar edits. */
+  const normNl = (s: string) => s.replace(/\r\n?/g, "\n");
   let noteMode = $state<"edit" | "preview" | "split">("preview");
   let livePreviewHtml = $state(""); // rendered draft for the side-by-side "Affiancato" view
   let livePreviewTimer: ReturnType<typeof setTimeout> | undefined;
@@ -3391,7 +3396,7 @@
     if (noteView?.slug === info.slug && noteSaved) {
       try {
         noteView = await getNote(info.slug);
-        noteDraft = noteView.content_md;
+        noteDraft = normNl(noteView.content_md);
         noteSaved = true;
       } catch {
         /* ignore */
@@ -3423,7 +3428,7 @@
     }
     try {
       noteView = await getNote(slug);
-      noteDraft = noteView.content_md;
+      noteDraft = normNl(noteView.content_md);
       noteMode = "preview";
       noteSaved = true;
     } catch (e) {
@@ -3472,34 +3477,53 @@
   }
   // ----- Lightweight Markdown formatting toolbar over the note editor -----
   let noteEditorEl = $state<HTMLTextAreaElement | null>(null);
-  function focusNoteRange(a: number, b: number) {
-    tick().then(() => {
-      const el = noteEditorEl;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(a, b);
-    });
+  /** Toolbar buttons call preventDefault on mousedown so the textarea never loses
+   *  focus (and its selection) while clicking them. */
+  const keepEditorFocus = (e: MouseEvent) => e.preventDefault();
+  /** Apply a text edit to the editor IN PLACE: unlike reassigning noteDraft (which
+   *  replaces the whole value, throws the caret to the end and scrolls the view
+   *  there), this preserves the scroll position and the caret. execCommand keeps
+   *  the edit in the browser's undo stack (Ctrl+Z works); setRangeText is the
+   *  fallback. State is synced from the DOM afterwards. */
+  function applyNoteEdit(start: number, end: number, text: string, selA: number, selB: number) {
+    const el = noteEditorEl;
+    if (!el) return;
+    const st = el.scrollTop;
+    el.focus();
+    el.setSelectionRange(start, end);
+    let done = false;
+    try {
+      done = text.length > 0 && document.execCommand("insertText", false, text);
+    } catch {
+      done = false;
+    }
+    if (!done) el.setRangeText(text, start, end, "preserve");
+    el.setSelectionRange(selA, selB);
+    el.scrollTop = st;
+    noteDraft = el.value;
+    onNoteInput();
   }
-  /** Wrap the current selection in `pre`/`post` (e.g. **bold**, *italic*, `code`). */
+  /** Wrap the current selection in `pre`/`post` (e.g. **bold**, *italic*, `code`).
+   *  All offsets/slices use el.value — the same LF-normalized space as the DOM
+   *  selection — never noteDraft, which could lag or differ in newline flavor. */
   function mdWrap(pre: string, post: string, placeholder = "testo") {
     const el = noteEditorEl;
     if (!el) return;
     const s = el.selectionStart, e = el.selectionEnd;
-    const sel = noteDraft.slice(s, e) || placeholder;
-    noteDraft = noteDraft.slice(0, s) + pre + sel + post + noteDraft.slice(e);
-    onNoteInput();
-    focusNoteRange(s + pre.length, s + pre.length + sel.length);
+    const sel = el.value.slice(s, e) || placeholder;
+    applyNoteEdit(s, e, pre + sel + post, s + pre.length, s + pre.length + sel.length);
   }
   /** Apply a line prefix to every selected line: headings (replace level), lists,
    *  quotes (toggle). */
   function mdLinePrefix(prefix: string, heading = false) {
     const el = noteEditorEl;
     if (!el) return;
+    const text = el.value;
     const s = el.selectionStart, e = el.selectionEnd;
-    const lineStart = noteDraft.lastIndexOf("\n", s - 1) + 1;
-    let lineEnd = noteDraft.indexOf("\n", e);
-    if (lineEnd === -1) lineEnd = noteDraft.length;
-    const block = noteDraft.slice(lineStart, lineEnd);
+    const lineStart = text.lastIndexOf("\n", s - 1) + 1;
+    let lineEnd = text.indexOf("\n", e);
+    if (lineEnd === -1) lineEnd = text.length;
+    const block = text.slice(lineStart, lineEnd);
     const newBlock = block
       .split("\n")
       .map((ln) => {
@@ -3507,22 +3531,17 @@
         return ln.startsWith(prefix) ? ln.slice(prefix.length) : prefix + ln;
       })
       .join("\n");
-    noteDraft = noteDraft.slice(0, lineStart) + newBlock + noteDraft.slice(lineEnd);
-    onNoteInput();
-    focusNoteRange(lineStart, lineStart + newBlock.length);
+    applyNoteEdit(lineStart, lineEnd, newBlock, lineStart, lineStart + newBlock.length);
   }
   /** Insert text at the cursor (formula block, horizontal rule…). */
   function mdInsert(text: string) {
     const el = noteEditorEl;
     if (!el) return;
     const s = el.selectionStart, e = el.selectionEnd;
-    noteDraft = noteDraft.slice(0, s) + text + noteDraft.slice(e);
-    onNoteInput();
-    const caret = s + text.length;
-    focusNoteRange(caret, caret);
+    applyNoteEdit(s, e, text, s + text.length, s + text.length);
   }
-  // ----- Drop or paste images straight into the note (embedded as base64) -----
-  const NOTE_IMG_MAX_BYTES = 20 * 1024 * 1024; // keep a single embedded image sane
+  // ----- Drop or paste images straight into the note (stored in assets/) -----
+  const NOTE_IMG_MAX_BYTES = 20 * 1024 * 1024; // same cap as the backend store
   function readAsDataUrl(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const r = new FileReader();
@@ -3539,12 +3558,15 @@
   function noteEditorActive(): boolean {
     return filter.kind === "notes" && !!noteView && (noteMode === "edit" || noteMode === "split");
   }
-  /** Splice already-rendered `![alt](data:…)` blocks into the draft at the caret,
-   *  but only if we're still on the same note we started from — the async read of a
-   *  large image can outlast a note switch, and writing into the new note would
-   *  silently corrupt it (same discipline as the flushNote slug guard). */
+  /** Splice already-rendered `![alt](…)` blocks into the draft at the caret, but
+   *  only if we're still on the same note we started from — the async round-trips
+   *  can outlast a note switch, and writing into the new note would silently
+   *  corrupt it (same discipline as the flushNote slug guard). If the text changed
+   *  while the images were being stored, the drop-time offsets are stale: insert
+   *  at the CURRENT caret instead of overwriting freshly typed text. */
   function commitNoteImages(
-    targetSlug: string, s: number, e: number, blocks: string[], skipped: number, total: number,
+    targetSlug: string, s: number, e: number, valueSnapshot: string,
+    blocks: string[], skipped: number, total: number,
   ) {
     if (noteView?.slug !== targetSlug) {
       status = "Immagine non inserita: hai cambiato appunto durante la lettura";
@@ -3555,20 +3577,33 @@
       return;
     }
     const snippet = "\n\n" + blocks.join("\n\n") + "\n\n";
-    noteDraft = noteDraft.slice(0, s) + snippet + noteDraft.slice(e);
-    onNoteInput();
-    const caret = s + snippet.length;
-    focusNoteRange(caret, caret);
+    const el = noteEditorEl;
+    // Don't yank focus from another field (rename box, search…) mid-typing.
+    const active = document.activeElement;
+    const focusElsewhere =
+      active !== el && (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement);
+    if (el && !focusElsewhere) {
+      let a = s, b = e;
+      if (el.value !== valueSnapshot) a = b = el.selectionEnd; // stale offsets → current caret
+      applyNoteEdit(a, b, snippet, a + snippet.length, a + snippet.length);
+    } else {
+      // Editor not insertable right now: splice into state at (clamped) offsets.
+      const a = Math.min(s, noteDraft.length), b = Math.min(e, noteDraft.length);
+      noteDraft = noteDraft.slice(0, a) + snippet + noteDraft.slice(b);
+      onNoteInput();
+    }
     const done = blocks.length === 1 && total === 1 ? "Immagine inserita ✓" : `${blocks.length} immagini inserite ✓`;
     status = skipped ? `${done} · ${skipped} saltate (troppo grandi o illeggibili)` : done;
   }
-  /** Embed one or more image *files* (paste, or HTML5 drop) at the cursor. */
+  /** Insert one or more image *files* (paste, or HTML5 drop) at the cursor. The
+   *  bytes go to the vault's assets/ folder; the note gets a short reference. */
   async function insertNoteImages(files: File[]) {
     const imgs = files.filter((f) => f.type.startsWith("image/"));
     if (!imgs.length || !noteView) return;
     const target = noteView.slug;
     const el = noteEditorEl;
-    // Snapshot the caret BEFORE the async reads (see commitNoteImages).
+    // Snapshot caret AND text BEFORE the async round-trips (see commitNoteImages).
+    const snap = el ? el.value : noteDraft;
     const s = el ? el.selectionStart : noteDraft.length;
     const e = el ? el.selectionEnd : noteDraft.length;
     const blocks: string[] = [];
@@ -3576,18 +3611,21 @@
     for (const f of imgs) {
       if (f.size > NOTE_IMG_MAX_BYTES) { skipped++; continue; }
       try {
-        blocks.push(`![${imgAlt(f.name)}](${await readAsDataUrl(f)})`);
+        const rel = await saveNoteAsset(await readAsDataUrl(f));
+        blocks.push(`![${imgAlt(f.name)}](${rel})`);
       } catch {
         skipped++;
       }
     }
-    commitNoteImages(target, s, e, blocks, skipped, imgs.length);
+    commitNoteImages(target, s, e, snap, blocks, skipped, imgs.length);
   }
-  /** Embed images given by filesystem *path* (OS drag&drop, read on the backend). */
+  /** Insert images given by filesystem *path* (OS drag&drop): the backend copies
+   *  them into assets/ and returns the short reference. */
   async function insertNoteImagePaths(paths: string[]) {
     if (!paths.length || !noteView) return;
     const target = noteView.slug;
     const el = noteEditorEl;
+    const snap = el ? el.value : noteDraft;
     const s = el ? el.selectionStart : noteDraft.length;
     const e = el ? el.selectionEnd : noteDraft.length;
     const blocks: string[] = [];
@@ -3595,12 +3633,12 @@
     for (const p of paths) {
       try {
         const name = p.split(/[\\/]/).pop() || "immagine";
-        blocks.push(`![${imgAlt(name)}](${await readImageDataUrl(p)})`);
+        blocks.push(`![${imgAlt(name)}](${await importNoteAsset(p)})`);
       } catch {
         skipped++;
       }
     }
-    commitNoteImages(target, s, e, blocks, skipped, paths.length);
+    commitNoteImages(target, s, e, snap, blocks, skipped, paths.length);
   }
   // NOTE: on Windows/WebView2 Tauri's native drag-drop (dragDropEnabled, default on)
   // intercepts OS file drops, so these HTML5 handlers never receive files — the real
@@ -3640,7 +3678,7 @@
     const el = noteEditorEl;
     if (!el) return;
     const caret = el.selectionStart;
-    const text = noteDraft;
+    const text = el.value;
     const bounds: [number, number][] = [];
     let start = 0;
     for (const m of text.matchAll(/\n{2,}/g)) {
@@ -3652,16 +3690,23 @@
     if (idx === -1) idx = bounds.length - 1;
     const j = idx + dir;
     if (j < 0 || j >= bounds.length) return;
-    const blocks = bounds.map(([a, b]) => text.slice(a, b));
+    const [ia, ib] = bounds[idx];
+    const [ja, jb] = bounds[j];
+    const blockI = text.slice(ia, ib);
+    const blockJ = text.slice(ja, jb);
     // Don't shuffle an empty leading/trailing block (from 2+ trailing newlines): that
     // would just inject blank lines instead of being a no-op.
-    if (!blocks[idx].trim() || !blocks[j].trim()) return;
-    [blocks[idx], blocks[j]] = [blocks[j], blocks[idx]];
-    noteDraft = blocks.join("\n\n");
-    onNoteInput();
-    let np = 0;
-    for (let i = 0; i < j; i++) np += blocks[i].length + 2;
-    focusNoteRange(np, np + blocks[j].length);
+    if (!blockI.trim() || !blockJ.trim()) return;
+    // Swap ONLY the two neighbouring blocks, keeping the separator between them
+    // verbatim — no whole-text rewrite, so other blank runs and the view survive.
+    if (dir === 1) {
+      const repl = blockJ + text.slice(ib, ja) + blockI;
+      const selA = ia + repl.length - blockI.length;
+      applyNoteEdit(ia, jb, repl, selA, selA + blockI.length);
+    } else {
+      const repl = blockI + text.slice(jb, ia) + blockJ;
+      applyNoteEdit(ja, ib, repl, ja, ja + blockI.length);
+    }
   }
   /** Export the open note to a self-contained HTML page or a LaTeX document. */
   async function exportNoteAs(fmt: "html" | "latex") {
@@ -3738,7 +3783,7 @@
     if (noteView) {
       try {
         noteView = await getNote(noteView.slug);
-        noteDraft = noteView.content_md;
+        noteDraft = normNl(noteView.content_md);
       } catch {
         /* keep the current view */
       }
@@ -4772,23 +4817,23 @@
               </div>
               {#if noteMode === "edit" || noteMode === "split"}
                 <div class="noteedtoolbar" role="toolbar" aria-label="Formattazione">
-                  <button onclick={() => mdLinePrefix("# ", true)} title="Titolo (H1)"><b>T</b></button>
-                  <button onclick={() => mdLinePrefix("## ", true)} title="Sottotitolo (H2)">T₂</button>
-                  <button onclick={() => mdLinePrefix("### ", true)} title="Titolo minore (H3)">T₃</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("# ", true)} title="Titolo (H1)"><b>T</b></button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("## ", true)} title="Sottotitolo (H2)">T₂</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("### ", true)} title="Titolo minore (H3)">T₃</button>
                   <span class="edsep"></span>
-                  <button onclick={() => mdWrap("**", "**", "grassetto")} title="Grassetto"><b>B</b></button>
-                  <button onclick={() => mdWrap("*", "*", "corsivo")} title="Corsivo"><i>I</i></button>
-                  <button onclick={() => mdWrap("`", "`", "codice")} title="Codice inline"><code>‹›</code></button>
-                  <button onclick={() => mdWrap("[", "](https://)", "testo")} title="Collegamento">🔗</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("**", "**", "grassetto")} title="Grassetto"><b>B</b></button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("*", "*", "corsivo")} title="Corsivo"><i>I</i></button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("`", "`", "codice")} title="Codice inline"><code>‹›</code></button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("[", "](https://)", "testo")} title="Collegamento">🔗</button>
                   <span class="edsep"></span>
-                  <button onclick={() => mdLinePrefix("- ")} title="Elenco puntato">•</button>
-                  <button onclick={() => mdLinePrefix("1. ")} title="Elenco numerato">1.</button>
-                  <button onclick={() => mdLinePrefix("> ")} title="Citazione">❝</button>
-                  <button onclick={() => mdInsert("\n\n$$\n\n$$\n\n")} title="Blocco formula (LaTeX → MathML)">∑</button>
-                  <button onclick={() => mdInsert("\n\n---\n\n")} title="Separatore orizzontale">―</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("- ")} title="Elenco puntato">•</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("1. ")} title="Elenco numerato">1.</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("> ")} title="Citazione">❝</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdInsert("\n\n$$\n\n$$\n\n")} title="Blocco formula (LaTeX → MathML)">∑</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdInsert("\n\n---\n\n")} title="Separatore orizzontale">―</button>
                   <span class="edsep"></span>
-                  <button onclick={() => mdMoveBlock(-1)} title="Sposta su il blocco (paragrafo/immagine)">↑</button>
-                  <button onclick={() => mdMoveBlock(1)} title="Sposta giù il blocco (paragrafo/immagine)">↓</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdMoveBlock(-1)} title="Sposta su il blocco (paragrafo/immagine)">↑</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdMoveBlock(1)} title="Sposta giù il blocco (paragrafo/immagine)">↓</button>
                 </div>
                 <div class="noteedwrap" class:split={noteMode === "split"}>
                   <textarea
@@ -4829,7 +4874,7 @@
                 <p class="big">I tuoi appunti</p>
                 <p>Appunti in <strong>Markdown</strong>, salvati come <strong>file .md veri</strong> nella cartella degli appunti — restano tuoi, leggibili e modificabili anche da terminale o da qualsiasi editor.</p>
                 <p class="dimtext">Collega con <code>[[Titolo appunto]]</code> o un paper con <code>[[@citekey]]</code> / <code>[[Titolo del paper]]</code>. I backlink compaiono in fondo a ogni appunto.</p>
-                <p class="dimtext">Scrivi <code>$$ … $$</code> per una <strong>formula</strong> (resa in anteprima), usa la barra di formattazione (grassetto, titoli, liste, sposta blocchi), ed <strong>esporta</strong> l'appunto in <strong>HTML</strong> o <strong>LaTeX</strong> con formule e figure incluse.</p>
+                <p class="dimtext">Scrivi <code>$$ … $$</code> per una <strong>formula</strong> (resa in anteprima), usa la barra di formattazione (grassetto, titoli, liste, sposta blocchi), <strong>trascina o incolla immagini</strong> (salvate come file in <code>assets/</code>, nell'appunto resta solo un riferimento breve), ed <strong>esporta</strong> in <strong>HTML</strong>, <strong>LaTeX</strong> o <strong>PDF</strong> con formule e figure incluse.</p>
               </div>
             {/if}
           </section>

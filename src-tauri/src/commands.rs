@@ -3542,38 +3542,44 @@ pub fn write_binary_file(path: String, base64: String) -> Result<(), String> {
     std::fs::write(&path, bytes).map_err(|e| e.to_string())
 }
 
-/// Read an image file from disk and return it as a `data:<mime>;base64,…` URL, so it
-/// can be embedded straight into a note's Markdown. Used for OS drag&drop of images
-/// onto the note editor (Tauri intercepts native file drops, so the frontend only
-/// gets a filesystem path, not the bytes). Caps the size to keep notes sane.
+/// Save a pasted image (as a base64 data-URL) into the notes vault's `assets/`
+/// folder, returning the short relative reference (`assets/img-<hash>.<ext>`) to
+/// embed in the .md — the editor stays readable instead of holding a base64 wall.
 #[tauri::command]
-pub fn read_image_data_url(path: String) -> Result<String, String> {
-    const MAX_BYTES: u64 = 20 * 1024 * 1024;
+pub fn save_note_asset(app: AppHandle, base64: String) -> Result<String, String> {
+    let (mime, payload) = base64
+        .strip_prefix("data:")
+        .and_then(|u| u.split_once(";base64,"))
+        .ok_or("Immagine non riconosciuta (atteso un data-URL base64)")?;
+    let ext = notes::ext_for_mime(mime.trim()).ok_or("Formato immagine non supportato")?;
+    let bytes = BASE64_STANDARD
+        .decode(payload.trim())
+        .map_err(|e| format!("base64 non valido: {e}"))?;
+    notes::store_asset(&notes_dir(&app), &bytes, ext)
+}
+
+/// Copy an image file from disk into the vault's `assets/` (OS drag&drop of an
+/// image onto the note editor — Tauri's native drag-drop hands us a path, not
+/// bytes) and return the relative reference to embed in the .md.
+#[tauri::command]
+pub fn import_note_asset(app: AppHandle, path: String) -> Result<String, String> {
     let p = std::path::Path::new(&path);
-    let mime = match p
+    let ext = p
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("bmp") => "image/bmp",
-        Some("svg") => "image/svg+xml",
-        Some("avif") => "image/avif",
-        _ => return Err("Formato immagine non supportato".into()),
-    };
+        .filter(|e| notes::mime_for_ext(e).is_some())
+        .ok_or("Formato immagine non supportato")?;
+    // Stat before read: don't buffer a mislabeled multi-GB file just to reject it.
     let meta = std::fs::metadata(p).map_err(|e| format!("Lettura immagine: {e}"))?;
-    if meta.len() > MAX_BYTES {
+    if meta.len() > notes::ASSET_MAX_BYTES {
         return Err(format!(
             "Immagine troppo grande ({} MB, max 20)",
             meta.len() / 1_048_576
         ));
     }
     let bytes = std::fs::read(p).map_err(|e| format!("Lettura immagine: {e}"))?;
-    Ok(format!("data:{mime};base64,{}", BASE64_STANDARD.encode(&bytes)))
+    notes::store_asset(&notes_dir(&app), &bytes, &ext)
 }
 
 /// Write a grid to a file as CSV, Markdown, or XLSX (by `format`).
@@ -6455,6 +6461,17 @@ fn notes_dir(app: &AppHandle) -> PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("scriptorium-notes"))
 }
 
+/// Write a note atomically: temp file + rename, so an interrupted write (disk
+/// full, crash) can never leave the source-of-truth .md truncated on disk.
+fn write_note_atomic(path: &Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension("md.tmp");
+    std::fs::write(&tmp, content).map_err(|e| format!("Salvataggio nota: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("Salvataggio nota: {e}")
+    })
+}
+
 /// Resolve a note slug to its file path, rejecting anything that isn't a plain
 /// single filename component (path-traversal guard).
 fn note_path(dir: &Path, slug: &str) -> Result<PathBuf, String> {
@@ -6714,6 +6731,23 @@ pub fn get_note(app: AppHandle, slug: String) -> Result<NoteView, String> {
     let dir = notes_dir(&app);
     let path = note_path(&dir, &slug)?;
     let content = std::fs::read_to_string(&path).map_err(|e| format!("Lettura nota: {e}"))?;
+    // One-time migration on open: a legacy note with embedded base64 images gets
+    // them extracted to assets/ so the editor shows short references, not a blob
+    // wall. Atomic write (temp+rename: an interrupted write can't truncate the
+    // note); keeps the original on failure (the data-URI still renders). The FTS
+    // row follows so search stays in sync with the rewritten body.
+    let migrated = notes::extract_data_images(&content, &dir);
+    let content = if migrated != content && write_note_atomic(&path, &migrated).is_ok() {
+        let mtime = std::fs::metadata(&path).ok().and_then(|m| systime_ms(m.modified()));
+        {
+            let state = app.state::<AppState>();
+            let conn = state.db.lock();
+            index_note(&conn, &slug, &migrated, mtime);
+        }
+        migrated
+    } else {
+        content
+    };
     let vault = read_vault(&dir);
 
     // Lookup for note targets: slug (lower) and title (lower) → (slug, title).
@@ -6743,7 +6777,10 @@ pub fn get_note(app: AppHandle, slug: String) -> Result<NoteView, String> {
             None
         })
     };
-    let html = wiki::render_html(&woven);
+    // Inline assets/ image references back into data-URIs so the preview renders
+    // them (the webview can't resolve vault-relative paths). A missing image just
+    // shows broken in the preview — only exports hard-fail on it.
+    let html = wiki::render_html(&notes::inline_assets(&woven, &dir).0);
 
     // Backlinks: other notes whose body references this note's slug or title.
     let this_title = notes::note_title(&content).to_lowercase();
@@ -6783,6 +6820,17 @@ pub fn export_note(app: AppHandle, slug: String, format: String, path: String) -
     let dir = notes_dir(&app);
     let note_p = note_path(&dir, &slug)?;
     let content = std::fs::read_to_string(&note_p).map_err(|e| format!("Lettura nota: {e}"))?;
+    // Inline assets/ references first: to_html embeds them, to_latex decodes the
+    // data-URIs back into the export's <stem>_figures/ folder. A figure that
+    // can't be included fails the export with its name, instead of shipping a
+    // silently broken document.
+    let (content, skipped) = notes::inline_assets(&content, &dir);
+    if !skipped.is_empty() {
+        return Err(format!(
+            "Immagini non trovate o troppo grandi per l'export: {}",
+            skipped.join(", ")
+        ));
+    }
     let title = notes::note_title(&content);
     let out = std::path::Path::new(&path);
     match format.as_str() {
@@ -6818,8 +6866,9 @@ pub fn export_note(app: AppHandle, slug: String, format: String, path: String) -
 /// Render draft Markdown to sanitized HTML for the live editor preview (math as
 /// MathML, images inline). No DB/weaving — `[[links]]` resolve on save/full preview.
 #[tauri::command]
-pub fn preview_markdown(md: String) -> String {
-    wiki::render_html(&md)
+pub fn preview_markdown(app: AppHandle, md: String) -> String {
+    // The draft references images as assets/… — inline them so they render live.
+    wiki::render_html(&notes::inline_assets(&md, &notes_dir(&app)).0)
 }
 
 /// The note as a self-contained HTML document (used to print it to PDF).
@@ -6829,7 +6878,16 @@ pub fn note_export_html(app: AppHandle, slug: String) -> Result<String, String> 
     let note_p = note_path(&dir, &slug)?;
     let content = std::fs::read_to_string(&note_p).map_err(|e| format!("Lettura nota: {e}"))?;
     let title = notes::note_title(&content);
-    Ok(mdexport::to_html(&content, &title))
+    // Self-contained: assets/ image references become data-URIs. A figure that
+    // can't be included is an error, not a silently broken PDF.
+    let (inlined, skipped) = notes::inline_assets(&content, &dir);
+    if !skipped.is_empty() {
+        return Err(format!(
+            "Immagini non trovate o troppo grandi per l'export: {}",
+            skipped.join(", ")
+        ));
+    }
+    Ok(mdexport::to_html(&inlined, &title))
 }
 
 /// Rename a note: set a new title (rewriting the body's title line) and rename
@@ -6865,7 +6923,7 @@ pub fn rename_note(app: AppHandle, slug: String, new_title: String) -> Result<St
     if new_slug != slug {
         std::fs::rename(&old_path, &new_path).map_err(|e| format!("Rinomina file: {e}"))?;
     }
-    std::fs::write(&new_path, &new_content).map_err(|e| format!("Scrittura nota: {e}"))?;
+    write_note_atomic(&new_path, &new_content)?;
     {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
@@ -6910,7 +6968,10 @@ pub fn save_note(app: AppHandle, slug: String, content_md: String) -> Result<Not
     let dir = notes_dir(&app);
     let _ = std::fs::create_dir_all(&dir);
     let path = note_path(&dir, &slug)?;
-    std::fs::write(&path, &content_md).map_err(|e| format!("Salvataggio nota: {e}"))?;
+    // Any embedded base64 image becomes a real file in assets/ + a short reference
+    // (keeps the .md readable; re-inlined at render/export time).
+    let content_md = notes::extract_data_images(&content_md, &dir);
+    write_note_atomic(&path, &content_md)?;
     let m = std::fs::metadata(&path).ok();
     let created = m.as_ref().and_then(|m| systime_ms(m.created()));
     let mtime = m.as_ref().and_then(|m| systime_ms(m.modified()));
@@ -6942,7 +7003,9 @@ pub fn append_to_note(app: AppHandle, slug: String, markdown: String) -> Result<
     } else {
         format!("{}\n\n{block}\n", existing.trim_end_matches(['\n', '\r']))
     };
-    std::fs::write(&path, &new_content).map_err(|e| format!("Salvataggio nota: {e}"))?;
+    // Extracted figures sent "→ Appunti" arrive as base64 — store them in assets/.
+    let new_content = notes::extract_data_images(&new_content, &dir);
+    write_note_atomic(&path, &new_content)?;
     let m = std::fs::metadata(&path).ok();
     let created = m.as_ref().and_then(|m| systime_ms(m.created()));
     let mtime = m.as_ref().and_then(|m| systime_ms(m.modified()));
