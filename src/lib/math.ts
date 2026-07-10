@@ -41,19 +41,6 @@ export function renderMathString(tex: string, display: boolean): { html: string;
 // re-parsed on each keystroke batch. Reusing the cached HTML keeps math-heavy notes snappy.
 const cache = new Map<string, string>();
 
-/** Whether KaTeX can parse+render `tex` without error — used to rerank local OCR
- *  hypotheses (keep the best candidate that actually compiles). */
-export function isMathValid(tex: string): boolean {
-  const t = tex.trim();
-  if (!t) return false;
-  try {
-    katex.renderToString(t, { ...OPTS, displayMode: true, throwOnError: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** Render every not-yet-rendered `<span class="tex">` placeholder inside `root` with
  *  KaTeX (reusing cached output). Idempotent; a parse error leaves the raw LaTeX visible. */
 export function renderMathInto(root: HTMLElement): void {

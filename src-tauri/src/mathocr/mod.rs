@@ -29,9 +29,6 @@ const EOS: i64 = 2;
 const MAX_SEQ: usize = 512;
 const BEAM: usize = 4; // beam width (1 == greedy)
 const LENGTH_PENALTY: f32 = 0.7; // <1 mildly favors longer, complete sequences
-/// How many distinct hypotheses `recognize_nbest` returns for the caller to rerank
-/// (the frontend keeps the best that KaTeX can render, so a broken top guess is fixed).
-pub const NBEST: usize = 4;
 const MAX_W: u32 = 672; // max_dimensions width
 const MAX_H: u32 = 192; // max_dimensions height
 const PATCH: u32 = 32; // encoder needs H,W divisible by this
@@ -277,12 +274,12 @@ impl Engine {
         Ok((data.to_vec(), shape))
     }
 
-    /// Beam-search autoregressive decode returning up to `n` DISTINCT hypotheses,
-    /// best-first by length-normalized log-probability. Completed (EOS-terminated)
-    /// sequences are preferred; the still-open beams stand in only if none finished.
-    /// All active beams share the current length, so each step is one batched decoder
-    /// call (≈ as fast as greedy). With `BEAM = 1` this reduces to plain greedy.
-    fn decode_nbest(&mut self, ctx: &[f32], ctx_shape: &[usize], n: usize) -> Result<Vec<Vec<i64>>> {
+    /// Beam-search autoregressive decode. Keeps the `BEAM` most-probable partial
+    /// sequences and returns the best finished one by length-normalized
+    /// log-probability. All active beams share the current length, so they are
+    /// batched into a single decoder call per step (≈ as fast as greedy). With
+    /// `BEAM = 1` this reduces to plain greedy decoding.
+    fn decode(&mut self, ctx: &[f32], ctx_shape: &[usize]) -> Result<Vec<i64>> {
         let s = *ctx_shape.get(1).unwrap_or(&0);
         let d = *ctx_shape.get(2).unwrap_or(&0);
         // (tokens, cumulative log-probability)
@@ -362,28 +359,19 @@ impl Engine {
             }
         }
 
-        // Prefer completed (EOS-terminated) hypotheses; the still-open beams stand in
-        // only if none finished (an unterminated continuation could otherwise win and
-        // yield truncated LaTeX). Keep the top `n` DISTINCT sequences, best-first.
+        // Prefer a completed (EOS-terminated) hypothesis; fall back to the best
+        // still-open beam only if none finished. Otherwise a confident but
+        // unterminated continuation could win and yield truncated LaTeX.
         let norm = |t: &(Vec<i64>, f32)| {
-            let ln = (t.0.len().saturating_sub(1)).max(1) as f32; // exclude BOS
-            t.1 / ln.powf(LENGTH_PENALTY)
+            let n = (t.0.len().saturating_sub(1)).max(1) as f32; // exclude BOS
+            t.1 / n.powf(LENGTH_PENALTY)
         };
-        let mut pool = if finished.is_empty() { active } else { finished };
-        pool.sort_by(|a, b| norm(b).partial_cmp(&norm(a)).unwrap_or(std::cmp::Ordering::Equal));
-        let mut out: Vec<Vec<i64>> = Vec::new();
-        for (toks, _) in pool {
-            if !out.iter().any(|o| o == &toks) {
-                out.push(toks);
-                if out.len() >= n.max(1) {
-                    break;
-                }
-            }
-        }
-        if out.is_empty() {
-            return Err(anyhow!("decoder senza sequenze"));
-        }
-        Ok(out)
+        let pool = if finished.is_empty() { active } else { finished };
+        let best = pool
+            .into_iter()
+            .max_by(|a, b| norm(a).partial_cmp(&norm(b)).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| anyhow!("decoder senza sequenze"))?;
+        Ok(best.0)
     }
 }
 
@@ -721,36 +709,26 @@ fn post_process(s: &str) -> String {
     upright_differentials(s.trim())
 }
 
-/// Recognize a single grayscale formula image with the already-loaded engine,
-/// returning up to `n` distinct post-processed LaTeX candidates (best-first) for the
-/// caller to rerank (e.g. keep the first that renders).
-fn recognize_gray_nbest(eng: &mut Engine, gray: &GrayImage, n: usize) -> Result<Vec<String>> {
+/// Recognize a single grayscale formula image with the already-loaded engine.
+fn recognize_gray(eng: &mut Engine, gray: &GrayImage) -> Result<String> {
     let base = minmax_size(&pad(gray));
     let (data, h, w) = eng.resize_loop(&base)?;
     let (ctx, ctx_shape) = eng.encode(data, h, w)?;
-    let seqs = eng.decode_nbest(&ctx, &ctx_shape, n)?;
-    let mut out: Vec<String> = Vec::new();
-    for ids in seqs {
-        // Skip the leading BOS; the tokenizer drops the rest of the special tokens.
-        let toks: Vec<u32> = ids.iter().skip(1).map(|&x| x as u32).collect();
-        let raw = eng
-            .tokenizer
-            .decode(&toks, true)
-            .map_err(|e| anyhow!("decode tokenizer: {e}"))?;
-        let p = post_process(&raw);
-        if !p.trim().is_empty() && !out.contains(&p) {
-            out.push(p); // dedupe after post-processing (beams often collapse to the same LaTeX)
-        }
-    }
-    Ok(out)
+    let ids = eng.decode(&ctx, &ctx_shape)?;
+    // Skip the leading BOS; the tokenizer drops the rest of the special tokens.
+    let toks: Vec<u32> = ids.iter().skip(1).map(|&x| x as u32).collect();
+    let raw = eng
+        .tokenizer
+        .decode(&toks, true)
+        .map_err(|e| anyhow!("decode tokenizer: {e}"))?;
+    Ok(post_process(&raw))
 }
 
-/// Recognize a formula image (PNG/any) from in-memory bytes, using the models under
-/// `dir`. Returns up to `n` distinct LaTeX candidates (best-first) for a single formula;
-/// a multi-line selection is segmented into equations and returned as ONE combined
-/// `gathered` block (per-band best — no rerank across the combinatorial band product).
-/// Pure CPU; call from a blocking context. `ensure_models` must have succeeded first.
-pub fn recognize_nbest(dir: &Path, image_bytes: &[u8], multi: bool, n: usize) -> Result<Vec<String>> {
+/// Recognize a formula image (PNG/any) from in-memory bytes, using the models
+/// under `dir`. Pure CPU; call from a blocking context. `ensure_models` must have
+/// succeeded first. When `multi` is set, a multi-line selection is segmented into
+/// separate equations and returned as a LaTeX `aligned` block.
+pub fn recognize(dir: &Path, image_bytes: &[u8], multi: bool) -> Result<String> {
     let gray = to_gray_on_white(image_bytes)?;
 
     let mut guard = ENGINE.lock();
@@ -764,31 +742,30 @@ pub fn recognize_nbest(dir: &Path, image_bytes: &[u8], multi: bool, n: usize) ->
         if bands.len() > 1 {
             let mut lines: Vec<String> = Vec::new();
             for band in &bands {
-                if let Some(l) = recognize_gray_nbest(eng, band, 1)?.into_iter().next() {
-                    if !l.trim().is_empty() {
-                        lines.push(l);
-                    }
+                let l = recognize_gray(eng, band)?;
+                if !l.trim().is_empty() {
+                    lines.push(l);
                 }
             }
             if lines.is_empty() {
                 anyhow::bail!("nessuna formula riconosciuta");
             }
             if lines.len() == 1 {
-                return Ok(vec![lines.pop().unwrap()]);
+                return Ok(lines.pop().unwrap());
             }
             // `gathered`, not `aligned`: these are independent equations with no
             // shared alignment point, so each is centered on its own line. (An
             // `&`-less `aligned` would silently not align at all.)
             let body = lines.join(" \\\\\n");
-            return Ok(vec![format!("\\begin{{gathered}}\n{body}\n\\end{{gathered}}")]);
+            return Ok(format!("\\begin{{gathered}}\n{body}\n\\end{{gathered}}"));
         }
     }
 
-    let cands = recognize_gray_nbest(eng, &gray, n)?;
-    if cands.is_empty() {
+    let latex = recognize_gray(eng, &gray)?;
+    if latex.is_empty() {
         anyhow::bail!("nessuna formula riconosciuta");
     }
-    Ok(cands)
+    Ok(latex)
 }
 
 #[cfg(test)]
@@ -892,12 +869,7 @@ mod tests {
         eprintln!("[spike] resized to {w}x{h}");
         let (ctx, shape) = eng.encode(data, h, w).expect("encode");
         eprintln!("[spike] context shape {:?}", shape);
-        let ids = eng
-            .decode_nbest(&ctx, &shape, 1)
-            .expect("decode")
-            .into_iter()
-            .next()
-            .expect("at least one hypothesis");
+        let ids = eng.decode(&ctx, &shape).expect("decode");
         let toks: Vec<u32> = ids.iter().skip(1).map(|&x| x as u32).collect();
         let raw = eng.tokenizer.decode(&toks, true).expect("detok");
         eprintln!("[spike] raw   = {raw}");
@@ -935,11 +907,7 @@ mod tests {
         image::DynamicImage::ImageLuma8(canvas)
             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .unwrap();
-        let out = recognize_nbest(&dir, &buf, true, 1)
-            .expect("recognize multi")
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+        let out = recognize(&dir, &buf, true).expect("recognize multi");
         eprintln!("[spike-multi] LATEX =\n{out}");
     }
 }

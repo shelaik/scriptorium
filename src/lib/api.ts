@@ -133,11 +133,10 @@ export const extractRegionText = (
   page: number,
   rect: { x: number; y: number; w: number; h: number },
 ) => invoke<string>("extract_region_text", { id, page, x: rect.x, y: rect.y, w: rect.w, h: rect.h });
-/** Recognize a cropped formula image (base64 PNG) as LaTeX, locally. Returns several
- *  hypotheses (best-first) so the caller can keep the first that renders; `multi`
- *  segments a multi-line selection into separate equations (one combined candidate). */
+/** Recognize a cropped formula image (base64 PNG) as LaTeX, locally.
+ *  `multi` segments a multi-line selection into separate equations. */
 export const formulaToLatex = (imageBase64: string, multi = false) =>
-  invoke<string[]>("formula_to_latex", { imageBase64, multi });
+  invoke<string>("formula_to_latex", { imageBase64, multi });
 /** Whether the formula→LaTeX models are ready, and MB to download if not. */
 export const mathocrStatus = () =>
   invoke<{ ready: boolean; downloadMb: number }>("mathocr_status");

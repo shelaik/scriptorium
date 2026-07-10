@@ -21,7 +21,7 @@
   import { revealDocument } from "$lib/share";
   import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, writeBinaryFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, textFromImageAi, getAiSettings, aiListModels } from "$lib/api";
   import { escapeLatex, textToLatex, tableToLatex, tableToMarkdown, tableToCsv } from "$lib/latex";
-  import { renderMathString, isMathValid } from "$lib/math";
+  import { renderMathString } from "$lib/math";
   import { save } from "@tauri-apps/plugin-dialog";
   import ShareMenu from "$lib/ShareMenu.svelte";
   import RadialMenu from "$lib/RadialMenu.svelte";
@@ -222,12 +222,8 @@
   // error (empty when the formula is valid) → the editor flags a broken formula.
   let formulaPreviewHtml = $state("");
   let formulaInvalid = $state("");
-  // True when the local OCR's top hypothesis didn't render and we fell back to a
-  // lower-ranked candidate that does — surfaced so the substitution isn't silent.
-  let formulaReranked = $state(false);
   let formulaPrevTimer: ReturnType<typeof setTimeout> | undefined;
   function scheduleFormulaPreview() {
-    formulaReranked = false; // a hand-edit supersedes the auto-pick note
     clearTimeout(formulaPrevTimer);
     formulaPrevTimer = setTimeout(renderFormulaPreview, 200);
   }
@@ -1090,12 +1086,10 @@
     formulaEmpty = false;
     formulaPreviewHtml = "";
     formulaInvalid = "";
-    formulaReranked = false;
     // Cancel any scheduled preview from the previous formula.
     clearTimeout(formulaPrevTimer);
     try {
       let out: string;
-      let reranked = false; // committed to formulaReranked only after the epoch guard below
       if (engine === "ollama") {
         if (!visionModel) throw "Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).";
         out = await formulaToLatexAi(formulaImg, visionModel, multi);
@@ -1105,18 +1099,10 @@
         if (!st.ready) {
           setNotice(`Primo uso: scarico il modello formula (~${st.downloadMb} MB), attendi…`);
         }
-        // The local engine returns several beam hypotheses, best-first. Keep the model's
-        // top guess unless it doesn't render, then take the first candidate KaTeX accepts
-        // (never downgrade an already-valid best). Broken OCR output is thus auto-corrected.
-        const cands = (await formulaToLatex(formulaImg, multi)).filter((c) => c.trim());
-        if (formulaReq !== req) return; // superseded during recognition — skip rerank + shared writes
-        const best = cands[0] ?? "";
-        out = cands.find((c) => isMathValid(c)) ?? best;
-        reranked = !!out && out !== best; // note when we swapped away from the top guess
+        out = await formulaToLatex(formulaImg, multi);
       }
       if (formulaReq !== req) return;
       formulaLatex = out;
-      formulaReranked = reranked;
       formulaEmpty = !out.trim(); // outcome of the RUN, not of later hand-edits
       renderFormulaPreview(); // show the rendered result right away
     } catch (err) {
@@ -2587,8 +2573,6 @@
                 </div>
                 {#if formulaInvalid}
                   <p class="feinvalid" title={formulaInvalid}>⚠ LaTeX non valido — controlla la formula</p>
-                {:else if formulaReranked}
-                  <p class="tdim" title="La trascrizione più probabile non era renderizzabile: mostrata un'ipotesi alternativa del riconoscimento. Confronta con l'originale.">↺ Ipotesi alternativa (la prima non era renderizzabile)</p>
                 {/if}
               </div>
             </div>
