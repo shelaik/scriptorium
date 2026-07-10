@@ -654,6 +654,33 @@ fn compact_math_arg(m: &str) -> String {
         .replace('\u{1}', " ")
 }
 
+// Integral commands (\int, \iint, \oint, \iiint, …): the gate for the differential
+// heuristic — a bare `dx` is virtually always a differential inside an integral.
+// The `(?:[^A-Za-z]|$)` requires a non-letter (or end) right after `int`, so this
+// matches `\int_`, `\int f`, `\iint\,` … but NOT `\intercal`/`\intertext` (where a
+// letter follows) — those would otherwise fire the rewrite with no real integral.
+// A bare `\b` can't be used: `\int_` has `_` (a word char) after `t`, so no boundary.
+static RE_HAS_INTEGRAL: Lazy<Regex> = Lazy::new(|| Regex::new(r"\\[io]*int(?:[^A-Za-z]|$)").unwrap());
+// A differential `d<var>` in a differential position: at the start, or right after
+// whitespace or a spacing/opening delimiter (` `, `\,`→`,`, `\;`→`;`, `\!`→`!`, `(`).
+// Deliberately NOT after `^`/`_` (an integral limit like `\int_0^d`), a letter (a
+// word), a backslash (a command like `\det`), or `{` (a derivative denominator) —
+// those are where a `d` is not a differential. `\b` after the variable rejects `dxy`.
+static RE_DIFFERENTIAL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(^|[\s(,;!])d\s?([A-Za-z])\b").unwrap());
+
+/// Upright differentials: inside an integral, rewrite `dx` → `\mathrm{d}x` so the
+/// differential renders roman (the bundled model transcribes it italic). Opt-in for
+/// the local engine; conservative by construction (see the regexes) and idempotent
+/// (`\mathrm{d}x`'s `d` sits after `{`, which is excluded). Never touches the vision
+/// engine, which is prompted for `\mathrm` instead.
+fn upright_differentials(s: &str) -> String {
+    if !RE_HAS_INTEGRAL.is_match(s) {
+        return s.to_string();
+    }
+    RE_DIFFERENTIAL.replace_all(s, "${1}\\mathrm{d}${2}").into_owned()
+}
+
 fn post_process(s: &str) -> String {
     let s = s
         .replace('Ġ', " ")
@@ -677,7 +704,9 @@ fn post_process(s: &str) -> String {
         }
         s = c;
     }
-    s.trim().to_string()
+    // Mark differentials upright inside integrals (dx → \mathrm{d}x). After the
+    // space passes so `d x` is already `d x` and offsets are settled.
+    upright_differentials(s.trim())
 }
 
 /// Recognize a single grayscale formula image with the already-loaded engine.
@@ -763,6 +792,38 @@ mod tests {
         // (micrometers) must NOT fuse into the undefined `\mum`.
         assert_eq!(post_process("\\mathrm { \\mu m }"), "\\mathrm{\\mu m}");
         assert_eq!(post_process("\\mathbf { \\Sigma x }"), "\\mathbf{\\Sigma x}");
+    }
+
+    #[test]
+    fn differentials_upright_in_integrals() {
+        // Inside an integral, `dx` becomes an upright differential.
+        assert_eq!(
+            post_process("\\int f ( x ) \\, d x"),
+            "\\int f(x)\\,\\mathrm{d}x"
+        );
+        // Several differentials in a double integral.
+        assert_eq!(
+            post_process("\\iint g \\, d x \\, d y"),
+            "\\iint g\\,\\mathrm{d}x\\,\\mathrm{d}y"
+        );
+        // Idempotent: running again doesn't double-wrap.
+        assert_eq!(post_process("\\int f\\,\\mathrm{d}x"), "\\int f\\,\\mathrm{d}x");
+    }
+
+    #[test]
+    fn differentials_left_alone_when_unsafe() {
+        // No integral in the formula → never touch a bare `d` (letter-letter spaces
+        // are not collapsed by the generic passes, matching existing pix2tex output).
+        assert_eq!(post_process("a d x + b"), "a d x+b");
+        // A `d` that is an integral limit (superscript) must NOT become a differential.
+        assert_eq!(post_process("\\int _ 0 ^ d x"), "\\int_0^d x");
+        // `\det` and other `\d…` commands are safe (the `d` follows a backslash).
+        assert_eq!(post_process("\\int \\det ( A ) \\, d t"), "\\int\\det(A)\\,\\mathrm{d}t");
+        // `\intercal` (transpose) must NOT satisfy the integral gate: a `(dx)`
+        // product with no real integral stays untouched.
+        assert_eq!(post_process("A ^ { \\intercal } ( d x )"), "A^{\\intercal}(d x)");
+        // But a real `\int_` subscript still enables the rewrite.
+        assert_eq!(post_process("\\int _ 0 ^ 1 f \\, d x"), "\\int_0^1f\\,\\mathrm{d}x");
     }
 
     /// Spike: end-to-end recognition against a real image. Runs only when
