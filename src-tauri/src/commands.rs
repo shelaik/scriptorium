@@ -3345,7 +3345,7 @@ pub async fn formula_to_latex(
     app: AppHandle,
     image_base64: String,
     multi: bool,
-) -> Result<String, String> {
+) -> Result<Vec<String>, String> {
     let dir = mathocr_dir(&app);
     // Accept either a bare base64 string or a full `data:image/png;base64,…` URL.
     let b64 = image_base64.rsplit(',').next().unwrap_or(&image_base64).trim();
@@ -3358,7 +3358,9 @@ pub async fn formula_to_latex(
             .await
             .map_err(|e| format!("scarico modelli formula: {e}"))?;
     }
-    tauri::async_runtime::spawn_blocking(move || mathocr::recognize(&dir, &bytes, multi))
+    // Return several hypotheses (best-first): the frontend keeps the highest-ranked one
+    // that KaTeX can actually render, so a broken top guess is auto-corrected.
+    tauri::async_runtime::spawn_blocking(move || mathocr::recognize_nbest(&dir, &bytes, multi, mathocr::NBEST))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
