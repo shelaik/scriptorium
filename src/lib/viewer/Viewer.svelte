@@ -558,7 +558,7 @@
       textMode = false;
       formulaMode = false;
       clearSelection();
-      setNotice("Figura → PNG: trascina un rettangolo attorno alla figura da ritagliare");
+      setNotice("Estrai figura: trascina un rettangolo attorno alla figura da ritagliare come PNG");
     }
   }
   /** Crop a screen-space rectangle out of a page's rendered canvas to a PNG data
@@ -603,7 +603,7 @@
     return undefined;
   }
   function onTableDown(e: MouseEvent) {
-    if (!tableMode && !textMode && !formulaMode) return;
+    if (!tableMode && !textMode && !formulaMode && !figureMode) return;
     const wrap = wrapAt(e.clientX, e.clientY);
     if (!wrap) return;
     e.preventDefault();
@@ -1791,7 +1791,7 @@
           { id: "table", label: "Estrai tabella", checked: tableMode, action: toggleTable },
           { id: "text", label: "Estrai testo", checked: textMode, action: toggleText },
           { id: "formula", label: "Formula → LaTeX", checked: formulaMode, action: toggleFormula },
-          { id: "figure", label: "Figura → PNG", checked: figureMode, action: toggleFigure },
+          { id: "figure", label: "Estrai figura", checked: figureMode, action: toggleFigure },
           { id: "rotl", label: "Ruota sx", action: () => rotate(-90) },
           { id: "rotr", label: "Ruota dx", action: () => rotate(90) },
           { id: "reveal", label: "Posizione", action: doReveal },
@@ -1815,7 +1815,7 @@
   function onViewerContext(e: MouseEvent) {
     if (viewerRadial) return; // the open radial owns its own right-clicks
     // Drag-to-extract and note placement keep the default flow untouched.
-    if (tableMode || textMode || formulaMode || noteMode) return;
+    if (tableMode || textMode || formulaMode || figureMode || noteMode) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest(".hlpalette, .lenscard, .popover, .findbar, .morepop, .sharemenu, input, textarea")) return;
     e.preventDefault();
@@ -1970,7 +1970,7 @@
       <button class="mitem" onclick={() => moreDo(toggleTable)} title="Estrai una tabella: trascina un rettangolo attorno alla tabella"><span class="mck">{tableMode ? "✓" : ""}</span>Estrai tabella</button>
       <button class="mitem" onclick={() => moreDo(toggleText)} title="Estrai testo: trascina un rettangolo attorno al testo"><span class="mck">{textMode ? "✓" : ""}</span>Estrai testo</button>
       <button class="mitem" onclick={() => moreDo(toggleFormula)} title="Riconosci una formula come LaTeX: trascina un rettangolo attorno all'equazione"><span class="mck">{formulaMode ? "✓" : ""}</span>Formula → LaTeX</button>
-      <button class="mitem" onclick={() => moreDo(toggleFigure)} title="Ritaglia una figura come immagine PNG: trascina un rettangolo attorno alla figura"><span class="mck">{figureMode ? "✓" : ""}</span>Figura → PNG</button>
+      <button class="mitem" onclick={() => moreDo(toggleFigure)} title="Ritaglia una figura come immagine PNG: trascina un rettangolo attorno alla figura"><span class="mck">{figureMode ? "✓" : ""}</span>Estrai figura</button>
       <div class="msep"></div>
       <button class="mitem" onclick={() => moreDo(doReveal)} title="Apri la posizione del PDF in Esplora risorse"><span class="mck"></span>Posizione</button>
       <button class="mitem" onclick={() => moreDo(doPrint)} disabled={printing} title="Stampa questo documento"><span class="mck"></span>{printing ? "Stampa…" : "Stampa"}</button>
@@ -2021,7 +2021,7 @@
       class:spread
       class:night
       class:notemode={noteMode}
-      class:tablemode={tableMode || textMode || formulaMode}
+      class:tablemode={tableMode || textMode || formulaMode || figureMode}
       bind:this={pagesEl}
       onmousedown={onTableDown}
       onmousemove={onTableMove}
@@ -2234,7 +2234,7 @@
           <li>Selezione testo <span>Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)</span></li>
           <li>Formula → LaTeX <span>Da ⋯ Altro o dal radiale: trascina attorno a un'equazione. Motore «Locale» (math-OCR integrato, il 1º uso scarica ~180 MB) o «Ollama» (modello di visione). «Più righe» = blocco gathered. Esporta come LaTeX o Markdown ($$…$$): Copia, Salva… o → Appunti</span></li>
           <li>Estrai tabella / testo <span>Motore «Nativa» (dal testo del PDF) o «Ollama» (modello di visione — utile per tabelle-immagine e pagine scansionate). Esporta scegliendo il formato: tabella MD/LaTeX/CSV (+ Excel), testo Testo/LaTeX/MD — con Copia, Salva… o → Appunti</span></li>
-          <li>Figura → PNG <span>Da ⋯ Altro o dal radiale: trascina attorno a una figura per ritagliarla come immagine. «Salva PNG…» su file, oppure «→ Appunti» per incorporarla in un appunto</span></li>
+          <li>Estrai figura <span>Da ⋯ Altro o dal radiale: trascina attorno a una figura per ritagliarla come immagine PNG. «Salva PNG…» su file, oppure «→ Appunti» per incorporarla in un appunto</span></li>
           <li>⋯ Altro <span>Rotazione, note, estrazione tabella/testo/formula/figura, stampa, condivisione</span></li>
           <li>Tasto destro <span>Menu radiale con i comandi di lettura</span></li>
           <li>Mouse fermo <span>La barra si nasconde; muovi il mouse per mostrarla</span></li>
