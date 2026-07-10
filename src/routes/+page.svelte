@@ -273,6 +273,9 @@
   let dragOver = $state(false);
   let status = $state("");
   let openDoc = $state<DocumentItem | null>(null);
+  // The last PDF opened in the reader — powers the "Riprendi lettura" quick action
+  // (toolbar + radial). Seeded from the recent shelf at load so it survives a restart.
+  let lastReadDoc = $state<DocumentItem | null>(null);
   let headerMenu = $state<{ kind: "import" | "export"; x: number; y: number } | null>(null);
   // Compact tool bar: which global-radial group's dropdown is open (items are
   // derived live from buildGlobalRadial() at render, so disabled/badge stay fresh).
@@ -511,7 +514,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.33";
+  const APP_VERSION = "0.8.34";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -747,6 +750,9 @@
       try {
         recentDocs = await recentDocuments(8);
         ensureThumbs(recentDocs);
+        // Seed "Riprendi lettura" so the action works right after a restart, before
+        // anything is opened this session. A live open() overrides this.
+        if (!lastReadDoc) lastReadDoc = recentDocs.find((d) => d.has_file) ?? null;
       } catch {
         recentDocs = [];
       }
@@ -2723,6 +2729,7 @@
     term: "M4 17l6-6-6-6M12 19h8",
     backup: "M22 12H2M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01",
     layers: "M12 2l9 5-9 5-9-5zM3 12l9 5 9-5M3 17l9 5 9-5",
+    bookmark: "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z",
     x: "M18 6L6 18M6 6l12 12",
   };
 
@@ -2733,8 +2740,35 @@
       refPanel = { doc: d, url: "", busy: false };
       return;
     }
+    lastReadDoc = d; // remember it for "Riprendi lettura"
     openDocPage = page;
     openDoc = d;
+  }
+
+  /** Reopen the last-read PDF at the page where we left off (the reader restores the
+   *  stored last page when opened with no explicit page). The cached lastReadDoc snapshot
+   *  may be stale (its target since trashed/purged/merged), so re-validate against the
+   *  fresh recent list before opening — and fall back to the next most recent PDF (or a
+   *  notice) instead of mounting the reader on a dead id. */
+  async function resumeLastRead() {
+    const wantId = lastReadDoc?.id ?? null;
+    let d: DocumentItem | null = null;
+    try {
+      const recent = await recentDocuments(8);
+      d =
+        (wantId != null ? recent.find((x) => x.id === wantId && x.has_file) : undefined) ??
+        recent.find((x) => x.has_file) ??
+        null;
+    } catch {
+      d = lastReadDoc?.has_file ? lastReadDoc : null; // DB unreachable: best effort
+    }
+    if (d) {
+      lastReadDoc = d;
+      openDocument(d);
+    } else {
+      lastReadDoc = null;
+      status = "Nessun PDF letto di recente.";
+    }
   }
 
   // ---- "Riferimento senza PDF": attach a file to an existing entry ----
@@ -3000,6 +3034,14 @@
             action: () => cycleSort(k),
           })),
         ],
+      },
+      {
+        id: "g-resume",
+        label: "Riprendi lettura",
+        icon: I.bookmark,
+        hint: "Torna all'ultimo PDF, al punto in cui eri",
+        disabled: !lastReadDoc,
+        action: () => resumeLastRead(),
       },
       { id: "g-ask", label: "Chiedi alla libreria", icon: I.ask, hint: "Risposte con citazioni dai tuoi PDF (AI locale)", action: () => { setFilter({ kind: "ask" }); loadRagStatus(); } },
       { id: "g-wiki", label: "Wiki della libreria", icon: I.open, hint: "La tua enciclopedia privata, generata dai tuoi paper", action: () => openWikiView() },
@@ -3399,6 +3441,11 @@
         noteView = await getNote(info.slug);
         noteDraft = normNl(noteView.content_md);
         noteSaved = true;
+        // The side-by-side preview renders `livePreviewHtml`, which only refreshes on
+        // keystrokes (onNoteInput). A programmatic append doesn't fire that, so re-render
+        // it here or the new block (e.g. a formula) stays invisible until the user
+        // toggles modes. The plain "Anteprima" mode reads noteView.html (already reloaded).
+        if (noteMode === "split") renderLivePreview();
       } catch {
         /* ignore */
       }
