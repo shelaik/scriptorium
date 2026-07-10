@@ -3542,6 +3542,40 @@ pub fn write_binary_file(path: String, base64: String) -> Result<(), String> {
     std::fs::write(&path, bytes).map_err(|e| e.to_string())
 }
 
+/// Read an image file from disk and return it as a `data:<mime>;base64,…` URL, so it
+/// can be embedded straight into a note's Markdown. Used for OS drag&drop of images
+/// onto the note editor (Tauri intercepts native file drops, so the frontend only
+/// gets a filesystem path, not the bytes). Caps the size to keep notes sane.
+#[tauri::command]
+pub fn read_image_data_url(path: String) -> Result<String, String> {
+    const MAX_BYTES: u64 = 20 * 1024 * 1024;
+    let p = std::path::Path::new(&path);
+    let mime = match p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("svg") => "image/svg+xml",
+        Some("avif") => "image/avif",
+        _ => return Err("Formato immagine non supportato".into()),
+    };
+    let meta = std::fs::metadata(p).map_err(|e| format!("Lettura immagine: {e}"))?;
+    if meta.len() > MAX_BYTES {
+        return Err(format!(
+            "Immagine troppo grande ({} MB, max 20)",
+            meta.len() / 1_048_576
+        ));
+    }
+    let bytes = std::fs::read(p).map_err(|e| format!("Lettura immagine: {e}"))?;
+    Ok(format!("data:{mime};base64,{}", BASE64_STANDARD.encode(&bytes)))
+}
+
 /// Write a grid to a file as CSV, Markdown, or XLSX (by `format`).
 #[tauri::command]
 pub fn export_table(grid: Vec<Vec<String>>, format: String, path: String) -> Result<(), String> {
@@ -6779,6 +6813,23 @@ pub fn export_note(app: AppHandle, slug: String, format: String, path: String) -
         }
         other => Err(format!("Formato di esportazione non supportato: {other}")),
     }
+}
+
+/// Render draft Markdown to sanitized HTML for the live editor preview (math as
+/// MathML, images inline). No DB/weaving — `[[links]]` resolve on save/full preview.
+#[tauri::command]
+pub fn preview_markdown(md: String) -> String {
+    wiki::render_html(&md)
+}
+
+/// The note as a self-contained HTML document (used to print it to PDF).
+#[tauri::command]
+pub fn note_export_html(app: AppHandle, slug: String) -> Result<String, String> {
+    let dir = notes_dir(&app);
+    let note_p = note_path(&dir, &slug)?;
+    let content = std::fs::read_to_string(&note_p).map_err(|e| format!("Lettura nota: {e}"))?;
+    let title = notes::note_title(&content);
+    Ok(mdexport::to_html(&content, &title))
 }
 
 /// Rename a note: set a new title (rewriting the body's title line) and rename

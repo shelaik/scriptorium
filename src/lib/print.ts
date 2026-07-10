@@ -64,6 +64,44 @@ export async function printDocument(id: number): Promise<void> {
   await printPdfData(await fetchPdf(id));
 }
 
+/** Print a standalone HTML document (e.g. a rendered note) via a hidden iframe, so
+ *  only the content prints — not the app UI. The user picks "Save as PDF" to export. */
+export function printHtml(html: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const iframe = document.createElement("iframe");
+    iframe.setAttribute("aria-hidden", "true");
+    iframe.style.cssText =
+      "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;";
+
+    let settled = false;
+    const finish = (err?: unknown) => {
+      if (settled) return;
+      settled = true;
+      setTimeout(() => iframe.remove(), 60_000);
+      if (err) reject(err);
+      else resolve();
+    };
+
+    iframe.onload = () => {
+      try {
+        const win = iframe.contentWindow;
+        if (!win) throw new Error("print frame unavailable");
+        win.focus();
+        win.addEventListener?.("afterprint", () => finish(), { once: true });
+        win.print();
+        setTimeout(() => finish(), 1500);
+      } catch (e) {
+        finish(e);
+      }
+    };
+    iframe.onerror = () => finish(new Error("impossibile preparare la stampa"));
+    // srcdoc keeps the frame same-origin (inherits the app CSP: inline styles,
+    // data: images and MathML all render; there is no script in the export).
+    iframe.srcdoc = html;
+    document.body.appendChild(iframe);
+  });
+}
+
 export interface PrintResult {
   /** How many documents made it into the print job. */
   printed: number;

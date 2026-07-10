@@ -101,6 +101,7 @@
     discoverAdd,
     exploreCitations,
     writeTextFile,
+    readImageDataUrl,
     type CitationNeighbors,
     getObsidianVault,
     setObsidianVault,
@@ -130,6 +131,8 @@
     listNotes,
     getNote,
     exportNote,
+    previewMarkdown,
+    noteExportHtml,
     createNote,
     appendToNote,
     saveNote,
@@ -151,7 +154,7 @@
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
   import MetaEditor from "$lib/MetaEditor.svelte";
-  import { printDocument, printDocuments } from "$lib/print";
+  import { printDocument, printDocuments, printHtml } from "$lib/print";
   import ShareMenu from "$lib/ShareMenu.svelte";
   import { revealDocument, openInBrowser, shareTo, type ShareTarget } from "$lib/share";
   import Terminal from "$lib/Terminal.svelte";
@@ -506,7 +509,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.26";
+  const APP_VERSION = "0.8.27";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2565,6 +2568,16 @@
       if (p.type === "enter" || p.type === "over") dragOver = true;
       else if (p.type === "drop") {
         dragOver = false;
+        // While a note editor is open, embed dropped images into the note (Tauri's
+        // native drag-drop intercepts OS file drops, so the HTML5 ondrop never sees
+        // them — this is the real image-drop path). PDFs still go to import.
+        if (noteEditorActive()) {
+          const images = p.paths.filter((x) => /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(x));
+          if (images.length) void insertNoteImagePaths(images);
+          const pdfs = p.paths.filter((x) => x.toLowerCase().endsWith(".pdf"));
+          if (pdfs.length) handleImport(pdfs);
+          return;
+        }
         const pdfs = p.paths.filter((x) => x.toLowerCase().endsWith(".pdf"));
         handleImport(pdfs);
       } else dragOver = false;
@@ -3312,7 +3325,10 @@
   });
   let noteView = $state<NoteView | null>(null);
   let noteDraft = $state(""); // raw markdown in the editor
-  let noteMode = $state<"edit" | "preview">("preview");
+  let noteMode = $state<"edit" | "preview" | "split">("preview");
+  let livePreviewHtml = $state(""); // rendered draft for the side-by-side "Affiancato" view
+  let livePreviewTimer: ReturnType<typeof setTimeout> | undefined;
+  let livePreviewSeq = 0; // guards against a slow render landing after a newer one
   let noteNewTitle = $state("");
   let noteSaved = $state(true); // false while an autosave is pending/failed
   let noteSaveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -3435,6 +3451,24 @@
     noteSaved = false;
     clearTimeout(noteSaveTimer);
     noteSaveTimer = setTimeout(flushNote, 700);
+    if (noteMode === "split") scheduleLivePreview();
+  }
+  /** Debounced live render of the draft for the side-by-side preview. Renders the
+   *  raw draft directly (no disk round-trip) so it tracks keystrokes; a sequence
+   *  guard drops a slow render that resolves after a newer edit. */
+  function scheduleLivePreview() {
+    clearTimeout(livePreviewTimer);
+    livePreviewTimer = setTimeout(renderLivePreview, 250);
+  }
+  async function renderLivePreview() {
+    const seq = ++livePreviewSeq;
+    const src = noteDraft;
+    try {
+      const html = await previewMarkdown(src);
+      if (seq === livePreviewSeq) livePreviewHtml = html;
+    } catch {
+      /* keep the last good preview */
+    }
   }
   // ----- Lightweight Markdown formatting toolbar over the note editor -----
   let noteEditorEl = $state<HTMLTextAreaElement | null>(null);
@@ -3487,6 +3521,118 @@
     const caret = s + text.length;
     focusNoteRange(caret, caret);
   }
+  // ----- Drop or paste images straight into the note (embedded as base64) -----
+  const NOTE_IMG_MAX_BYTES = 20 * 1024 * 1024; // keep a single embedded image sane
+  function readAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result));
+      r.onerror = () => reject(r.error ?? new Error("lettura non riuscita"));
+      r.readAsDataURL(file);
+    });
+  }
+  /** Sanitize a filename for use as Markdown image alt text (single line, no `]`). */
+  function imgAlt(name: string): string {
+    return (name || "immagine").replace(/\.[^.]+$/, "").replace(/[\[\]\r\n]/g, " ").trim() || "immagine";
+  }
+  /** True when an open note editor can receive a dropped/pasted image. */
+  function noteEditorActive(): boolean {
+    return filter.kind === "notes" && !!noteView && (noteMode === "edit" || noteMode === "split");
+  }
+  /** Splice already-rendered `![alt](data:…)` blocks into the draft at the caret,
+   *  but only if we're still on the same note we started from — the async read of a
+   *  large image can outlast a note switch, and writing into the new note would
+   *  silently corrupt it (same discipline as the flushNote slug guard). */
+  function commitNoteImages(
+    targetSlug: string, s: number, e: number, blocks: string[], skipped: number, total: number,
+  ) {
+    if (noteView?.slug !== targetSlug) {
+      status = "Immagine non inserita: hai cambiato appunto durante la lettura";
+      return;
+    }
+    if (!blocks.length) {
+      status = skipped ? "Nessuna immagine inserita (troppo grande o illeggibile)" : "Niente da inserire";
+      return;
+    }
+    const snippet = "\n\n" + blocks.join("\n\n") + "\n\n";
+    noteDraft = noteDraft.slice(0, s) + snippet + noteDraft.slice(e);
+    onNoteInput();
+    const caret = s + snippet.length;
+    focusNoteRange(caret, caret);
+    const done = blocks.length === 1 && total === 1 ? "Immagine inserita ✓" : `${blocks.length} immagini inserite ✓`;
+    status = skipped ? `${done} · ${skipped} saltate (troppo grandi o illeggibili)` : done;
+  }
+  /** Embed one or more image *files* (paste, or HTML5 drop) at the cursor. */
+  async function insertNoteImages(files: File[]) {
+    const imgs = files.filter((f) => f.type.startsWith("image/"));
+    if (!imgs.length || !noteView) return;
+    const target = noteView.slug;
+    const el = noteEditorEl;
+    // Snapshot the caret BEFORE the async reads (see commitNoteImages).
+    const s = el ? el.selectionStart : noteDraft.length;
+    const e = el ? el.selectionEnd : noteDraft.length;
+    const blocks: string[] = [];
+    let skipped = 0;
+    for (const f of imgs) {
+      if (f.size > NOTE_IMG_MAX_BYTES) { skipped++; continue; }
+      try {
+        blocks.push(`![${imgAlt(f.name)}](${await readAsDataUrl(f)})`);
+      } catch {
+        skipped++;
+      }
+    }
+    commitNoteImages(target, s, e, blocks, skipped, imgs.length);
+  }
+  /** Embed images given by filesystem *path* (OS drag&drop, read on the backend). */
+  async function insertNoteImagePaths(paths: string[]) {
+    if (!paths.length || !noteView) return;
+    const target = noteView.slug;
+    const el = noteEditorEl;
+    const s = el ? el.selectionStart : noteDraft.length;
+    const e = el ? el.selectionEnd : noteDraft.length;
+    const blocks: string[] = [];
+    let skipped = 0;
+    for (const p of paths) {
+      try {
+        const name = p.split(/[\\/]/).pop() || "immagine";
+        blocks.push(`![${imgAlt(name)}](${await readImageDataUrl(p)})`);
+      } catch {
+        skipped++;
+      }
+    }
+    commitNoteImages(target, s, e, blocks, skipped, paths.length);
+  }
+  // NOTE: on Windows/WebView2 Tauri's native drag-drop (dragDropEnabled, default on)
+  // intercepts OS file drops, so these HTML5 handlers never receive files — the real
+  // image-drop path is the global onDragDropEvent handler routing to
+  // insertNoteImagePaths. These remain as a harmless fallback if native DnD is off.
+  function onNoteDrop(ev: DragEvent) {
+    const files = ev.dataTransfer?.files;
+    if (!files || !files.length) return;
+    const imgs = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (!imgs.length) return; // let non-image drops (e.g. text) behave normally
+    ev.preventDefault();
+    void insertNoteImages(imgs);
+  }
+  function onNoteDragOver(ev: DragEvent) {
+    // Allow the drop only when it carries files (images), so text DnD still works.
+    if (ev.dataTransfer?.types?.includes("Files")) ev.preventDefault();
+  }
+  function onNotePaste(ev: ClipboardEvent) {
+    const items = ev.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.kind === "file" && it.type.startsWith("image/")) {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (!files.length) return; // plain-text paste falls through untouched
+    ev.preventDefault();
+    void insertNoteImages(files);
+  }
   /** Move the paragraph/block containing the cursor up or down (reorder images/text).
    *  Blocks are separated by runs of 2+ newlines; boundaries are computed exactly so
    *  the right block moves regardless of how many blank lines separate them. */
@@ -3536,6 +3682,23 @@
       status = fmt === "html" ? "Appunto esportato in HTML ✓" : "Appunto esportato in LaTeX ✓ (con le figure)";
     } catch (e) {
       status = "Esportazione non riuscita: " + e;
+    }
+  }
+  /** Export the note to PDF: render it to a self-contained HTML page, then open the
+   *  print dialog on that page alone (the user chooses "Salva come PDF"). */
+  async function exportNotePdf() {
+    if (!noteView) return;
+    await flushNote();
+    if (!noteSaved) {
+      status = "Salvataggio non riuscito: riprova prima di esportare";
+      return;
+    }
+    try {
+      const html = await noteExportHtml(noteView.slug);
+      await printHtml(html);
+      status = "Apri la stampa: scegli «Salva come PDF» per esportare";
+    } catch (e) {
+      status = "Esportazione in PDF non riuscita: " + e;
     }
   }
   /** Persist the current note. Single-flight (concurrent callers await the same
@@ -4592,12 +4755,14 @@
                 <span class="notesaved" class:pending={!noteSaved}>{noteSaved ? "Salvato ✓" : "Salvo…"}</span>
                 <div class="notemodes">
                   <button class="ghost small" class:on={noteMode === "edit"} onclick={() => (noteMode = "edit")} title="Modifica il Markdown">Modifica</button>
+                  <button class="ghost small" class:on={noteMode === "split"} onclick={() => { noteMode = "split"; renderLivePreview(); }} title="Modifica con anteprima affiancata in tempo reale">Affiancato</button>
                   <button class="ghost small" class:on={noteMode === "preview"} onclick={() => { noteMode = "preview"; refreshNotePreview(); }} title="Anteprima resa (formule, collegamenti, immagini)">Anteprima</button>
                 </div>
                 <div class="noteexport">
                   <span class="noteexplbl">Esporta</span>
                   <button class="ghost small" onclick={() => exportNoteAs("html")} title="Esporta come pagina HTML autonoma (formule in MathML e immagini incluse)">HTML</button>
                   <button class="ghost small" onclick={() => exportNoteAs("latex")} title="Esporta come documento LaTeX (.tex con le figure estratte in una cartella)">LaTeX</button>
+                  <button class="ghost small" onclick={exportNotePdf} title="Apre la stampa dell'appunto reso: scegli «Salva come PDF»">PDF</button>
                 </div>
               </header>
               <div class="noteinfo">
@@ -4605,7 +4770,7 @@
                 <span class="noteinfodate" title="Data di creazione del file">creata {fmtNoteDate(noteView.created_at)}</span>
                 <span class="noteinfodate" title="Ultima modifica">· modificata {fmtNoteDate(noteView.updated_at)}</span>
               </div>
-              {#if noteMode === "edit"}
+              {#if noteMode === "edit" || noteMode === "split"}
                 <div class="noteedtoolbar" role="toolbar" aria-label="Formattazione">
                   <button onclick={() => mdLinePrefix("# ", true)} title="Titolo (H1)"><b>T</b></button>
                   <button onclick={() => mdLinePrefix("## ", true)} title="Sottotitolo (H2)">T₂</button>
@@ -4625,15 +4790,26 @@
                   <button onclick={() => mdMoveBlock(-1)} title="Sposta su il blocco (paragrafo/immagine)">↑</button>
                   <button onclick={() => mdMoveBlock(1)} title="Sposta giù il blocco (paragrafo/immagine)">↓</button>
                 </div>
-                <textarea
-                  class="noteeditor"
-                  bind:this={noteEditorEl}
-                  bind:value={noteDraft}
-                  oninput={onNoteInput}
-                  onblur={flushNote}
-                  placeholder={"Scrivi in Markdown…\n\nUsa [[Titolo di un altro appunto]] per collegare un appunto, [[@citekey]] o [[Titolo del paper]] per un documento. $$ … $$ per una formula."}
-                  spellcheck="false"
-                ></textarea>
+                <div class="noteedwrap" class:split={noteMode === "split"}>
+                  <textarea
+                    class="noteeditor"
+                    bind:this={noteEditorEl}
+                    bind:value={noteDraft}
+                    oninput={onNoteInput}
+                    onblur={flushNote}
+                    ondrop={onNoteDrop}
+                    ondragover={onNoteDragOver}
+                    onpaste={onNotePaste}
+                    placeholder={"Scrivi in Markdown…\n\nTrascina o incolla un'immagine per inserirla. Usa [[Titolo di un altro appunto]] per collegare un appunto, [[@citekey]] o [[Titolo del paper]] per un documento. $$ … $$ per una formula."}
+                    spellcheck="false"
+                  ></textarea>
+                  {#if noteMode === "split"}
+                    <article class="wikihtml notehtml livepreview">
+                      <!-- eslint-disable-next-line svelte/no-at-html-tags -- HTML sanificato dal backend (ammonia) -->
+                      {@html livePreviewHtml}
+                    </article>
+                  {/if}
+                </div>
               {:else}
                 <article class="wikihtml notehtml" use:noteLinksAction>
                   <!-- eslint-disable-next-line svelte/no-at-html-tags -- HTML sanificato dal backend (ammonia) -->
@@ -5176,7 +5352,7 @@
     {/if}
   </div>
 
-  {#if dragOver}<div class="dropmask"><span>Rilascia i PDF per importarli</span></div>{/if}
+  {#if dragOver}<div class="dropmask"><span>{noteEditorActive() ? "Rilascia l'immagine per inserirla nell'appunto (o un PDF per importarlo)" : "Rilascia i PDF per importarli"}</span></div>{/if}
 
   {#if showCoach}
     <div class="coach" role="dialog" aria-label="Suggerimento iniziale">
@@ -7522,16 +7698,36 @@
   .noteedtoolbar button:hover { background: var(--accent-soft); border-color: var(--border); }
   .noteedtoolbar button code { font-family: var(--mono, monospace); font-size: 12px; }
   .edsep { width: 1px; align-self: stretch; margin: 3px 4px; background: var(--border-soft); }
-  .noteedtoolbar + .noteeditor { margin-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
+  .noteedwrap { margin-top: 14px; }
+  .noteedtoolbar + .noteedwrap { margin-top: 0; }
+  .noteedtoolbar + .noteedwrap .noteeditor { margin-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
   .noteeditor {
     display: block; width: 100%; max-width: 820px; box-sizing: border-box;
-    min-height: 60vh; margin-top: 14px; resize: vertical;
+    min-height: 60vh; margin-top: 0; resize: vertical;
     background: var(--field); border: 1px solid var(--border); border-radius: var(--r-sm);
     color: var(--text); padding: 14px 16px; outline: none;
     font-family: var(--mono, ui-monospace, "Cascadia Code", Consolas, monospace);
     font-size: 13.5px; line-height: 1.65; tab-size: 2;
   }
   .noteeditor:focus { border-color: var(--accent); }
+  /* Side-by-side ("Affiancato") mode: editor left, live preview right. */
+  .noteedwrap.split {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    max-width: 1280px; align-items: stretch;
+  }
+  .noteedwrap.split .noteeditor { max-width: none; height: 68vh; min-height: 0; resize: none; }
+  /* `.notehtml { margin-top: 14px }` would otherwise win by source order and push the
+     preview column 14px below the editor — pin it flush with a higher-specificity rule. */
+  .noteedwrap.split .livepreview {
+    margin-top: 0; overflow: auto; height: 68vh; box-sizing: border-box;
+    background: var(--field); border: 1px solid var(--border); border-radius: var(--r-sm);
+    padding: 14px 18px;
+  }
+  .noteedtoolbar + .noteedwrap.split .livepreview { border-top-left-radius: 0; border-top-right-radius: 0; }
+  @media (max-width: 900px) {
+    .noteedwrap.split { grid-template-columns: 1fr; }
+    .noteedwrap.split .noteeditor, .livepreview { height: 44vh; }
+  }
   .notehtml { margin-top: 14px; }
   /* Rendered math (MathML) and the raw-LaTeX fallback in the note/wiki preview. */
   .notehtml :global(math[display="block"]), .wikihtml :global(math[display="block"]) {

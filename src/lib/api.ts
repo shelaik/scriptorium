@@ -157,6 +157,9 @@ export const writeTextFile = (path: string, content: string) =>
 /** Write raw bytes (from a base64/data-URL string) to a file — used to save a PNG. */
 export const writeBinaryFile = (path: string, base64: string) =>
   invoke<void>("write_binary_file", { path, base64 });
+/** Read an image file from disk as a `data:<mime>;base64,…` URL (for OS drag&drop into a note). */
+export const readImageDataUrl = (path: string) =>
+  invoke<string>("read_image_data_url", { path });
 
 /** List documents, newest first, optionally filtered by tag, collection or flag. */
 export const listDocuments = (filter?: {
@@ -830,6 +833,10 @@ export const getNote = (slug: string) => invoke<NoteView>("get_note", { slug });
 /** Export a note to a file: format "html" (self-contained) or "latex" (.tex + figures). */
 export const exportNote = (slug: string, format: "html" | "latex", path: string) =>
   invoke<void>("export_note", { slug, format, path });
+/** Render draft Markdown to sanitized HTML (live editor preview; math + images). */
+export const previewMarkdown = (md: string) => invoke<string>("preview_markdown", { md });
+/** The note as a standalone HTML document (for printing to PDF). */
+export const noteExportHtml = (slug: string) => invoke<string>("note_export_html", { slug });
 /** Create a note from a title; returns its slug. */
 export const createNote = (title: string) => invoke<string>("create_note", { title });
 /** Overwrite a note's body; returns refreshed metadata. */
