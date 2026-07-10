@@ -62,3 +62,41 @@ export function tableToLatex(grid: string[][]): string {
     "\\end{table}",
   ].join("\n");
 }
+
+/** Render a table grid as a GitHub-flavored Markdown table. The first row is the
+ *  header (with a `---` separator) when there is more than one row. Pipes and
+ *  newlines inside cells are escaped so they don't break the table. */
+export function tableToMarkdown(grid: string[][]): string {
+  const rows = (grid ?? []).filter((r) => r && r.length);
+  if (!rows.length) return "";
+  const ncol = Math.max(...rows.map((r) => r.length));
+  const esc = (c: string) => (c ?? "").replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
+  const fmt = (r: string[]) => {
+    const cells = r.map(esc);
+    while (cells.length < ncol) cells.push("");
+    return "| " + cells.join(" | ") + " |";
+  };
+  const sep = "| " + Array(ncol).fill("---").join(" | ") + " |";
+  const out = [fmt(rows[0]), sep];
+  for (const r of rows.slice(1)) out.push(fmt(r));
+  return out.join("\n");
+}
+
+/** Render a table grid as CSV (RFC 4180-ish): fields with a comma, quote, or
+ *  newline are wrapped in double quotes and internal quotes are doubled. */
+export function tableToCsv(grid: string[][]): string {
+  const rows = (grid ?? []).filter((r) => r && r.length);
+  if (!rows.length) return "";
+  const ncol = Math.max(...rows.map((r) => r.length));
+  const cell = (c: string) => {
+    const v = c ?? "";
+    return /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  };
+  return rows
+    .map((r) => {
+      const cells = r.map(cell);
+      while (cells.length < ncol) cells.push(""); // pad ragged rows to equal field count
+      return cells.join(",");
+    })
+    .join("\n");
+}

@@ -86,6 +86,7 @@
     getAiSettings,
     setAiSettings,
     aiListModels,
+    aiUnloadModels,
     aiStatus as fetchAiStatus,
     aiServerStart,
     aiServerStop,
@@ -504,7 +505,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.23";
+  const APP_VERSION = "0.8.24";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1728,12 +1729,40 @@
     const name = provider === "lmstudio" ? "LM Studio" : "Ollama";
     await persistAi();
     try {
+      // Unload models FIRST (frees VRAM via the API while the server is still up),
+      // then stop the server. Killing the server alone can orphan the model runner
+      // and leave the GPU memory allocated.
+      try { await aiUnloadModels(); } catch { /* best-effort */ }
       await aiServerStop(provider);
       status = `${name}: fermato`;
       setTimeout(() => verifyProvider(provider), 1000);
     } catch (e) {
       status = "Arresto non riuscito: " + e;
     }
+  }
+  /** Toolbar/radial: free the GPU by unloading the active provider's models from
+   *  VRAM, leaving the server and the AI feature running (reloads on next use). */
+  async function freeGpuMemory() {
+    try {
+      const n = await aiUnloadModels();
+      status = n > 0 ? `GPU liberata — ${n} modell${n === 1 ? "o" : "i"} scaricat${n === 1 ? "o" : "i"} dalla VRAM ✓` : "GPU liberata (nessun modello era caricato) ✓";
+      setTimeout(() => refreshAiStatus(), 800);
+    } catch (e) {
+      status = "Impossibile liberare la GPU: " + e;
+    }
+  }
+  /** Toolbar/radial: fully stop the AI — unload models, stop the local server, and
+   *  turn the AI feature off (the switch in Impostazioni). */
+  async function stopAiFully() {
+    const provider: AiProvider = aiProvider;
+    try { await aiUnloadModels(); } catch { /* best-effort */ }
+    try { await aiServerStop(provider); } catch { /* best-effort — may be external */ }
+    aiEnabled = false;
+    try {
+      await persistAi();
+    } catch { /* ignore */ }
+    status = "AI fermata: modelli scaricati, server arrestato, AI disattivata";
+    setTimeout(() => refreshAiStatus(), 800);
   }
   async function summarizeDoc(doc: DocumentItem) {
     aiBusy = doc.id;
@@ -2997,6 +3026,18 @@
         ],
       },
       { id: "g-emb", label: "Indice semantico", icon: I.layers, hint: `${emb.embedded}/${emb.total} indicizzati — abilita ricerca per significato, Correlati e Costellazione`, disabled: generating || emb.embedded >= emb.total || emb.total === 0, action: () => generateIndex() },
+      ...(aiStat?.enabled
+        ? [{
+            id: "g-aimem",
+            label: "Memoria AI",
+            icon: I.ai,
+            hint: "Libera la GPU (scarica i modelli) o ferma del tutto l'AI locale",
+            children: [
+              { id: "am-free", label: "Libera GPU — scarica i modelli", hint: "Scarica i modelli dalla VRAM; il server e l'AI restano attivi (si ricaricano al bisogno)", disabled: !aiStat?.reachable, action: () => freeGpuMemory() },
+              { id: "am-stop", label: "Ferma AI — server e spegni", hint: "Scarica i modelli, ferma il server locale e disattiva l'AI", action: () => stopAiFully() },
+            ],
+          }]
+        : []),
       { id: "g-backup", label: "Backup libreria", icon: I.backup, hint: "Copia completa della libreria (PDF + database) in una cartella", action: () => doBackup() },
       { id: "g-trash", label: "Cestino", icon: I.trash, hint: "I documenti eliminati (ripristinabili)", action: () => setFilter({ kind: "trash" }) },
       { id: "g-term", label: "Terminale", icon: I.term, hint: "PowerShell integrato nella cartella dei PDF", action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
@@ -3286,7 +3327,7 @@
   /** Open the destination picker for a piece of text originating from `d`. */
   async function openSendToNote(
     d: DocumentItem | null,
-    part: { content: string; label?: string; page?: number | null; collapse?: boolean; code?: string | null },
+    part: { content: string; label?: string; page?: number | null; collapse?: boolean; code?: string | null; raw?: boolean },
     pos: { x: number; y: number },
   ) {
     if (!d || !part.content.trim()) {
@@ -3313,6 +3354,7 @@
         label: part.label ?? null,
         collapse: part.collapse ?? false,
         code: part.code ?? null,
+        raw: part.raw ?? false,
       },
       pos,
     };
@@ -5032,7 +5074,7 @@
       aiEnabled={!!aiStat?.enabled}
       initialPage={openDocPage}
       onClose={() => { openDoc = null; openDocPage = null; }}
-      onSendToNote={(content, page, pos, opts) => openSendToNote(openDoc, { content, page, collapse: !opts?.code, label: opts?.label, code: opts?.code }, pos)}
+      onSendToNote={(content, page, pos, opts) => openSendToNote(openDoc, { content, page, collapse: !opts?.code && !opts?.raw, label: opts?.label, code: opts?.code, raw: opts?.raw }, pos)}
       onOpenNotes={() => { openDoc = null; openDocPage = null; openNotesView(); }}
     />
   {/if}

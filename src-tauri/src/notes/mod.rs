@@ -72,10 +72,15 @@ pub fn note_excerpt(md: &str) -> String {
             seen_title = true; // skip the title line
             continue;
         }
-        // Strip a little markdown noise for the preview.
-        let clean = t.trim_start_matches('#').trim_start_matches('>').trim_start_matches(['-', '*', '+']).trim();
+        // Collapse an embedded image (e.g. a pasted base64 figure) to a short marker
+        // so its data-URI blob doesn't fill the preview; else strip markdown noise.
+        let clean = if t.starts_with("![") {
+            "[immagine]".to_string()
+        } else {
+            t.trim_start_matches('#').trim_start_matches('>').trim_start_matches(['-', '*', '+']).trim().to_string()
+        };
         if !clean.is_empty() {
-            parts.push(clean.to_string());
+            parts.push(clean);
         }
         if parts.join(" ").chars().count() > 160 {
             break;

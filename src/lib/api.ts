@@ -146,9 +146,17 @@ export const formulaToLatexAi = (imageBase64: string, model: string, multi = fal
 /** Extract a cropped table image into a grid via a local vision LLM. */
 export const tableFromImageAi = (imageBase64: string, model: string) =>
   invoke<string[][]>("table_from_image_ai", { imageBase64, model });
+/** OCR a cropped text region via a local vision LLM (for scanned pages). */
+export const textFromImageAi = (imageBase64: string, model: string) =>
+  invoke<string>("text_from_image_ai", { imageBase64, model });
+/** Unload the active provider's models from VRAM; returns how many were freed (Ollama). */
+export const aiUnloadModels = () => invoke<number>("ai_unload_models");
 /** Write arbitrary text to a file. */
 export const writeTextFile = (path: string, content: string) =>
   invoke<void>("write_text_file", { path, content });
+/** Write raw bytes (from a base64/data-URL string) to a file — used to save a PNG. */
+export const writeBinaryFile = (path: string, base64: string) =>
+  invoke<void>("write_binary_file", { path, base64 });
 
 /** List documents, newest first, optionally filtered by tag, collection or flag. */
 export const listDocuments = (filter?: {

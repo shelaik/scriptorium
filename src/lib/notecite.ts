@@ -22,6 +22,9 @@ export interface NotePayload {
   /** When set (e.g. "latex"), render the content as a fenced code block in that
    *  language instead of a blockquote, with the attribution as a caption below. */
   code?: string | null;
+  /** When true, `content` is already Markdown (e.g. an `![](…)` image embed or a
+   *  Markdown table) and is inserted verbatim, with the attribution as a caption. */
+  raw?: boolean;
 }
 
 /** A wikilink token that resolves back to the source paper. */
@@ -49,8 +52,27 @@ function buildCodeBlock(p: NotePayload): string {
   return `${block}\n\n*${label}${ref}${page}*`;
 }
 
+/** Verbatim Markdown (an image embed or a Markdown table) with a source caption
+ *  below. The content is inserted as-is; only the attribution line is added. */
+function buildRawBlock(p: NotePayload): string {
+  // Neutralize `[[…]]` in the (untrusted) extracted body so a Markdown table cell
+  // or OCR'd text that happens to contain wikilink syntax can't create spurious
+  // backlinks — same guard the blockquote path applies. Image embeds (`![](…)`)
+  // use single brackets and are unaffected.
+  const body = (p.content ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n+$/, "")
+    .replace(/\[\[/g, "[\\[")
+    .replace(/\]\]/g, "]\\]");
+  const ref = refToken(p.citekey, p.title);
+  const label = p.label && p.label.trim() ? `${p.label.trim()} ` : "";
+  const page = p.page != null ? `, p. ${p.page}` : "";
+  return `${body}\n\n*${label}${ref}${page}*`;
+}
+
 /** The Markdown block to append to a note. */
 export function buildQuoteBlock(p: NotePayload): string {
+  if (p.raw) return buildRawBlock(p);
   if (p.code) return buildCodeBlock(p);
   let text = (p.content ?? "").replace(/\r\n/g, "\n");
   if (p.collapse) {

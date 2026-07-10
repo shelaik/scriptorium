@@ -214,6 +214,50 @@ pub async fn generate_vision(
     }
 }
 
+/// Models Ollama currently holds in VRAM (`GET /api/ps`). Empty on error/none.
+pub async fn loaded_models(client: &reqwest::Client, url: &str) -> Result<Vec<String>> {
+    let base = base_url(url);
+    let resp = client
+        .get(format!("{base}/api/ps"))
+        .send()
+        .await
+        .context("Ollama non raggiungibile (è in esecuzione?)")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Ollama ha risposto HTTP {}", resp.status());
+    }
+    let body: Value = resp.json().await.context("risposta Ollama non valida")?;
+    Ok(body["models"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Free the GPU by unloading every model Ollama currently holds: re-request each
+/// loaded model with `keep_alive: 0`, which makes Ollama release its VRAM at once.
+/// Returns how many models were unloaded.
+pub async fn unload_ollama(client: &reqwest::Client, url: &str) -> Result<usize> {
+    let base = base_url(url);
+    let models = loaded_models(client, url).await?;
+    let mut n = 0usize;
+    for m in &models {
+        let ok = client
+            .post(format!("{base}/api/generate"))
+            .json(&json!({ "model": m, "keep_alive": 0 }))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if ok {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 /// Streaming generation: invokes `on_token` with each text delta as it arrives
 /// and returns the full text. Lets the RAG answer appear progressively.
 pub async fn generate_stream<F: FnMut(&str)>(

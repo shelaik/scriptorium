@@ -231,7 +231,20 @@ pub fn render_html(md: &str) -> String {
     let parser = Parser::new_ext(md, opts);
     let mut unsafe_html = String::new();
     html::push_html(&mut unsafe_html, parser);
-    ammonia::clean(&unsafe_html)
+    // Allow inline `data:` image URIs so embedded figures (Figura → Appunti) render,
+    // but ONLY on `<img src>` — every other URL attribute (e.g. `<a href>`) keeps the
+    // default safe schemes, so a `data:text/html` link can't slip through.
+    let mut b = ammonia::Builder::default();
+    b.add_url_schemes(["data"]);
+    b.attribute_filter(|element, attribute, value| {
+        if value.starts_with("data:")
+            && !(element == "img" && attribute == "src" && value.starts_with("data:image/"))
+        {
+            return None;
+        }
+        Some(value.into())
+    });
+    b.clean(&unsafe_html).to_string()
 }
 
 #[cfg(test)]

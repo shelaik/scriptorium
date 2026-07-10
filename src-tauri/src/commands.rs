@@ -3478,10 +3478,67 @@ pub async fn table_from_image_ai(
     Ok(grid)
 }
 
+/// OCR a cropped text region via a local vision LLM (Ollama / LM Studio) — an
+/// alternative to native pdfium extraction, useful for scanned pages.
+#[tauri::command]
+pub async fn text_from_image_ai(
+    app: AppHandle,
+    image_base64: String,
+    model: String,
+) -> Result<String, String> {
+    let (provider, url, model) = vision_target(&app, model)?;
+    let b64 = strip_data_url(&image_base64).to_string();
+    let prompt = "You are an OCR engine. Transcribe ALL the text visible in this image faithfully, \
+        preserving reading order and line/paragraph breaks. Do not translate, summarize, comment, \
+        or add anything. Output ONLY the transcribed text — no explanation, no code fences.";
+    let client = ai::client().map_err(|e| e.to_string())?;
+    let (out, _truncated) = ai::generate_vision(&client, &provider, &url, &model, prompt, &b64, 2048)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let text = out.trim().to_string();
+    if text.is_empty() {
+        return Err("Il modello non ha restituito testo".into());
+    }
+    Ok(text)
+}
+
+/// Free GPU/VRAM by unloading the models the active provider currently holds.
+/// Ollama: re-request each loaded model with `keep_alive:0`. LM Studio: `lms unload --all`.
+/// Returns the number of Ollama models unloaded (0 for LM Studio, which is fire-and-forget).
+#[tauri::command]
+pub async fn ai_unload_models(app: AppHandle) -> Result<usize, String> {
+    let (provider, url) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let c = ai_config(&conn);
+        (c.provider.clone(), c.active_url().to_string())
+    };
+    if ai::is_lmstudio(&provider) {
+        run_powershell(&format!("{LMS_RESOLVE} & $lms unload --all; exit 0"))?;
+        Ok(0)
+    } else {
+        let client = ai::client().map_err(|e| e.to_string())?;
+        ai::unload_ollama(&client, &url)
+            .await
+            .map_err(|e| format!("{e:#}"))
+    }
+}
+
 /// Write arbitrary text to a file (used by "extract text" → Save .txt/.md).
 #[tauri::command]
 pub fn write_text_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+/// Write raw bytes (decoded from a base64 or data-URL string) to a file — used to
+/// save a cropped page region as a real PNG image.
+#[tauri::command]
+pub fn write_binary_file(path: String, base64: String) -> Result<(), String> {
+    let b64 = strip_data_url(&base64);
+    let bytes = BASE64_STANDARD
+        .decode(b64)
+        .map_err(|e| format!("base64 non valido: {e}"))?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())
 }
 
 /// Write a grid to a file as CSV, Markdown, or XLSX (by `format`).
@@ -6445,12 +6502,37 @@ fn read_vault(dir: &Path) -> Vec<(String, String, Option<i64>, Option<i64>)> {
 
 /// Upsert a note's searchable text into the `notes` shadow index (FTS follows via
 /// triggers). Best-effort — indexing must never block the .md file write.
+/// Replace inline base64 image data-URIs with a short marker so the FTS index
+/// stores captions and prose — not the hundreds of KB of base64 an embedded figure
+/// carries (which would bloat the DB and pollute search with non-word tokens).
+fn strip_data_uris(body: &str) -> String {
+    let needle = "data:image/";
+    if !body.contains(needle) {
+        return body.to_string();
+    }
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(pos) = rest.find(needle) {
+        out.push_str(&rest[..pos]);
+        out.push_str("data:image");
+        // Drop the payload up to the markdown image's `)` or the next whitespace/quote.
+        let after = &rest[pos + needle.len()..];
+        let end = after
+            .find(|c: char| c == ')' || c.is_whitespace() || c == '"' || c == '\'')
+            .unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn index_note(conn: &Connection, slug: &str, body: &str, updated_at: Option<i64>) {
     let title = notes::note_title(body);
+    let indexed = strip_data_uris(body);
     let _ = conn.execute(
         "INSERT INTO notes (slug, title, body, updated_at) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(slug) DO UPDATE SET title = excluded.title, body = excluded.body, updated_at = excluded.updated_at",
-        params![slug, title, body, updated_at],
+        params![slug, title, indexed, updated_at],
     );
 }
 
@@ -6845,9 +6927,11 @@ pub fn ai_server_stop(provider: String) -> Result<(), String> {
         // while LMS_RESOLVE still throws a real error if the CLI is missing.
         run_powershell(&format!("{LMS_RESOLVE} & $lms server stop; exit 0"))
     } else {
-        // Best-effort kill; never fail just because nothing was running.
+        // Best-effort kill; never fail just because nothing was running. `/T` kills
+        // the model-runner child process too — without it the runner is orphaned and
+        // keeps the model resident in VRAM (the GPU memory would never be freed).
         run_powershell(
-            "taskkill /F /IM 'ollama app.exe' 2>$null; taskkill /F /IM ollama.exe 2>$null; exit 0",
+            "taskkill /F /T /IM 'ollama app.exe' 2>$null; taskkill /F /T /IM ollama.exe 2>$null; exit 0",
         )
     }
 }

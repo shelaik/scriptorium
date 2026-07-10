@@ -19,8 +19,8 @@
   } from "$lib/api";
   import { printDocument } from "$lib/print";
   import { revealDocument } from "$lib/share";
-  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, getAiSettings, aiListModels } from "$lib/api";
-  import { escapeLatex, textToLatex, tableToLatex } from "$lib/latex";
+  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, writeBinaryFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, textFromImageAi, getAiSettings, aiListModels } from "$lib/api";
+  import { escapeLatex, textToLatex, tableToLatex, tableToMarkdown, tableToCsv } from "$lib/latex";
   import { save } from "@tauri-apps/plugin-dialog";
   import ShareMenu from "$lib/ShareMenu.svelte";
   import RadialMenu from "$lib/RadialMenu.svelte";
@@ -45,12 +45,13 @@
     initialPage?: number | null;
     onClose: () => void;
     /** Send content (with its page) to an appunto; handled by +page. `opts.code`
-     *  wraps it as a fenced code block (e.g. LaTeX) instead of a quote. */
+     *  wraps it as a fenced code block (e.g. LaTeX); `opts.raw` inserts it verbatim
+     *  as Markdown (an image embed or a Markdown table). */
     onSendToNote?: (
       content: string,
       page: number | null,
       pos: { x: number; y: number },
-      opts?: { code?: string; label?: string },
+      opts?: { code?: string; label?: string; raw?: boolean },
     ) => void;
     /** Close the reader and jump to the Appunti (.md notes) surface; handled by +page. */
     onOpenNotes?: () => void;
@@ -179,16 +180,31 @@
   let tablePage = 0;
   let tableError = $state("");
   let tableReq = 0; // epoch token, like formulaReq
-  // Text extraction: drag a region to pull its plain text.
+  // Text extraction: drag a region to pull its plain text (native) or OCR it (vision LLM).
   let textMode = $state(false);
   let textModal = $state(false);
   let textLoading = $state(false);
   let textContent = $state("");
+  let textEngine = $state<"native" | "ollama">("native");
+  let textImg = $state(""); // cropped region (data URL), for the vision OCR engine
+  let textRegion: { x: number; y: number; w: number; h: number } | null = null;
+  let textPageId = 0;
+  let textError = $state("");
+  let textReq = 0; // epoch token, like formulaReq
   // Page a table/text region was extracted from — cited when sending LaTeX to an appunto.
   let extractPage = $state<number | null>(null);
-  // Preview toggles in the extraction modals: raw vs. the generated LaTeX.
-  let textView = $state<"text" | "latex">("text");
+  // Table preview toggle: grid vs. the chosen export format.
   let tableView = $state<"grid" | "latex">("grid");
+  // Export format chosen in each modal (drives Copia / Salva / → Appunti).
+  let textFormat = $state<"txt" | "latex" | "md">("txt");
+  let tableFormat = $state<"md" | "latex" | "csv">("md");
+  let formulaFormat = $state<"latex" | "md">("latex");
+  // Figure extraction: drag a region, keep it as a PNG (save or embed in an appunto).
+  let figureMode = $state(false);
+  let figureModal = $state(false);
+  let figureImg = $state(""); // data URL of the cropped region
+  let figurePage = $state<number | null>(null);
+  let figureError = $state("");
   // Formula → LaTeX (local math-OCR): drag a region over an equation, recognize it.
   let formulaMode = $state(false);
   let formulaModal = $state(false);
@@ -205,6 +221,14 @@
   let visionModels = $state<string[]>([]);
   let visionModel = $state("");
   let visionModelsLoading = false; // in-flight guard: avoid concurrent model-list fetches
+  // A model whose name looks vision-capable (multimodal / VLM). Used to highlight
+  // VLMs in the picker and to auto-select a sensible default for the OCR engines.
+  const VISION_RE = /vl|vision|llava|minicpm|moondream|bakllava|granite.*vision|qwen.*vl|gemma.*3|pixtral|llama.*vision/i;
+  const isVisionModel = (m: string) => VISION_RE.test(m);
+  let visionGroups = $derived({
+    vision: visionModels.filter(isVisionModel),
+    other: visionModels.filter((m) => !isVisionModel(m)),
+  });
   let printing = $state(false);
   let notice = $state("");
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -499,6 +523,7 @@
       noteMode = false;
       textMode = false;
       formulaMode = false;
+      figureMode = false;
       clearSelection();
       setNotice("Modalità tabella: trascina un rettangolo attorno a una tabella");
     }
@@ -509,6 +534,7 @@
       noteMode = false;
       tableMode = false;
       formulaMode = false;
+      figureMode = false;
       clearSelection();
       setNotice("Estrai testo: trascina un rettangolo attorno al testo da copiare");
     }
@@ -519,8 +545,20 @@
       noteMode = false;
       tableMode = false;
       textMode = false;
+      figureMode = false;
       clearSelection();
       setNotice("Formula → LaTeX: trascina un rettangolo attorno a una formula");
+    }
+  }
+  function toggleFigure() {
+    figureMode = !figureMode;
+    if (figureMode) {
+      noteMode = false;
+      tableMode = false;
+      textMode = false;
+      formulaMode = false;
+      clearSelection();
+      setNotice("Figura → PNG: trascina un rettangolo attorno alla figura da ritagliare");
     }
   }
   /** Crop a screen-space rectangle out of a page's rendered canvas to a PNG data
@@ -599,6 +637,19 @@
     // Query in the unrotated (rotation-0) frame, like annotations.
     const r0 = rotateRect(norm, (360 - rotation) % 360);
     const region = { x: r0[0], y: r0[1], w: r0[2], h: r0[3] };
+    if (figureMode) {
+      figureMode = false;
+      const dataUrl = cropCanvasRegion(start.wrap, rect);
+      if (!dataUrl) {
+        setNotice("Impossibile ritagliare la figura");
+        return;
+      }
+      figureImg = dataUrl;
+      figurePage = page;
+      figureError = "";
+      figureModal = true;
+      return;
+    }
     if (formulaMode) {
       formulaMode = false;
       const dataUrl = cropCanvasRegion(start.wrap, rect);
@@ -615,18 +666,14 @@
     }
     if (textMode) {
       textMode = false;
+      // Keep both the region (native pdfium text) and a cropped image (the vision
+      // OCR engine); the modal's engine toggle chooses which to use.
+      textRegion = region;
+      textPageId = page;
+      textImg = cropCanvasRegion(start.wrap, rect) ?? "";
+      textEngine = "native";
       textModal = true;
-      textLoading = true;
-      textView = "text";
-      textContent = "";
-      try {
-        textContent = await extractRegionText(id, page, region);
-      } catch (err) {
-        error = "Errore estrazione testo: " + err;
-        textModal = false;
-      } finally {
-        textLoading = false;
-      }
+      runTextExtract("native");
       return;
     }
     tableMode = false;
@@ -639,13 +686,159 @@
     tableModal = true;
     runTable("native");
   }
-  async function copyText() {
+  async function selectTextEngine(engine: "native" | "ollama") {
+    textEngine = engine; // highlight the picked toggle right away
+    if (engine === "ollama") {
+      textLoading = true; // show progress while the model list loads
+      const req = textReq; // a competing selection bumps this via runTextExtract
+      await ensureVisionModels();
+      if (textReq !== req) return; // a newer engine choice superseded us
+    }
+    runTextExtract(engine);
+  }
+  /** (Re)extract the text region with the chosen engine: native pdfium or vision OCR. */
+  async function runTextExtract(engine: "native" | "ollama" = textEngine) {
+    const req = ++textReq;
+    textEngine = engine;
+    textLoading = true;
+    textError = "";
+    textContent = "";
     try {
-      await navigator.clipboard.writeText(textContent);
-      setNotice("Testo copiato negli appunti ✓");
+      let out: string;
+      if (engine === "ollama") {
+        if (!textImg) throw "Immagine del testo non disponibile";
+        if (!visionModel) throw "Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).";
+        out = await textFromImageAi(textImg, visionModel);
+      } else {
+        if (!textRegion) throw "Regione non disponibile";
+        out = await extractRegionText(id, textPageId, textRegion);
+      }
+      if (textReq !== req) return;
+      textContent = out;
+    } catch (err) {
+      if (textReq !== req) return;
+      textError = String(err);
+      setNotice("Errore estrazione testo: " + err);
+    } finally {
+      if (textReq === req) textLoading = false;
+    }
+  }
+
+  // ----- Unified format-aware export (Copia / Salva / → Appunti) for the modals -----
+  /** The current text/table/formula rendered in the given export format. */
+  function textOut(fmt: "txt" | "latex" | "md" = textFormat): string {
+    return fmt === "latex" ? textToLatex(textContent) : textContent;
+  }
+  function tableOut(fmt: "md" | "latex" | "csv" = tableFormat): string {
+    if (fmt === "latex") return tableToLatex(tableGrid);
+    if (fmt === "csv") return tableToCsv(tableGrid);
+    return tableToMarkdown(tableGrid);
+  }
+  function formulaOut(fmt: "latex" | "md" = formulaFormat): string {
+    const l = formulaLatex.trim();
+    return fmt === "md" ? `$$\n${l}\n$$` : l;
+  }
+  async function copyFormatted(str: string) {
+    const t = (str ?? "").trim();
+    if (!t) {
+      setNotice("Niente da copiare");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(str);
+      setNotice("Copiato negli appunti ✓");
     } catch {
       setNotice("Impossibile copiare negli appunti");
     }
+  }
+  async function saveFormatted(str: string, base: string, ext: string) {
+    if (!str.trim()) {
+      setNotice("Niente da salvare");
+      return;
+    }
+    const path = await save({
+      defaultPath: `${base}.${ext}`,
+      filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+    });
+    if (!path) return;
+    try {
+      await writeTextFile(path, str);
+      setNotice("Salvato ✓");
+    } catch (e) {
+      error = "Errore salvataggio: " + e;
+    }
+  }
+  /** Send content to the appunto picker; `code` wraps it in a fenced block, `raw`
+   *  inserts it verbatim as Markdown, otherwise it becomes a blockquote. */
+  function sendFormatted(
+    content: string,
+    opts: { code?: string; raw?: boolean; label: string },
+    e: MouseEvent,
+  ) {
+    if (!content.trim()) {
+      setNotice("Niente da mandare agli Appunti");
+      return;
+    }
+    onSendToNote?.(content, extractPage, { x: e.clientX, y: e.clientY }, opts);
+  }
+  const textExt = () => (textFormat === "latex" ? "tex" : textFormat === "md" ? "md" : "txt");
+  const tableExt = () => (tableFormat === "latex" ? "tex" : tableFormat === "csv" ? "csv" : "md");
+  function textCopy() {
+    copyFormatted(textOut());
+  }
+  function textSave() {
+    saveFormatted(textOut(), "testo", textExt());
+  }
+  function textToNote(e: MouseEvent) {
+    textModal = false;
+    if (textFormat === "latex") sendFormatted(textToLatex(textContent), { code: "latex", label: "Testo (LaTeX) da" }, e);
+    else if (textFormat === "md") sendFormatted(textContent, { raw: true, label: "Testo da" }, e);
+    else sendFormatted(textContent, { label: "Testo da" }, e);
+  }
+  function tableCopy() {
+    copyFormatted(tableOut());
+  }
+  function tableSave() {
+    saveFormatted(tableOut(), "tabella", tableExt());
+  }
+  function tableToNote(e: MouseEvent) {
+    tableModal = false;
+    if (tableFormat === "latex") sendFormatted(tableToLatex(tableGrid), { code: "latex", label: "Tabella (LaTeX) da" }, e);
+    else if (tableFormat === "csv") sendFormatted(tableToCsv(tableGrid), { code: "csv", label: "Tabella (CSV) da" }, e);
+    else sendFormatted(tableToMarkdown(tableGrid), { raw: true, label: "Tabella da" }, e);
+  }
+  function formulaCopyFmt() {
+    copyFormatted(formulaOut());
+  }
+  function formulaSave() {
+    saveFormatted(formulaOut(), "formula", formulaFormat === "md" ? "md" : "tex");
+  }
+  function formulaToNoteFmt(e: MouseEvent) {
+    formulaModal = false;
+    if (formulaFormat === "md") sendFormatted(formulaOut("md"), { raw: true, label: "Formula da" }, e);
+    else sendFormatted(formulaLatex, { code: "latex", label: "Formula (LaTeX) da" }, e);
+  }
+  // ----- Figure (PNG) export -----
+  async function saveFigurePng() {
+    if (!figureImg) return;
+    const path = await save({
+      defaultPath: `figura${figurePage != null ? "-p" + figurePage : ""}.png`,
+      filters: [{ name: "PNG", extensions: ["png"] }],
+    });
+    if (!path) return;
+    try {
+      await writeBinaryFile(path, figureImg);
+      setNotice("Figura salvata ✓");
+    } catch (e) {
+      figureError = "Errore salvataggio PNG: " + e;
+    }
+  }
+  function figureToNote(e: MouseEvent) {
+    if (!figureImg) return;
+    figureModal = false;
+    const cap = `Figura${figurePage != null ? ` — p. ${figurePage}` : ""}`;
+    const md = `![${cap}](${figureImg})`;
+    onSendToNote?.(md, figurePage, { x: e.clientX, y: e.clientY }, { raw: true, label: "Figura da" });
   }
   /** Copy an arbitrary snippet (the current PDF text selection) to the clipboard. */
   async function copySelection(text: string) {
@@ -667,19 +860,6 @@
     if (live && !live.isCollapsed && live.rangeCount > 0) return live.toString().trim();
     return "";
   }
-  async function saveText(ext: "txt" | "md") {
-    const path = await save({
-      defaultPath: `estratto.${ext}`,
-      filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
-    });
-    if (!path) return;
-    try {
-      await writeTextFile(path, textContent);
-      setNotice("Testo salvato ✓");
-    } catch (e) {
-      error = "Errore salvataggio: " + e;
-    }
-  }
   async function doExportTable(fmt: "csv" | "md" | "xlsx") {
     const path = await save({
       defaultPath: `tabella.${fmt}`,
@@ -694,11 +874,15 @@
     }
   }
   async function doCleanTable() {
+    const req = ++tableReq; // claim this epoch so a re-extract mid-clean isn't clobbered
     aiCleaning = true;
     try {
-      tableGrid = await aiCleanTable(tableGrid);
+      const cleaned = await aiCleanTable(tableGrid);
+      if (tableReq !== req) return; // a newer extraction superseded this clean
+      tableGrid = cleaned;
       setNotice("Tabella rifinita con AI");
     } catch (e) {
+      if (tableReq !== req) return;
       setNotice("AI non disponibile: " + e);
     } finally {
       aiCleaning = false;
@@ -717,28 +901,6 @@
       setNotice("Impossibile copiare negli appunti");
     }
   }
-  /** Hand a LaTeX snippet to +page's "send to appunto" picker as a code block. */
-  function latexToNote(latex: string, label: string, e: MouseEvent) {
-    if (!latex.trim()) {
-      setNotice("Niente da convertire in LaTeX");
-      return;
-    }
-    onSendToNote?.(latex, extractPage, { x: e.clientX, y: e.clientY }, { code: "latex", label });
-  }
-  function tableLatexCopy() {
-    copyLatex(tableToLatex(tableGrid));
-  }
-  function tableLatexToNote(e: MouseEvent) {
-    tableModal = false;
-    latexToNote(tableToLatex(tableGrid), "Tabella (LaTeX) da", e);
-  }
-  function textLatexCopy() {
-    copyLatex(textToLatex(textContent));
-  }
-  function textLatexToNote(e: MouseEvent) {
-    textModal = false;
-    latexToNote(textToLatex(textContent), "Testo (LaTeX) da", e);
-  }
   /** Recognize the currently-cropped formula image (in the modal) as LaTeX.
    *  `multi` segments several stacked equations into one aligned block. */
   /** Lazily fetch the provider's model list for the "Ollama" engine and pick a
@@ -752,14 +914,11 @@
       const models = await aiListModels(aiSettings.provider as "ollama" | "lmstudio", url);
       visionModels = models;
       if (!visionModel || !models.includes(visionModel)) {
-        const guess = models.find((m) =>
-          /vl|vision|llava|minicpm|moondream|bakllava|granite.*vision|qwen.*vl|gemma.*3|pixtral|llama.*vision/i.test(m),
-        );
         // Only auto-select something that looks vision-capable. Never silently
         // fall back to a text or embedding model — leave the picker empty so the
         // run shows a clear "select a vision model" error while the dropdown
         // still lists every model for a manual pick.
-        visionModel = guess ?? "";
+        visionModel = models.find(isVisionModel) ?? "";
       }
     } catch {
       /* leave the list empty; the run surfaces a clear error */
@@ -767,7 +926,7 @@
       visionModelsLoading = false;
     }
   }
-  function pickVisionModel(m: string, kind: "formula" | "table") {
+  function pickVisionModel(m: string, kind: "formula" | "table" | "text") {
     visionModel = m;
     try {
       localStorage.setItem("scriptorium-vision-model", m);
@@ -775,13 +934,16 @@
       /* ignore */
     }
     if (kind === "formula") runFormula(formulaMulti, "ollama");
-    else runTable("ollama");
+    else if (kind === "table") runTable("ollama");
+    else runTextExtract("ollama");
   }
   async function selectFormulaEngine(engine: "local" | "ollama") {
     formulaEngine = engine; // highlight the picked toggle right away
     if (engine === "ollama") {
       formulaLoading = true; // show progress while the model list loads
+      const req = formulaReq; // a competing selection bumps this via runFormula
       await ensureVisionModels();
+      if (formulaReq !== req) return; // a newer engine choice superseded us
     }
     runFormula(formulaMulti, engine);
   }
@@ -822,7 +984,9 @@
     tableEngine = engine; // highlight the picked toggle right away
     if (engine === "ollama") {
       tableLoading = true; // show progress while the model list loads
+      const req = tableReq; // a competing selection bumps this via runTable
       await ensureVisionModels();
+      if (tableReq !== req) return; // a newer engine choice superseded us
     }
     runTable(engine);
   }
@@ -852,13 +1016,6 @@
     } finally {
       if (tableReq === req) tableLoading = false;
     }
-  }
-  function formulaCopy() {
-    copyLatex(formulaLatex);
-  }
-  function formulaToNote(e: MouseEvent) {
-    formulaModal = false;
-    latexToNote(formulaLatex, "Formula (LaTeX) da", e);
   }
 
   function onMouseUp(e: MouseEvent) {
@@ -1144,6 +1301,10 @@
   function toggleNote() {
     noteMode = !noteMode;
     if (noteMode) {
+      tableMode = false;
+      textMode = false;
+      formulaMode = false;
+      figureMode = false;
       clearSelection();
       setNotice("Modalità nota: clicca un punto della pagina per aggiungere un appunto");
     }
@@ -1630,6 +1791,7 @@
           { id: "table", label: "Estrai tabella", checked: tableMode, action: toggleTable },
           { id: "text", label: "Estrai testo", checked: textMode, action: toggleText },
           { id: "formula", label: "Formula → LaTeX", checked: formulaMode, action: toggleFormula },
+          { id: "figure", label: "Figura → PNG", checked: figureMode, action: toggleFigure },
           { id: "rotl", label: "Ruota sx", action: () => rotate(-90) },
           { id: "rotr", label: "Ruota dx", action: () => rotate(90) },
           { id: "reveal", label: "Posizione", action: doReveal },
@@ -1677,9 +1839,11 @@
       else if (tableModal) tableModal = false;
       else if (textModal) textModal = false;
       else if (formulaModal) formulaModal = false;
+      else if (figureModal) figureModal = false;
       else if (tableMode) tableMode = false;
       else if (textMode) textMode = false;
       else if (formulaMode) formulaMode = false;
+      else if (figureMode) figureMode = false;
       else if (noteMode) noteMode = false;
       else if (lens) closeLens();
       else if (findOpen) closeFind();
@@ -1806,6 +1970,7 @@
       <button class="mitem" onclick={() => moreDo(toggleTable)} title="Estrai una tabella: trascina un rettangolo attorno alla tabella"><span class="mck">{tableMode ? "✓" : ""}</span>Estrai tabella</button>
       <button class="mitem" onclick={() => moreDo(toggleText)} title="Estrai testo: trascina un rettangolo attorno al testo"><span class="mck">{textMode ? "✓" : ""}</span>Estrai testo</button>
       <button class="mitem" onclick={() => moreDo(toggleFormula)} title="Riconosci una formula come LaTeX: trascina un rettangolo attorno all'equazione"><span class="mck">{formulaMode ? "✓" : ""}</span>Formula → LaTeX</button>
+      <button class="mitem" onclick={() => moreDo(toggleFigure)} title="Ritaglia una figura come immagine PNG: trascina un rettangolo attorno alla figura"><span class="mck">{figureMode ? "✓" : ""}</span>Figura → PNG</button>
       <div class="msep"></div>
       <button class="mitem" onclick={() => moreDo(doReveal)} title="Apri la posizione del PDF in Esplora risorse"><span class="mck"></span>Posizione</button>
       <button class="mitem" onclick={() => moreDo(doPrint)} disabled={printing} title="Stampa questo documento"><span class="mck"></span>{printing ? "Stampa…" : "Stampa"}</button>
@@ -2067,9 +2232,10 @@
           <li><kbd>I</kbd> <span>Modalità notte</span></li>
           <li><kbd>[</kbd> / <kbd>]</kbd> <span>Ruota</span></li>
           <li>Selezione testo <span>Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)</span></li>
-          <li>Formula → LaTeX <span>Da ⋯ Altro o dal radiale: trascina attorno a un'equazione, ottieni il LaTeX (Copia o → Appunti). Nella finestra scegli il motore: «Locale» (math-OCR integrato, il 1º uso scarica ~180 MB) o «Ollama» (un modello di visione locale). «Più righe» = più equazioni come blocco gathered</span></li>
-          <li>Estrai tabella <span>Nella finestra scegli il motore «Nativa» (dal testo del PDF) o «Ollama» (un modello di visione, utile per tabelle-immagine o PDF scansionati)</span></li>
-          <li>⋯ Altro <span>Rotazione, note, estrazione tabella/testo/formula, stampa, condivisione</span></li>
+          <li>Formula → LaTeX <span>Da ⋯ Altro o dal radiale: trascina attorno a un'equazione. Motore «Locale» (math-OCR integrato, il 1º uso scarica ~180 MB) o «Ollama» (modello di visione). «Più righe» = blocco gathered. Esporta come LaTeX o Markdown ($$…$$): Copia, Salva… o → Appunti</span></li>
+          <li>Estrai tabella / testo <span>Motore «Nativa» (dal testo del PDF) o «Ollama» (modello di visione — utile per tabelle-immagine e pagine scansionate). Esporta scegliendo il formato: tabella MD/LaTeX/CSV (+ Excel), testo Testo/LaTeX/MD — con Copia, Salva… o → Appunti</span></li>
+          <li>Figura → PNG <span>Da ⋯ Altro o dal radiale: trascina attorno a una figura per ritagliarla come immagine. «Salva PNG…» su file, oppure «→ Appunti» per incorporarla in un appunto</span></li>
+          <li>⋯ Altro <span>Rotazione, note, estrazione tabella/testo/formula/figura, stampa, condivisione</span></li>
           <li>Tasto destro <span>Menu radiale con i comandi di lettura</span></li>
           <li>Mouse fermo <span>La barra si nasconde; muovi il mouse per mostrarla</span></li>
           <li><kbd>Esc</kbd> <span>Chiudi / annulla</span></li>
@@ -2079,6 +2245,25 @@
       </div>
     </div>
   {/if}
+
+  <!-- Vision-model picker shared by the formula/table/text OCR modals. VLMs are
+       grouped and starred so the user is nudged to pick a vision-capable model. -->
+  {#snippet vmodelSelect(kind: "formula" | "table" | "text")}
+    {#if visionModels.length}
+      <select class="vmodel" value={visionModel} onchange={(e) => pickVisionModel(e.currentTarget.value, kind)} title="Modello — ⭐ = adatto alle immagini (VLM)">
+        {#if visionGroups.vision.length}
+          <optgroup label="⭐ Visione (consigliati)">
+            {#each visionGroups.vision as m (m)}<option value={m}>⭐ {m}</option>{/each}
+          </optgroup>
+        {/if}
+        {#if visionGroups.other.length}
+          <optgroup label="Altri (no visione)">
+            {#each visionGroups.other as m (m)}<option value={m}>{m}</option>{/each}
+          </optgroup>
+        {/if}
+      </select>
+    {/if}
+  {/snippet}
 
   {#if tableModal}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -2091,26 +2276,26 @@
             <button class:on={tableEngine === "native"} onclick={() => selectTableEngine("native")} title="Estrazione nativa dal testo del PDF">Nativa</button>
             <button class:on={tableEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectTableEngine("ollama")} title={aiEnabled ? "Estrai con un modello di visione locale (Ollama / LM Studio)" : "Abilita l'AI locale nelle Impostazioni per usare Ollama"}>Ollama</button>
           </div>
-          {#if tableEngine === "ollama" && visionModels.length}
-            <select class="vmodel" value={visionModel} onchange={(e) => pickVisionModel(e.currentTarget.value, "table")} title="Modello di visione">
-              {#each visionModels as m (m)}<option value={m}>{m}</option>{/each}
-            </select>
-          {/if}
+          {#if tableEngine === "ollama"}{@render vmodelSelect("table")}{/if}
           {#if !tableLoading && tableGrid.length}
             <span class="tdim">{tableGrid.length}×{tableGrid[0]?.length ?? 0}</span>
             <div class="viewtoggle">
               <button class:on={tableView === "grid"} onclick={() => (tableView = "grid")} title="Anteprima come griglia">Griglia</button>
-              <button class:on={tableView === "latex"} onclick={() => (tableView = "latex")} title="Anteprima del LaTeX (booktabs) che verrebbe copiato">LaTeX</button>
+              <button class:on={tableView === "latex"} onclick={() => (tableView = "latex")} title="Anteprima del formato scelto">Formato</button>
+            </div>
+            <div class="viewtoggle" title="Formato di esportazione (Copia / Salva / → Appunti)">
+              <button class:on={tableFormat === "md"} onclick={() => (tableFormat = "md")} title="Tabella Markdown">MD</button>
+              <button class:on={tableFormat === "latex"} onclick={() => (tableFormat = "latex")} title="Tabella LaTeX in stile booktabs (nel documento serve il pacchetto booktabs)">LaTeX</button>
+              <button class:on={tableFormat === "csv"} onclick={() => (tableFormat = "csv")} title="CSV">CSV</button>
             </div>
           {/if}
           <span style="flex:1"></span>
           {#if !tableLoading && tableGrid.length}
             <button onclick={doCleanTable} disabled={aiCleaning} title="Rifinisci righe/colonne con l'AI locale (Ollama/LM Studio)">{aiCleaning ? "AI…" : "Migliora con AI"}</button>
-            <button onclick={() => doExportTable("csv")}>CSV</button>
-            <button onclick={() => doExportTable("md")}>Markdown</button>
-            <button onclick={() => doExportTable("xlsx")}>Excel</button>
-            <button onclick={tableLatexCopy} title="Copia la tabella come LaTeX in stile booktabs (nel documento serve il pacchetto booktabs)">Copia LaTeX</button>
-            {#if onSendToNote}<button onclick={tableLatexToNote} title="Manda la tabella in LaTeX a un appunto, con citazione al paper">→ Appunti</button>{/if}
+            <button onclick={tableCopy} title="Copia la tabella nel formato scelto">Copia</button>
+            <button onclick={tableSave} title="Salva la tabella su file nel formato scelto">Salva…</button>
+            <button onclick={() => doExportTable("xlsx")} title="Esporta come foglio Excel (.xlsx)">Excel</button>
+            {#if onSendToNote}<button onclick={tableToNote} title="Manda la tabella agli Appunti nel formato scelto (con citazione al paper)">→ Appunti</button>{/if}
           {/if}
           <button class="close" onclick={() => (tableModal = false)}>Chiudi</button>
         </div>
@@ -2122,7 +2307,7 @@
           {:else if !tableGrid.length}
             <p class="tdim">Nessun testo tabellare riconosciuto nell'area selezionata. Seleziona più precisamente attorno alla tabella, prova il motore «Ollama», oppure usa un PDF con testo (non scansionato).</p>
           {:else if tableView === "latex"}
-            <pre class="latexview">{tableToLatex(tableGrid)}</pre>
+            <pre class="latexview">{tableOut()}</pre>
           {:else}
             <table class="extbl">
               <tbody>
@@ -2144,28 +2329,34 @@
       <div class="tablecard textcard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
           <strong>Testo estratto</strong>
+          <div class="viewtoggle" title="Motore di estrazione">
+            <button class:on={textEngine === "native"} onclick={() => selectTextEngine("native")} title="Estrazione nativa dal testo del PDF">Nativa</button>
+            <button class:on={textEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectTextEngine("ollama")} title={aiEnabled ? "OCR con un modello di visione locale (Ollama / LM Studio) — utile per pagine scansionate" : "Abilita l'AI locale nelle Impostazioni per usare Ollama"}>Ollama</button>
+          </div>
+          {#if textEngine === "ollama"}{@render vmodelSelect("text")}{/if}
           {#if !textLoading && textContent.trim()}
-            <div class="viewtoggle">
-              <button class:on={textView === "text"} onclick={() => (textView = "text")} title="Testo grezzo (modificabile)">Testo</button>
-              <button class:on={textView === "latex"} onclick={() => (textView = "latex")} title="Anteprima del LaTeX che verrebbe copiato (caratteri speciali con escape)">LaTeX</button>
+            <div class="viewtoggle" title="Formato di esportazione (Copia / Salva / → Appunti)">
+              <button class:on={textFormat === "txt"} onclick={() => (textFormat = "txt")} title="Testo semplice">Testo</button>
+              <button class:on={textFormat === "latex"} onclick={() => (textFormat = "latex")} title="LaTeX (caratteri speciali con escape)">LaTeX</button>
+              <button class:on={textFormat === "md"} onclick={() => (textFormat = "md")} title="Markdown">MD</button>
             </div>
           {/if}
           <span style="flex:1"></span>
           {#if !textLoading && textContent.trim()}
-            <button onclick={copyText}>Copia</button>
-            <button onclick={() => saveText("txt")}>Salva .txt</button>
-            <button onclick={() => saveText("md")}>Salva .md</button>
-            <button onclick={textLatexCopy} title="Copia il testo come LaTeX (caratteri speciali già con escape)">Copia LaTeX</button>
-            {#if onSendToNote}<button onclick={textLatexToNote} title="Manda il testo in LaTeX a un appunto, con citazione al paper">→ Appunti</button>{/if}
+            <button onclick={textCopy} title="Copia il testo nel formato scelto">Copia</button>
+            <button onclick={textSave} title="Salva il testo su file nel formato scelto">Salva…</button>
+            {#if onSendToNote}<button onclick={textToNote} title="Manda il testo agli Appunti nel formato scelto (con citazione al paper)">→ Appunti</button>{/if}
           {/if}
           <button class="close" onclick={() => (textModal = false)}>Chiudi</button>
         </div>
         <div class="tablebody">
           {#if textLoading}
-            <p class="tdim">Estraggo il testo…</p>
+            <p class="tdim">{textEngine === "ollama" ? "Riconosco il testo con il modello di visione…" : "Estraggo il testo…"}</p>
+          {:else if textError}
+            <p class="tdim">{textError}</p>
           {:else if !textContent.trim()}
-            <p class="tdim">Nessun testo riconosciuto nell'area selezionata (PDF scansionato?).</p>
-          {:else if textView === "latex"}
+            <p class="tdim">Nessun testo riconosciuto nell'area selezionata. Se il PDF è scansionato, prova il motore «Ollama» (OCR con un modello di visione).</p>
+          {:else if textFormat === "latex"}
             <pre class="latexview">{textToLatex(textContent)}</pre>
           {:else}
             <textarea class="exttext" bind:value={textContent} spellcheck="false"></textarea>
@@ -2186,21 +2377,24 @@
             <button class:on={formulaEngine === "local"} onclick={() => selectFormulaEngine("local")} title="Math-OCR locale integrato (pix2tex)">Locale</button>
             <button class:on={formulaEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectFormulaEngine("ollama")} title={aiEnabled ? "Riconosci con un modello di visione locale (Ollama / LM Studio)" : "Abilita l'AI locale nelle Impostazioni per usare Ollama"}>Ollama</button>
           </div>
-          {#if formulaEngine === "ollama" && visionModels.length}
-            <select class="vmodel" value={visionModel} onchange={(e) => pickVisionModel(e.currentTarget.value, "formula")} title="Modello di visione">
-              {#each visionModels as m (m)}<option value={m}>{m}</option>{/each}
-            </select>
-          {/if}
+          {#if formulaEngine === "ollama"}{@render vmodelSelect("formula")}{/if}
           {#if !formulaLoading}
             <div class="viewtoggle">
               <button class:on={!formulaMulti} onclick={() => runFormula(false)} title="Una singola formula">Una</button>
               <button class:on={formulaMulti} onclick={() => runFormula(true)} title="Più equazioni impilate → un blocco gathered">Più righe</button>
             </div>
           {/if}
+          {#if !formulaLoading && formulaLatex.trim()}
+            <div class="viewtoggle" title="Formato di esportazione (Copia / Salva / → Appunti)">
+              <button class:on={formulaFormat === "latex"} onclick={() => (formulaFormat = "latex")} title="LaTeX grezzo">LaTeX</button>
+              <button class:on={formulaFormat === "md"} onclick={() => (formulaFormat = "md")} title="Markdown, blocco $$…$$">MD</button>
+            </div>
+          {/if}
           <span style="flex:1"></span>
           {#if !formulaLoading && formulaLatex.trim()}
-            <button onclick={formulaCopy} title="Copia il LaTeX della formula negli appunti di sistema">Copia LaTeX</button>
-            {#if onSendToNote}<button onclick={formulaToNote} title="Manda la formula in LaTeX a un appunto, con citazione al paper">→ Appunti</button>{/if}
+            <button onclick={formulaCopyFmt} title="Copia la formula nel formato scelto">Copia</button>
+            <button onclick={formulaSave} title="Salva la formula su file nel formato scelto">Salva…</button>
+            {#if onSendToNote}<button onclick={formulaToNoteFmt} title="Manda la formula agli Appunti nel formato scelto (con citazione al paper)">→ Appunti</button>{/if}
           {/if}
           <button class="close" onclick={() => (formulaModal = false)}>Chiudi</button>
         </div>
@@ -2216,6 +2410,34 @@
             <p class="tdim">Nessuna formula riconosciuta. Riprova selezionando l'area più precisamente attorno all'equazione.</p>
           {:else}
             <textarea class="exttext" bind:value={formulaLatex} spellcheck="false"></textarea>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if figureModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="tableback" onmousedown={(e) => { if (e.target === e.currentTarget) figureModal = false; }} role="presentation">
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
+      <div class="tablecard textcard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+        <div class="tablehd">
+          <strong>Figura → PNG</strong>
+          <span style="flex:1"></span>
+          {#if figureImg}
+            <button onclick={saveFigurePng} title="Salva la figura come file PNG">Salva PNG…</button>
+            {#if onSendToNote}<button onclick={figureToNote} title="Incorpora la figura in un appunto come immagine Markdown, con citazione al paper">→ Appunti</button>{/if}
+          {/if}
+          <button class="close" onclick={() => (figureModal = false)}>Chiudi</button>
+        </div>
+        <div class="tablebody">
+          {#if figureError}
+            <p class="tdim">{figureError}</p>
+          {/if}
+          {#if figureImg}
+            <img class="figureimg" src={figureImg} alt="Figura ritagliata" />
+          {:else}
+            <p class="tdim">Nessuna figura ritagliata.</p>
           {/if}
         </div>
       </div>
@@ -2419,6 +2641,10 @@
   .exttext:focus { border-color: var(--accent); }
   .formulaimg {
     display: block; max-width: 100%; max-height: 190px; margin: 0 auto 12px;
+    padding: 8px; background: #fff; border: 1px solid var(--border); border-radius: 8px;
+  }
+  .figureimg {
+    display: block; max-width: 100%; max-height: 62vh; margin: 0 auto;
     padding: 8px; background: #fff; border: 1px solid var(--border); border-radius: 8px;
   }
   .vmodel {
