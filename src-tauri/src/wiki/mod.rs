@@ -194,8 +194,11 @@ pub fn weave_links(md: &str, others: &[(String, String)]) -> String {
             if t.starts_with('#') || t.starts_with("```") || line.contains('[') {
                 continue; // keep it simple: never touch headings or lines with links
             }
-            let lower = line.to_lowercase();
-            let needle = name.to_lowercase();
+            // ASCII-lowercase is byte-length-preserving, so offsets into `lower` stay
+            // valid for slicing the original `line`. (Unicode to_lowercase() is NOT
+            // length-preserving — e.g. 'İ' → 2 bytes — and would panic on a slice.)
+            let lower = line.to_ascii_lowercase();
+            let needle = name.to_ascii_lowercase();
             let mut from = 0;
             while let Some(pos) = lower[from..].find(&needle) {
                 let start = from + pos;
@@ -221,24 +224,101 @@ pub fn weave_links(md: &str, others: &[(String, String)]) -> String {
     lines.join("\n")
 }
 
-/// Markdown → sanitized HTML (same recipe as the GitHub README preview:
-/// pulldown-cmark then ammonia, which keeps fragment hrefs like `#src-1`).
+/// MathML tags emitted by latex2mathml — allowed through ammonia so rendered math
+/// survives sanitization and the webview draws it natively.
+const MATHML_TAGS: [&str; 30] = [
+    "math", "semantics", "annotation", "mrow", "mi", "mo", "mn", "ms", "mtext", "mspace", "msup",
+    "msub", "msubsup", "mfrac", "msqrt", "mroot", "mover", "munder", "munderover", "mmultiscripts",
+    "mtable", "mtr", "mtd", "mstyle", "mpadded", "mphantom", "menclose", "mfenced", "mprescripts",
+    "none",
+];
+/// Presentational MathML attributes — inert on HTML tags, so allowing them globally
+/// carries no XSS surface (no `href`/`src`/`on*`).
+const MATHML_ATTRS: [&str; 27] = [
+    "mathvariant", "displaystyle", "scriptlevel", "display", "xmlns", "encoding", "stretchy",
+    "fence", "separator", "accent", "accentunder", "form", "lspace", "rspace", "linethickness",
+    "columnalign", "rowalign", "columnspacing", "rowspacing", "open", "close", "notation", "width",
+    "mathsize", "dir", "largeop", "movablelimits",
+];
+
+/// Convert one LaTeX math fragment to MathML. Multi-line environments latex2mathml
+/// can't parse (gathered/aligned/…) are split into stacked block equations. On any
+/// failure the raw LaTeX is kept (as a styled code span) so a formula is never lost.
+fn render_math(latex: &str, block: bool) -> String {
+    let t = latex.trim();
+    const ENVS: [&str; 8] = [
+        "gathered", "aligned", "align*", "align", "gather*", "gather", "split", "eqnarray",
+    ];
+    for env in ENVS {
+        let begin = format!("\\begin{{{env}}}");
+        let end = format!("\\end{{{env}}}");
+        if let (Some(bi), Some(ei)) = (t.find(&begin), t.rfind(&end)) {
+            if ei >= bi + begin.len() {
+                let inner = &t[bi + begin.len()..ei];
+                let mut out = String::new();
+                for line in inner.split("\\\\") {
+                    let line = line.replace('&', " ");
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        out.push_str(&render_one(line, true));
+                    }
+                }
+                if !out.is_empty() {
+                    return out;
+                }
+            }
+        }
+    }
+    render_one(t, block)
+}
+
+fn render_one(latex: &str, block: bool) -> String {
+    let style = if block {
+        latex2mathml::DisplayStyle::Block
+    } else {
+        latex2mathml::DisplayStyle::Inline
+    };
+    match latex2mathml::latex_to_mathml(latex, style) {
+        Ok(m) => m,
+        Err(_) => {
+            let (o, c) = if block { ("$$", "$$") } else { ("$", "$") };
+            let esc = latex.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            format!("<code class=\"mathraw\">{o}{esc}{c}</code>")
+        }
+    }
+}
+
+/// Markdown → sanitized HTML (same recipe as the GitHub README preview: pulldown-cmark
+/// then ammonia, which keeps fragment hrefs like `#src-1`). `$…$` / `$$…$$` math is
+/// rendered to MathML; embedded `data:image/…` figures are kept on `<img src>`.
 pub fn render_html(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{html, Event, Options, Parser};
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
-    let parser = Parser::new_ext(md, opts);
+    opts.insert(Options::ENABLE_MATH);
+    let parser = Parser::new_ext(md, opts).map(|ev| match ev {
+        Event::InlineMath(tex) => Event::InlineHtml(render_math(&tex, false).into()),
+        Event::DisplayMath(tex) => Event::Html(render_math(&tex, true).into()),
+        other => other,
+    });
     let mut unsafe_html = String::new();
     html::push_html(&mut unsafe_html, parser);
     // Allow inline `data:` image URIs so embedded figures (Figura → Appunti) render,
     // but ONLY on `<img src>` — every other URL attribute (e.g. `<a href>`) keeps the
-    // default safe schemes, so a `data:text/html` link can't slip through.
+    // default safe schemes, so a `data:text/html` link can't slip through. MathML tags
+    // (from render_math) are also allowed so rendered formulas survive sanitization.
     let mut b = ammonia::Builder::default();
     b.add_url_schemes(["data"]);
+    b.add_tags(MATHML_TAGS);
+    b.add_generic_attributes(MATHML_ATTRS);
     b.attribute_filter(|element, attribute, value| {
-        if value.starts_with("data:")
-            && !(element == "img" && attribute == "src" && value.starts_with("data:image/"))
+        // Normalize like the URL parser (trim leading whitespace, lowercase the
+        // scheme) so a mixed-case `DATA:` or ` data:` can't slip past on a non-img
+        // attribute after `data` was added to the global scheme allowlist.
+        let v = value.trim_start().to_ascii_lowercase();
+        if v.starts_with("data:")
+            && !(element == "img" && attribute == "src" && v.starts_with("data:image/"))
         {
             return None;
         }
@@ -250,6 +330,29 @@ pub fn render_html(md: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weave_links_no_panic_on_length_changing_char() {
+        // 'İ' (U+0130) lowercases to 2 chars under Unicode rules; a byte-offset from a
+        // Unicode-lowercased copy would panic when slicing the original line. Must not.
+        let others = vec![("learning".to_string(), "learning".to_string())];
+        let out = weave_links("İstanbul e il learning profondo", &others);
+        assert!(out.contains("[learning](#wiki-learning)"), "should link without panic: {out}");
+    }
+
+    #[test]
+    fn math_in_render_html() {
+        // Inline and display math become MathML.
+        let h = render_html("Energia $E=mc^2$ e blocco:\n\n$$\\frac{a}{b}$$\n");
+        assert!(h.contains("<math"), "inline/display math should emit MathML: {h}");
+        assert!(h.matches("<math").count() >= 2, "both inline and block math: {h}");
+        // A gathered block (multi-formula OCR output) stacks into several equations.
+        let g = render_html("$$\\begin{gathered} a = b \\\\ c = d \\end{gathered}$$");
+        assert!(g.matches("<math").count() >= 2, "gathered should stack: {g}");
+        // A data: image survives, code fences are NOT math-rendered.
+        let c = render_html("```\n$x=1$\n```\n");
+        assert!(!c.contains("<math"), "math inside a code fence must stay literal: {c}");
+    }
 
     #[test]
     fn slugs() {

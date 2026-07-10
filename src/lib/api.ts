@@ -827,6 +827,9 @@ export interface NoteView {
 export const listNotes = () => invoke<NoteMeta[]>("list_notes");
 /** One note: raw body + rendered HTML + backlinks. */
 export const getNote = (slug: string) => invoke<NoteView>("get_note", { slug });
+/** Export a note to a file: format "html" (self-contained) or "latex" (.tex + figures). */
+export const exportNote = (slug: string, format: "html" | "latex", path: string) =>
+  invoke<void>("export_note", { slug, format, path });
 /** Create a note from a title; returns its slug. */
 export const createNote = (title: string) => invoke<string>("create_note", { title });
 /** Overwrite a note's body; returns refreshed metadata. */

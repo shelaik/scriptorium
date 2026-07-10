@@ -1,6 +1,6 @@
 [package]
 name = "pdfmanage"
-version = "0.8.25"
+version = "0.8.26"
 description = "Lean, fast, local-first PDF & reference manager"
 authors = ["you"]
 edition = "2021"
@@ -52,6 +52,11 @@ regex = "1"
 # --- GitHub README rendering: Markdown -> sanitized HTML ---
 pulldown-cmark = "0.12"
 ammonia = "4"
+
+# --- Math in notes/wiki: LaTeX ($…$ / $$…$$) -> MathML, rendered natively by the
+#     webview (no JS/fonts to bundle). Pure Rust; on unsupported input we fall
+#     back to the raw LaTeX so nothing is lost. ---
+latex2mathml = "0.2"
 
 # --- Table extraction: native .xlsx export ---
 rust_xlsxwriter = "0.79"

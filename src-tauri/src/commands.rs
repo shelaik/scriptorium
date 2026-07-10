@@ -9,6 +9,7 @@ use crate::embed;
 use crate::github;
 use crate::import;
 use crate::mathocr;
+use crate::mdexport;
 use crate::metadata;
 use crate::notes;
 use crate::obsidian;
@@ -6738,6 +6739,46 @@ pub fn get_note(app: AppHandle, slug: String) -> Result<NoteView, String> {
         created_at,
         updated_at,
     })
+}
+
+/// Export a note to a self-contained HTML file, or a LaTeX document (`.tex` plus a
+/// sibling `<name>_figures/` folder of the extracted images). `format` is "html" or
+/// "latex". Math is preserved (MathML in HTML, native LaTeX in the .tex).
+#[tauri::command]
+pub fn export_note(app: AppHandle, slug: String, format: String, path: String) -> Result<(), String> {
+    let dir = notes_dir(&app);
+    let note_p = note_path(&dir, &slug)?;
+    let content = std::fs::read_to_string(&note_p).map_err(|e| format!("Lettura nota: {e}"))?;
+    let title = notes::note_title(&content);
+    let out = std::path::Path::new(&path);
+    match format.as_str() {
+        "html" => {
+            std::fs::write(out, mdexport::to_html(&content, &title)).map_err(|e| e.to_string())
+        }
+        "latex" | "tex" => {
+            let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("nota");
+            // Sanitize: the dir name is interpolated raw into \includegraphics, so keep
+            // only chars that are safe there (%, #, {, } would break compilation).
+            let safe: String = stem
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .collect();
+            let safe = if safe.is_empty() { "nota".to_string() } else { safe };
+            let fig_dir_name = format!("{safe}_figures");
+            let doc = mdexport::to_latex(&content, &fig_dir_name);
+            std::fs::write(out, &doc.tex).map_err(|e| e.to_string())?;
+            if !doc.images.is_empty() {
+                let parent = out.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let fig_dir = parent.join(&fig_dir_name);
+                std::fs::create_dir_all(&fig_dir).map_err(|e| e.to_string())?;
+                for img in &doc.images {
+                    std::fs::write(fig_dir.join(&img.filename), &img.bytes).map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(())
+        }
+        other => Err(format!("Formato di esportazione non supportato: {other}")),
+    }
 }
 
 /// Rename a note: set a new title (rewriting the body's title line) and rename

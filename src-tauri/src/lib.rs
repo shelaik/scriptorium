@@ -9,6 +9,7 @@ mod embed;
 mod github;
 mod import;
 mod mathocr;
+mod mdexport;
 mod metadata;
 mod model;
 mod notes;
@@ -203,6 +204,7 @@ pub fn run() {
             commands::import_latex_zip,
             commands::list_notes,
             commands::get_note,
+            commands::export_note,
             commands::create_note,
             commands::save_note,
             commands::append_to_note,

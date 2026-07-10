@@ -129,6 +129,7 @@
     wikiCancel,
     listNotes,
     getNote,
+    exportNote,
     createNote,
     appendToNote,
     saveNote,
@@ -505,7 +506,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.25";
+  const APP_VERSION = "0.8.26";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3435,6 +3436,108 @@
     clearTimeout(noteSaveTimer);
     noteSaveTimer = setTimeout(flushNote, 700);
   }
+  // ----- Lightweight Markdown formatting toolbar over the note editor -----
+  let noteEditorEl = $state<HTMLTextAreaElement | null>(null);
+  function focusNoteRange(a: number, b: number) {
+    tick().then(() => {
+      const el = noteEditorEl;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(a, b);
+    });
+  }
+  /** Wrap the current selection in `pre`/`post` (e.g. **bold**, *italic*, `code`). */
+  function mdWrap(pre: string, post: string, placeholder = "testo") {
+    const el = noteEditorEl;
+    if (!el) return;
+    const s = el.selectionStart, e = el.selectionEnd;
+    const sel = noteDraft.slice(s, e) || placeholder;
+    noteDraft = noteDraft.slice(0, s) + pre + sel + post + noteDraft.slice(e);
+    onNoteInput();
+    focusNoteRange(s + pre.length, s + pre.length + sel.length);
+  }
+  /** Apply a line prefix to every selected line: headings (replace level), lists,
+   *  quotes (toggle). */
+  function mdLinePrefix(prefix: string, heading = false) {
+    const el = noteEditorEl;
+    if (!el) return;
+    const s = el.selectionStart, e = el.selectionEnd;
+    const lineStart = noteDraft.lastIndexOf("\n", s - 1) + 1;
+    let lineEnd = noteDraft.indexOf("\n", e);
+    if (lineEnd === -1) lineEnd = noteDraft.length;
+    const block = noteDraft.slice(lineStart, lineEnd);
+    const newBlock = block
+      .split("\n")
+      .map((ln) => {
+        if (heading) return prefix + ln.replace(/^#{1,6}\s+/, "");
+        return ln.startsWith(prefix) ? ln.slice(prefix.length) : prefix + ln;
+      })
+      .join("\n");
+    noteDraft = noteDraft.slice(0, lineStart) + newBlock + noteDraft.slice(lineEnd);
+    onNoteInput();
+    focusNoteRange(lineStart, lineStart + newBlock.length);
+  }
+  /** Insert text at the cursor (formula block, horizontal rule…). */
+  function mdInsert(text: string) {
+    const el = noteEditorEl;
+    if (!el) return;
+    const s = el.selectionStart, e = el.selectionEnd;
+    noteDraft = noteDraft.slice(0, s) + text + noteDraft.slice(e);
+    onNoteInput();
+    const caret = s + text.length;
+    focusNoteRange(caret, caret);
+  }
+  /** Move the paragraph/block containing the cursor up or down (reorder images/text).
+   *  Blocks are separated by runs of 2+ newlines; boundaries are computed exactly so
+   *  the right block moves regardless of how many blank lines separate them. */
+  function mdMoveBlock(dir: -1 | 1) {
+    const el = noteEditorEl;
+    if (!el) return;
+    const caret = el.selectionStart;
+    const text = noteDraft;
+    const bounds: [number, number][] = [];
+    let start = 0;
+    for (const m of text.matchAll(/\n{2,}/g)) {
+      bounds.push([start, m.index!]);
+      start = m.index! + m[0].length;
+    }
+    bounds.push([start, text.length]);
+    let idx = bounds.findIndex(([, b]) => caret <= b);
+    if (idx === -1) idx = bounds.length - 1;
+    const j = idx + dir;
+    if (j < 0 || j >= bounds.length) return;
+    const blocks = bounds.map(([a, b]) => text.slice(a, b));
+    // Don't shuffle an empty leading/trailing block (from 2+ trailing newlines): that
+    // would just inject blank lines instead of being a no-op.
+    if (!blocks[idx].trim() || !blocks[j].trim()) return;
+    [blocks[idx], blocks[j]] = [blocks[j], blocks[idx]];
+    noteDraft = blocks.join("\n\n");
+    onNoteInput();
+    let np = 0;
+    for (let i = 0; i < j; i++) np += blocks[i].length + 2;
+    focusNoteRange(np, np + blocks[j].length);
+  }
+  /** Export the open note to a self-contained HTML page or a LaTeX document. */
+  async function exportNoteAs(fmt: "html" | "latex") {
+    if (!noteView) return;
+    await flushNote(); // export the latest on-disk copy
+    if (!noteSaved) {
+      status = "Salvataggio non riuscito: riprova prima di esportare";
+      return;
+    }
+    const ext = fmt === "html" ? "html" : "tex";
+    const path = await save({
+      defaultPath: `${noteView.slug}.${ext}`,
+      filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+    });
+    if (!path) return;
+    try {
+      await exportNote(noteView.slug, fmt, path);
+      status = fmt === "html" ? "Appunto esportato in HTML ✓" : "Appunto esportato in LaTeX ✓ (con le figure)";
+    } catch (e) {
+      status = "Esportazione non riuscita: " + e;
+    }
+  }
   /** Persist the current note. Single-flight (concurrent callers await the same
    *  save) and loops until the on-disk copy matches the draft, so keystrokes
    *  typed during an in-flight save are never lost. Leaves noteSaved=false on
@@ -4489,7 +4592,12 @@
                 <span class="notesaved" class:pending={!noteSaved}>{noteSaved ? "Salvato ✓" : "Salvo…"}</span>
                 <div class="notemodes">
                   <button class="ghost small" class:on={noteMode === "edit"} onclick={() => (noteMode = "edit")} title="Modifica il Markdown">Modifica</button>
-                  <button class="ghost small" class:on={noteMode === "preview"} onclick={() => { noteMode = "preview"; refreshNotePreview(); }} title="Anteprima resa (ricalcola i collegamenti)">Anteprima</button>
+                  <button class="ghost small" class:on={noteMode === "preview"} onclick={() => { noteMode = "preview"; refreshNotePreview(); }} title="Anteprima resa (formule, collegamenti, immagini)">Anteprima</button>
+                </div>
+                <div class="noteexport">
+                  <span class="noteexplbl">Esporta</span>
+                  <button class="ghost small" onclick={() => exportNoteAs("html")} title="Esporta come pagina HTML autonoma (formule in MathML e immagini incluse)">HTML</button>
+                  <button class="ghost small" onclick={() => exportNoteAs("latex")} title="Esporta come documento LaTeX (.tex con le figure estratte in una cartella)">LaTeX</button>
                 </div>
               </header>
               <div class="noteinfo">
@@ -4498,12 +4606,32 @@
                 <span class="noteinfodate" title="Ultima modifica">· modificata {fmtNoteDate(noteView.updated_at)}</span>
               </div>
               {#if noteMode === "edit"}
+                <div class="noteedtoolbar" role="toolbar" aria-label="Formattazione">
+                  <button onclick={() => mdLinePrefix("# ", true)} title="Titolo (H1)"><b>T</b></button>
+                  <button onclick={() => mdLinePrefix("## ", true)} title="Sottotitolo (H2)">T₂</button>
+                  <button onclick={() => mdLinePrefix("### ", true)} title="Titolo minore (H3)">T₃</button>
+                  <span class="edsep"></span>
+                  <button onclick={() => mdWrap("**", "**", "grassetto")} title="Grassetto"><b>B</b></button>
+                  <button onclick={() => mdWrap("*", "*", "corsivo")} title="Corsivo"><i>I</i></button>
+                  <button onclick={() => mdWrap("`", "`", "codice")} title="Codice inline"><code>‹›</code></button>
+                  <button onclick={() => mdWrap("[", "](https://)", "testo")} title="Collegamento">🔗</button>
+                  <span class="edsep"></span>
+                  <button onclick={() => mdLinePrefix("- ")} title="Elenco puntato">•</button>
+                  <button onclick={() => mdLinePrefix("1. ")} title="Elenco numerato">1.</button>
+                  <button onclick={() => mdLinePrefix("> ")} title="Citazione">❝</button>
+                  <button onclick={() => mdInsert("\n\n$$\n\n$$\n\n")} title="Blocco formula (LaTeX → MathML)">∑</button>
+                  <button onclick={() => mdInsert("\n\n---\n\n")} title="Separatore orizzontale">―</button>
+                  <span class="edsep"></span>
+                  <button onclick={() => mdMoveBlock(-1)} title="Sposta su il blocco (paragrafo/immagine)">↑</button>
+                  <button onclick={() => mdMoveBlock(1)} title="Sposta giù il blocco (paragrafo/immagine)">↓</button>
+                </div>
                 <textarea
                   class="noteeditor"
+                  bind:this={noteEditorEl}
                   bind:value={noteDraft}
                   oninput={onNoteInput}
                   onblur={flushNote}
-                  placeholder={"Scrivi in Markdown…\n\nUsa [[Titolo di un altro appunto]] per collegare un appunto, [[@citekey]] o [[Titolo del paper]] per un documento."}
+                  placeholder={"Scrivi in Markdown…\n\nUsa [[Titolo di un altro appunto]] per collegare un appunto, [[@citekey]] o [[Titolo del paper]] per un documento. $$ … $$ per una formula."}
                   spellcheck="false"
                 ></textarea>
               {:else}
@@ -4525,6 +4653,7 @@
                 <p class="big">I tuoi appunti</p>
                 <p>Appunti in <strong>Markdown</strong>, salvati come <strong>file .md veri</strong> nella cartella degli appunti — restano tuoi, leggibili e modificabili anche da terminale o da qualsiasi editor.</p>
                 <p class="dimtext">Collega con <code>[[Titolo appunto]]</code> o un paper con <code>[[@citekey]]</code> / <code>[[Titolo del paper]]</code>. I backlink compaiono in fondo a ogni appunto.</p>
+                <p class="dimtext">Scrivi <code>$$ … $$</code> per una <strong>formula</strong> (resa in anteprima), usa la barra di formattazione (grassetto, titoli, liste, sposta blocchi), ed <strong>esporta</strong> l'appunto in <strong>HTML</strong> o <strong>LaTeX</strong> con formule e figure incluse.</p>
               </div>
             {/if}
           </section>
@@ -7376,6 +7505,24 @@
   .notehead .notesaved.pending { color: var(--accent); }
   .notemodes { display: inline-flex; gap: 4px; }
   .notemodes .ghost.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .noteexport { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+  .noteexplbl { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.04em; }
+  .noteedtoolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 3px;
+    max-width: 820px; margin: 14px 0 0; padding: 5px 6px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--r-sm) var(--r-sm) 0 0; border-bottom: none;
+  }
+  .noteedtoolbar button {
+    min-width: 28px; height: 28px; padding: 0 7px; display: inline-flex;
+    align-items: center; justify-content: center; background: transparent;
+    border: 1px solid transparent; border-radius: 6px; color: var(--text);
+    font-size: 13px; cursor: pointer;
+  }
+  .noteedtoolbar button:hover { background: var(--accent-soft); border-color: var(--border); }
+  .noteedtoolbar button code { font-family: var(--mono, monospace); font-size: 12px; }
+  .edsep { width: 1px; align-self: stretch; margin: 3px 4px; background: var(--border-soft); }
+  .noteedtoolbar + .noteeditor { margin-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
   .noteeditor {
     display: block; width: 100%; max-width: 820px; box-sizing: border-box;
     min-height: 60vh; margin-top: 14px; resize: vertical;
@@ -7386,6 +7533,15 @@
   }
   .noteeditor:focus { border-color: var(--accent); }
   .notehtml { margin-top: 14px; }
+  /* Rendered math (MathML) and the raw-LaTeX fallback in the note/wiki preview. */
+  .notehtml :global(math[display="block"]), .wikihtml :global(math[display="block"]) {
+    display: block; margin: 1em 0; overflow-x: auto; font-size: 1.08em;
+  }
+  .notehtml :global(math), .wikihtml :global(math) { font-size: 1.05em; }
+  .notehtml :global(.mathraw), .wikihtml :global(.mathraw) {
+    background: var(--accent-soft); color: var(--accent); padding: 0 4px;
+    border-radius: 4px; font-family: var(--mono, monospace); font-size: 0.9em;
+  }
   .notebacklinks { max-width: 780px; margin-top: 28px; border-top: 1px solid var(--border-soft); padding-top: 12px; }
   .notebacklinks h3 { font-family: var(--serif); font-size: 14px; margin: 0 0 8px; color: var(--dim); }
   .notetitleh { cursor: text; }
