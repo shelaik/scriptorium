@@ -19,7 +19,7 @@
   } from "$lib/api";
   import { printDocument } from "$lib/print";
   import { revealDocument } from "$lib/share";
-  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, writeBinaryFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, textFromImageAi, getAiSettings, aiListModels } from "$lib/api";
+  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, writeBinaryFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, textFromImageAi, getAiSettings, aiListModels, previewMarkdown } from "$lib/api";
   import { escapeLatex, textToLatex, tableToLatex, tableToMarkdown, tableToCsv } from "$lib/latex";
   import { save } from "@tauri-apps/plugin-dialog";
   import ShareMenu from "$lib/ShareMenu.svelte";
@@ -213,8 +213,87 @@
   let formulaImg = $state(""); // data URL of the cropped region, shown as a preview
   let formulaMulti = $state(false); // recognize several stacked equations as one block
   let formulaError = $state(""); // a hard error (download/decode), distinct from "no formula"
+  let formulaEmpty = $state(false); // OCR ran and recognized nothing (an emptied EDITOR must stay mounted)
   let formulaReq = 0; // epoch token: a stale recognition must not overwrite a newer one
   let formulaEngine = $state<"local" | "ollama">("local"); // bundled math-OCR vs vision LLM
+  // Rendered (MathML) preview of the recognized LaTeX, updated live while editing
+  // so OCR mistakes can be spotted and corrected on the spot.
+  let formulaPreviewHtml = $state("");
+  let formulaPrevTimer: ReturnType<typeof setTimeout> | undefined;
+  let formulaPrevSeq = 0; // guards against a slow render landing after a newer edit
+  function scheduleFormulaPreview() {
+    clearTimeout(formulaPrevTimer);
+    formulaPrevTimer = setTimeout(renderFormulaPreview, 300);
+  }
+  async function renderFormulaPreview() {
+    const seq = ++formulaPrevSeq;
+    // Normalize before wrapping in $$…$$: strip delimiters the user may have
+    // pasted back (a $$ inside would split the block), and collapse blank lines
+    // (they'd break the markdown paragraph and kill the math parsing). Keep the
+    // line structure when a % comment is present — it's line-scoped in LaTeX.
+    let l = formulaLatex.trim().replace(/^\$\$\s*/, "").replace(/\s*\$\$$/, "").trim();
+    l = l.includes("%") ? l.replace(/\n[ \t]*\n\s*/g, "\n") : l.replace(/\s+/g, " ");
+    if (!l) {
+      formulaPreviewHtml = "";
+      return;
+    }
+    try {
+      // Same pipeline as the notes preview: $$…$$ → MathML via latex2mathml
+      // (multi-line gathered blocks are split into stacked equations).
+      const html = await previewMarkdown(`$$\n${l}\n$$`);
+      if (seq === formulaPrevSeq) formulaPreviewHtml = html;
+    } catch {
+      /* keep the last good preview */
+    }
+  }
+
+  /** Makes a modal card draggable by its header (.tablehd): the extraction windows
+   *  can be moved aside to compare with the page beneath. Buttons/selects inside
+   *  the header still work — dragging only starts on inert header space. */
+  function dragCard(node: HTMLElement) {
+    let sx = 0, sy = 0, dx = 0, dy = 0;
+    let baseLeft = 0, baseTop = 0, baseW = 0; // untranslated card position/size
+    const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+    function down(ev: MouseEvent) {
+      if (ev.button !== 0) return;
+      const t = ev.target;
+      if (!(t instanceof HTMLElement)) return;
+      if (!t.closest(".tablehd")) return; // drag by the header only
+      if (t.closest("button, select, input, textarea, a")) return; // keep controls clickable
+      const r = node.getBoundingClientRect();
+      baseLeft = r.left - dx;
+      baseTop = r.top - dy;
+      baseW = r.width;
+      sx = ev.clientX - dx;
+      sy = ev.clientY - dy;
+      ev.preventDefault(); // no text selection while dragging
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+      window.addEventListener("blur", up);
+    }
+    function move(ev: MouseEvent) {
+      // The mouseup can be lost (Alt+Tab mid-drag): stop as soon as the primary
+      // button is no longer held, so the card doesn't glue to the cursor.
+      if (!(ev.buttons & 1)) return up();
+      // Clamp so the header always stays reachable: never above/below the
+      // viewport, and at least 80px of card width inside it horizontally.
+      dx = clamp(ev.clientX - sx, -(baseLeft + baseW - 80), window.innerWidth - baseLeft - 80);
+      dy = clamp(ev.clientY - sy, -baseTop, window.innerHeight - baseTop - 40);
+      node.style.transform = `translate(${dx}px, ${dy}px)`;
+    }
+    function up() {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      window.removeEventListener("blur", up);
+    }
+    node.addEventListener("mousedown", down);
+    return {
+      destroy() {
+        node.removeEventListener("mousedown", down);
+        up();
+      },
+    };
+  }
   // Shared vision-LLM state for the "Ollama" engine in both modals. `aiEnabled` is
   // already a prop; here we only cache the resolved settings for the model list.
   let aiSettings: { provider: string; ollama_url: string; lmstudio_url: string; model: string } | null = null;
@@ -517,6 +596,13 @@
     window.getSelection()?.removeAllRanges();
   }
 
+  /** Cancel a selection rectangle mid-drag: turning a mode off must also drop the
+   *  drag in progress, or the mouseup would still hand the rectangle to an
+   *  extractor (the tail of onTableUp defaults to the table one). */
+  function cancelExtractDrag() {
+    dragStart = null;
+    dragRect = null;
+  }
   function toggleTable() {
     tableMode = !tableMode;
     if (tableMode) {
@@ -525,8 +611,9 @@
       formulaMode = false;
       figureMode = false;
       clearSelection();
+      cancelExtractDrag();
       setNotice("Modalità tabella: trascina un rettangolo attorno a una tabella");
-    }
+    } else cancelExtractDrag();
   }
   function toggleText() {
     textMode = !textMode;
@@ -536,8 +623,9 @@
       formulaMode = false;
       figureMode = false;
       clearSelection();
+      cancelExtractDrag();
       setNotice("Estrai testo: trascina un rettangolo attorno al testo da copiare");
-    }
+    } else cancelExtractDrag();
   }
   function toggleFormula() {
     formulaMode = !formulaMode;
@@ -547,8 +635,9 @@
       textMode = false;
       figureMode = false;
       clearSelection();
+      cancelExtractDrag();
       setNotice("Formula → LaTeX: trascina un rettangolo attorno a una formula");
-    }
+    } else cancelExtractDrag();
   }
   function toggleFigure() {
     figureMode = !figureMode;
@@ -558,8 +647,9 @@
       textMode = false;
       formulaMode = false;
       clearSelection();
+      cancelExtractDrag();
       setNotice("Estrai figura: trascina un rettangolo attorno alla figura da ritagliare come PNG");
-    }
+    } else cancelExtractDrag();
   }
   /** Crop a screen-space rectangle out of a page's rendered canvas to a PNG data
    *  URL — used to hand a formula image to the local math-OCR. Copies the real
@@ -676,6 +766,9 @@
       runTextExtract("native");
       return;
     }
+    // Defense in depth: if no mode is armed anymore (cancelled mid-drag via key
+    // or Esc), the rectangle must not fall through to the table extractor.
+    if (!tableMode) return;
     tableMode = false;
     // Keep both the region (native pdfium extraction) and a cropped image (the
     // vision engine); the modal's engine toggle chooses which to use.
@@ -956,6 +1049,12 @@
     formulaLoading = true;
     formulaLatex = "";
     formulaError = "";
+    formulaEmpty = false;
+    formulaPreviewHtml = "";
+    // Invalidate any in-flight/scheduled preview from the previous formula, so a
+    // slow render can't land in this run's modal.
+    ++formulaPrevSeq;
+    clearTimeout(formulaPrevTimer);
     try {
       let out: string;
       if (engine === "ollama") {
@@ -971,6 +1070,8 @@
       }
       if (formulaReq !== req) return;
       formulaLatex = out;
+      formulaEmpty = !out.trim(); // outcome of the RUN, not of later hand-edits
+      renderFormulaPreview(); // show the rendered result right away
     } catch (err) {
       if (formulaReq !== req) return;
       formulaError = String(err);
@@ -1840,10 +1941,10 @@
       else if (textModal) textModal = false;
       else if (formulaModal) formulaModal = false;
       else if (figureModal) figureModal = false;
-      else if (tableMode) tableMode = false;
-      else if (textMode) textMode = false;
-      else if (formulaMode) formulaMode = false;
-      else if (figureMode) figureMode = false;
+      else if (tableMode) { tableMode = false; cancelExtractDrag(); }
+      else if (textMode) { textMode = false; cancelExtractDrag(); }
+      else if (formulaMode) { formulaMode = false; cancelExtractDrag(); }
+      else if (figureMode) { figureMode = false; cancelExtractDrag(); }
       else if (noteMode) noteMode = false;
       else if (lens) closeLens();
       else if (findOpen) closeFind();
@@ -1877,6 +1978,16 @@
       case "A": panel = panel === "annos" ? "none" : "annos"; break;
       case "e":
       case "E": panel = panel === "notes" ? "none" : "notes"; break;
+      // Extraction modes: arm the drag-selection (press again to cancel). Not
+      // while an extraction window is already open — Esc closes it first.
+      case "t":
+      case "T": if (tableModal || textModal || formulaModal || figureModal) return; toggleTable(); break;
+      case "x":
+      case "X": if (tableModal || textModal || formulaModal || figureModal) return; toggleText(); break;
+      case "f":
+      case "F": if (tableModal || textModal || formulaModal || figureModal) return; toggleFormula(); break;
+      case "g":
+      case "G": if (tableModal || textModal || formulaModal || figureModal) return; toggleFigure(); break;
       case "?": showHelp = !showHelp; break;
       default: return;
     }
@@ -1967,10 +2078,10 @@
       <button class="mitem" onclick={() => moreDo(toggleSpread)} title="Vista a due pagine (2)"><span class="mck">{spread ? "✓" : ""}</span>▥ Due pagine</button>
       <button class="mitem" onclick={() => moreDo(toggleNote)} title="Aggiungi una nota a un punto della pagina (N)"><span class="mck">{noteMode ? "✓" : ""}</span>Nota puntuale</button>
       <button class="mitem" onclick={() => moreDo(() => (night = !night))} title="Modalità notte: inverti i colori (I)"><span class="mck">{night ? "✓" : ""}</span>Notte</button>
-      <button class="mitem" onclick={() => moreDo(toggleTable)} title="Estrai una tabella: trascina un rettangolo attorno alla tabella"><span class="mck">{tableMode ? "✓" : ""}</span>Estrai tabella</button>
-      <button class="mitem" onclick={() => moreDo(toggleText)} title="Estrai testo: trascina un rettangolo attorno al testo"><span class="mck">{textMode ? "✓" : ""}</span>Estrai testo</button>
-      <button class="mitem" onclick={() => moreDo(toggleFormula)} title="Riconosci una formula come LaTeX: trascina un rettangolo attorno all'equazione"><span class="mck">{formulaMode ? "✓" : ""}</span>Formula → LaTeX</button>
-      <button class="mitem" onclick={() => moreDo(toggleFigure)} title="Ritaglia una figura come immagine PNG: trascina un rettangolo attorno alla figura"><span class="mck">{figureMode ? "✓" : ""}</span>Estrai figura</button>
+      <button class="mitem" onclick={() => moreDo(toggleTable)} title="Estrai una tabella: trascina un rettangolo attorno alla tabella (scorciatoia: T)"><span class="mck">{tableMode ? "✓" : ""}</span>Estrai tabella <span class="mkey">T</span></button>
+      <button class="mitem" onclick={() => moreDo(toggleText)} title="Estrai testo: trascina un rettangolo attorno al testo (scorciatoia: X)"><span class="mck">{textMode ? "✓" : ""}</span>Estrai testo <span class="mkey">X</span></button>
+      <button class="mitem" onclick={() => moreDo(toggleFormula)} title="Riconosci una formula come LaTeX: trascina un rettangolo attorno all'equazione (scorciatoia: F)"><span class="mck">{formulaMode ? "✓" : ""}</span>Formula → LaTeX <span class="mkey">F</span></button>
+      <button class="mitem" onclick={() => moreDo(toggleFigure)} title="Ritaglia una figura come immagine PNG: trascina un rettangolo attorno alla figura (scorciatoia: G)"><span class="mck">{figureMode ? "✓" : ""}</span>Estrai figura <span class="mkey">G</span></button>
       <div class="msep"></div>
       <button class="mitem" onclick={() => moreDo(doReveal)} title="Apri la posizione del PDF in Esplora risorse"><span class="mck"></span>Posizione</button>
       <button class="mitem" onclick={() => moreDo(doPrint)} disabled={printing} title="Stampa questo documento"><span class="mck"></span>{printing ? "Stampa…" : "Stampa"}</button>
@@ -2232,9 +2343,11 @@
           <li><kbd>I</kbd> <span>Modalità notte</span></li>
           <li><kbd>[</kbd> / <kbd>]</kbd> <span>Ruota</span></li>
           <li>Selezione testo <span>Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)</span></li>
-          <li>Formula → LaTeX <span>Da ⋯ Altro o dal radiale: trascina attorno a un'equazione. Motore «Locale» (math-OCR integrato, il 1º uso scarica ~180 MB) o «Ollama» (modello di visione). «Più righe» = blocco gathered. Esporta come LaTeX o Markdown ($$…$$): Copia, Salva… o → Appunti</span></li>
-          <li>Estrai tabella / testo <span>Motore «Nativa» (dal testo del PDF) o «Ollama» (modello di visione — utile per tabelle-immagine e pagine scansionate). Esporta scegliendo il formato: tabella MD/LaTeX/CSV (+ Excel), testo Testo/LaTeX/MD — con Copia, Salva… o → Appunti</span></li>
-          <li>Estrai figura <span>Da ⋯ Altro o dal radiale: trascina attorno a una figura per ritagliarla come immagine PNG. «Salva PNG…» su file, oppure «→ Appunti» per incorporarla in un appunto</span></li>
+          <li><kbd>T</kbd> / <kbd>X</kbd> / <kbd>F</kbd> / <kbd>G</kbd> <span>Estrai tabella / testo / formula / figura: attiva la selezione, poi trascina un riquadro sulla pagina (premi di nuovo per annullare)</span></li>
+          <li>Formula → LaTeX <span><kbd>F</kbd>, da ⋯ Altro o dal radiale: trascina attorno a un'equazione. Motore «Locale» (math-OCR integrato, il 1º uso scarica ~180 MB) o «Ollama» (modello di visione). «Più righe» = blocco gathered. Il LaTeX riconosciuto è <strong>modificabile</strong> con <strong>anteprima resa</strong> che si aggiorna mentre correggi. Esporta come LaTeX o Markdown ($$…$$): Copia, Salva… o → Appunti</span></li>
+          <li>Estrai tabella / testo <span><kbd>T</kbd> / <kbd>X</kbd>. Motore «Nativa» (dal testo del PDF) o «Ollama» (modello di visione — utile per tabelle-immagine e pagine scansionate). Esporta scegliendo il formato: tabella MD/LaTeX/CSV (+ Excel), testo Testo/LaTeX/MD — con Copia, Salva… o → Appunti</span></li>
+          <li>Estrai figura <span><kbd>G</kbd>, da ⋯ Altro o dal radiale: trascina attorno a una figura per ritagliarla come immagine PNG. «Salva PNG…» su file, oppure «→ Appunti» per incorporarla in un appunto</span></li>
+          <li>Finestre di estrazione <span>Trascinabili dalla barra del titolo (per confrontarle con la pagina sotto) e ridimensionabili dall'angolo</span></li>
           <li>⋯ Altro <span>Rotazione, note, estrazione tabella/testo/formula/figura, stampa, condivisione</span></li>
           <li>Tasto destro <span>Menu radiale con i comandi di lettura</span></li>
           <li>Mouse fermo <span>La barra si nasconde; muovi il mouse per mostrarla</span></li>
@@ -2269,7 +2382,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="tableback" onmousedown={(e) => { if (e.target === e.currentTarget) tableModal = false; }} role="presentation">
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-      <div class="tablecard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+      <div class="tablecard" role="dialog" tabindex="-1" use:dragCard onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
           <strong>Tabella estratta</strong>
           <div class="viewtoggle" title="Motore di estrazione">
@@ -2326,7 +2439,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="tableback" onmousedown={(e) => { if (e.target === e.currentTarget) textModal = false; }} role="presentation">
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-      <div class="tablecard textcard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+      <div class="tablecard textcard" role="dialog" tabindex="-1" use:dragCard onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
           <strong>Testo estratto</strong>
           <div class="viewtoggle" title="Motore di estrazione">
@@ -2370,7 +2483,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="tableback" onmousedown={(e) => { if (e.target === e.currentTarget) formulaModal = false; }} role="presentation">
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-      <div class="tablecard textcard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+      <div class="tablecard textcard" role="dialog" tabindex="-1" use:dragCard onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
           <strong>Formula → LaTeX</strong>
           <div class="viewtoggle" title="Motore di riconoscimento">
@@ -2406,10 +2519,26 @@
             <p class="tdim">{formulaEngine === "ollama" ? "Riconosco la formula con il modello di visione…" : "Riconosco la formula in locale… (il primo uso scarica il modello, ~180 MB)"}</p>
           {:else if formulaError}
             <p class="tdim">{formulaError}</p>
-          {:else if !formulaLatex.trim()}
+          {:else if formulaEmpty}
             <p class="tdim">Nessuna formula riconosciuta. Riprova selezionando l'area più precisamente attorno all'equazione.</p>
           {:else}
-            <textarea class="exttext" bind:value={formulaLatex} spellcheck="false"></textarea>
+            <div class="formulaedit">
+              <div class="fecol">
+                <span class="felbl">LaTeX riconosciuto — modificabile</span>
+                <textarea class="exttext feta" bind:value={formulaLatex} oninput={scheduleFormulaPreview} spellcheck="false" title="Correggi qui il LaTeX: l'anteprima si aggiorna mentre scrivi"></textarea>
+              </div>
+              <div class="fecol">
+                <span class="felbl">Anteprima resa {formulaFormat === "md" ? "(blocco $$…$$)" : ""}</span>
+                <div class="formulaprev">
+                  {#if formulaPreviewHtml}
+                    <!-- eslint-disable-next-line svelte/no-at-html-tags -- HTML sanificato dal backend (ammonia) -->
+                    {@html formulaPreviewHtml}
+                  {:else}
+                    <p class="tdim">Rendo la formula…</p>
+                  {/if}
+                </div>
+              </div>
+            </div>
           {/if}
         </div>
       </div>
@@ -2420,7 +2549,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="tableback" onmousedown={(e) => { if (e.target === e.currentTarget) figureModal = false; }} role="presentation">
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-      <div class="tablecard textcard" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+      <div class="tablecard textcard" role="dialog" tabindex="-1" use:dragCard onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
           <strong>Figura → PNG</strong>
           <span style="flex:1"></span>
@@ -2527,6 +2656,10 @@
   .mitem:hover:not(:disabled) { background: var(--accent-soft); }
   .mitem:disabled { opacity: 0.55; cursor: default; }
   .mck { flex: 0 0 14px; text-align: center; color: var(--accent); font-weight: 700; font-size: 12px; }
+  .mkey {
+    margin-left: auto; flex: 0 0 auto; color: var(--dim); font-size: 10.5px;
+    border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; line-height: 15px;
+  }
   .msep { height: 1px; background: var(--border); margin: 5px 4px; }
   .viewbody { flex: 1; display: flex; min-height: 0; }
   .toc {
@@ -2616,7 +2749,8 @@
     box-shadow: var(--shadow-lg, 0 16px 48px rgba(0, 0, 0, 0.3));
     overflow: auto; resize: both; min-width: 420px; min-height: 280px;
   }
-  .tablehd { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; row-gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .tablehd { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; row-gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); cursor: move; }
+  .tablehd button, .tablehd select { cursor: pointer; }
   .tablehd strong { font-family: var(--serif); font-size: 15px; }
   .tdim { color: var(--dim); font-size: 12px; }
   .tablehd button {
@@ -2642,6 +2776,27 @@
   .formulaimg {
     display: block; max-width: 100%; max-height: 190px; margin: 0 auto 12px;
     padding: 8px; background: #fff; border: 1px solid var(--border); border-radius: 8px;
+  }
+  /* Formula: editable LaTeX on the left, live rendered (MathML) preview right. */
+  .formulaedit { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: stretch; }
+  .fecol { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .felbl { font-size: 11px; color: var(--dim); }
+  .formulaedit .exttext.feta { min-height: 180px; flex: 1; resize: none; }
+  .formulaprev {
+    flex: 1; min-height: 180px; overflow: auto; box-sizing: border-box;
+    background: var(--field); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; display: flex; flex-direction: column; justify-content: center;
+  }
+  .formulaprev :global(math) { font-size: 1.3em; }
+  .formulaprev :global(math[display="block"]) { display: block; margin: 0.5em 0; overflow-x: auto; }
+  .formulaprev :global(.mathraw) {
+    background: var(--accent-soft); color: var(--accent); padding: 1px 5px;
+    border-radius: 4px; font-family: ui-monospace, Consolas, monospace; font-size: 0.85em;
+    word-break: break-all;
+  }
+  .formulaprev :global(p) { margin: 0; }
+  @media (max-width: 760px) {
+    .formulaedit { grid-template-columns: 1fr; }
   }
   .figureimg {
     display: block; max-width: 100%; max-height: 62vh; margin: 0 auto;
