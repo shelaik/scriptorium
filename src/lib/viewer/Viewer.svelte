@@ -240,7 +240,12 @@
     try {
       // Same pipeline as the notes preview: $$…$$ → MathML via latex2mathml
       // (multi-line gathered blocks are split into stacked equations).
-      const html = await previewMarkdown(`$$\n${l}\n$$`);
+      let html = await previewMarkdown(`$$\n${l}\n$$`);
+      // latex2mathml only makes *top-level* letters upright for \mathrm{…}; nested
+      // ones (fractions, sub/superscripts, roots) stay italic. Real LaTeX/KaTeX make
+      // the whole group upright, so when the entire formula is \mathrm-wrapped we mark
+      // every plain <mi> (italic default) normal, matching the exported LaTeX.
+      if (isWrappedInMathrm(formulaLatex.trim())) html = html.replaceAll("<mi>", '<mi mathvariant="normal">');
       if (seq === formulaPrevSeq) formulaPreviewHtml = html;
     } catch {
       /* keep the last good preview */
@@ -899,6 +904,39 @@
     if (tableFormat === "latex") sendFormatted(tableToLatex(tableGrid), { code: "latex", label: "Tabella (LaTeX) da" }, e);
     else if (tableFormat === "csv") sendFormatted(tableToCsv(tableGrid), { code: "csv", label: "Tabella (CSV) da" }, e);
     else sendFormatted(tableToMarkdown(tableGrid), { raw: true, label: "Tabella da" }, e);
+  }
+  // ----- Wrap / unwrap the whole formula in \mathrm{…} (renders it all upright) -----
+  const MATHRM_PRE = "\\mathrm{";
+  /** True if `l` is exactly `\mathrm{ … }` with the outer braces enclosing everything
+   *  (the closing brace of the \mathrm is the very last char), honoring `\{`/`\}`. */
+  function isWrappedInMathrm(l: string): boolean {
+    if (!l.startsWith(MATHRM_PRE) || !l.endsWith("}")) return false;
+    let depth = 0;
+    for (let i = MATHRM_PRE.length - 1; i < l.length; i++) {
+      const c = l[i];
+      if (c === "\\") { i++; continue; } // skip an escaped char (\{ \} \\)
+      if (c === "{") depth++;
+      else if (c === "}") { depth--; if (depth === 0) return i === l.length - 1; }
+    }
+    return false;
+  }
+  const formulaWrapped = $derived(isWrappedInMathrm(formulaLatex.trim()));
+  // A multi-line formula carries a LaTeX environment (\begin{gathered}…). Wrapping
+  // the whole thing in \mathrm{…} produces invalid LaTeX — an environment cannot
+  // live inside a \mathrm box — so we forbid *wrapping* it (the button is disabled),
+  // while still allowing an existing (hand-made) wrap to be removed.
+  const formulaHasEnv = $derived(formulaLatex.includes("\\begin{"));
+  /** Toggle wrapping the current formula in \mathrm{…}; refresh the live preview. */
+  function toggleMathrmWrap() {
+    const l = formulaLatex.trim();
+    if (!l) return;
+    if (isWrappedInMathrm(l)) {
+      formulaLatex = l.slice(MATHRM_PRE.length, -1).trim();
+    } else {
+      if (l.includes("\\begin{")) return; // can't wrap a whole environment (invalid LaTeX)
+      formulaLatex = `${MATHRM_PRE}${l}}`;
+    }
+    renderFormulaPreview();
   }
   function formulaCopyFmt() {
     copyFormatted(formulaOut());
@@ -2344,7 +2382,7 @@
           <li><kbd>[</kbd> / <kbd>]</kbd> <span>Ruota</span></li>
           <li>Selezione testo <span>Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)</span></li>
           <li><kbd>T</kbd> / <kbd>X</kbd> / <kbd>F</kbd> / <kbd>G</kbd> <span>Estrai tabella / testo / formula / figura: attiva la selezione, poi trascina un riquadro sulla pagina (premi di nuovo per annullare)</span></li>
-          <li>Formula → LaTeX <span><kbd>F</kbd>, da ⋯ Altro o dal radiale: trascina attorno a un'equazione. Motore «Locale» (math-OCR integrato, il 1º uso scarica ~180 MB) o «Ollama» (modello di visione). «Più righe» = blocco gathered. Il LaTeX riconosciuto è <strong>modificabile</strong> con <strong>anteprima resa</strong> che si aggiorna mentre correggi. Esporta come LaTeX o Markdown ($$…$$): Copia, Salva… o → Appunti</span></li>
+          <li>Formula → LaTeX <span><kbd>F</kbd>, da ⋯ Altro o dal radiale: trascina attorno a un'equazione. Motore «Locale» (math-OCR integrato, il 1º uso scarica ~180 MB) o «Ollama» (modello di visione). «Più righe» = blocco gathered. Il LaTeX riconosciuto è <strong>modificabile</strong> con <strong>anteprima resa</strong> che si aggiorna mentre correggi; il pulsante <strong>\mathrm&#123;&#125;</strong> avvolge (o toglie) tutta la formula in tondo. Esporta come LaTeX o Markdown ($$…$$): Copia, Salva… o → Appunti</span></li>
           <li>Estrai tabella / testo <span><kbd>T</kbd> / <kbd>X</kbd>. Motore «Nativa» (dal testo del PDF) o «Ollama» (modello di visione — utile per tabelle-immagine e pagine scansionate). Esporta scegliendo il formato: tabella MD/LaTeX/CSV (+ Excel), testo Testo/LaTeX/MD — con Copia, Salva… o → Appunti</span></li>
           <li>Estrai figura <span><kbd>G</kbd>, da ⋯ Altro o dal radiale: trascina attorno a una figura per ritagliarla come immagine PNG. «Salva PNG…» su file, oppure «→ Appunti» per incorporarla in un appunto</span></li>
           <li>Finestre di estrazione <span>Trascinabili dalla barra del titolo (per confrontarle con la pagina sotto) e ridimensionabili dall'angolo</span></li>
@@ -2502,6 +2540,7 @@
               <button class:on={formulaFormat === "latex"} onclick={() => (formulaFormat = "latex")} title="LaTeX grezzo">LaTeX</button>
               <button class:on={formulaFormat === "md"} onclick={() => (formulaFormat = "md")} title="Markdown, blocco $$…$$">MD</button>
             </div>
+            <button class:on={formulaWrapped} disabled={formulaHasEnv && !formulaWrapped} onclick={toggleMathrmWrap} title={formulaWrapped ? "Togli l'involucro \\mathrm{} (torna al corsivo matematico)" : formulaHasEnv ? "Le formule su più righe non si possono avvolgere in \\mathrm{} (avvolgi le singole righe a mano)" : "Avvolgi tutta la formula in \\mathrm{} (la rende tutta in tondo/dritto)"}>\mathrm&#123;&#125;</button>
           {/if}
           <span style="flex:1"></span>
           {#if !formulaLoading && formulaLatex.trim()}
