@@ -6,7 +6,7 @@
 //! sync still work and the user compiles elsewhere.
 
 use anyhow::{anyhow, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Starter document: minimal, Italian-friendly, wired to `refs.bib` so the
 /// library citations work out of the box.
@@ -37,6 +37,161 @@ per inserire \verb|\cite{...}| con le citekey dei tuoi paper.
 \bibliography{refs}
 \end{document}
 "#;
+
+/// Two-column conference-style paper.
+pub const PAPER_TEMPLATE: &str = r#"\documentclass[10pt,twocolumn]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage[margin=2cm]{geometry}
+
+\title{Titolo del paper}
+\author{Autore Uno \and Autore Due}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Scrivi qui l'abstract: problema, approccio, risultato principale.
+\end{abstract}
+
+\section{Introduzione}
+Il contesto e il contributo. Cita dalla tua libreria con «Cita» nell'editor.
+
+\section{Metodo}
+\begin{equation}
+  \mathcal{L} = -\sum_i y_i \log \hat{y}_i
+\end{equation}
+
+\section{Esperimenti}
+\begin{table}[t]
+  \centering
+  \caption{Risultati principali.}
+  \begin{tabular}{lcc}
+    \toprule
+    Metodo & Metrica A & Metrica B \\
+    \midrule
+    Baseline & 0.72 & 0.65 \\
+    Proposto & \textbf{0.81} & \textbf{0.74} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Conclusioni}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+\end{document}
+"#;
+
+/// Report / thesis-like document with chapters and a table of contents.
+pub const REPORT_TEMPLATE: &str = r#"\documentclass[11pt]{report}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[italian]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+
+\title{Titolo della relazione}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\chapter{Introduzione}
+Scrivi qui. Le citazioni vengono dalla tua libreria («Cita» nell'editor).
+
+\chapter{Stato dell'arte}
+
+\chapter{Metodo}
+
+\chapter{Risultati}
+
+\chapter{Conclusioni}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+\end{document}
+"#;
+
+/// Beamer slide deck.
+pub const SLIDES_TEMPLATE: &str = r#"\documentclass{beamer}
+\usetheme{Madrid}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+
+\title{Titolo della presentazione}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Sommario}
+  \tableofcontents
+\end{frame}
+
+\section{Introduzione}
+\begin{frame}{Introduzione}
+  \begin{itemize}
+    \item Primo punto
+    \item Secondo punto
+  \end{itemize}
+\end{frame}
+
+\section{Risultati}
+\begin{frame}{Risultati}
+  \begin{equation*}
+    E = mc^2
+  \end{equation*}
+\end{frame}
+
+\end{document}
+"#;
+
+/// Bare-bones document, no packages beyond math.
+pub const MINIMAL_TEMPLATE: &str = r#"\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+
+\begin{document}
+
+Scrivi qui.
+
+\end{document}
+"#;
+
+/// The built-in templates: (id, body). The frontend shows matching labels.
+pub const TEMPLATES: [(&str, &str); 5] = [
+    ("articolo", MAIN_TEMPLATE),
+    ("paper", PAPER_TEMPLATE),
+    ("relazione", REPORT_TEMPLATE),
+    ("presentazione", SLIDES_TEMPLATE),
+    ("minimale", MINIMAL_TEMPLATE),
+];
+
+/// Body of a built-in template ("articolo" if the id is unknown).
+pub fn template_body(id: &str) -> &'static str {
+    TEMPLATES
+        .iter()
+        .find(|(k, _)| *k == id)
+        .map(|(_, b)| *b)
+        .unwrap_or(MAIN_TEMPLATE)
+}
 
 /// A project's identity, derived from its folder.
 #[derive(serde::Serialize)]
@@ -143,11 +298,140 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<ProjectFile>, depth: u8)
     }
 }
 
+/// Extract a downloaded template .zip into a fresh project folder `root`.
+/// Strips a single shared top-level folder (the usual shape of gallery
+/// downloads), guards against zip-slip, and makes sure a `main.tex` exists
+/// (renaming the single root `\documentclass` file if needed).
+pub fn extract_template_zip(zip_path: &Path, root: &Path) -> Result<()> {
+    use std::io::Read;
+    const MAX_ENTRIES: usize = 2000;
+    const MAX_FILE_BYTES: u64 = 60 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: u64 = 300 * 1024 * 1024;
+
+    let file = std::fs::File::open(zip_path).map_err(|e| anyhow!("apertura .zip: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| anyhow!("lettura .zip: {e}"))?;
+    let n = archive.len().min(MAX_ENTRIES);
+
+    // A shared top-level folder is stripped so files land at the project root.
+    let mut prefix: Option<String> = None;
+    let mut uniform = true;
+    for i in 0..n {
+        let Ok(entry) = archive.by_index(i) else { continue };
+        let Some(rel) = entry.enclosed_name() else { continue };
+        let Some(first) = rel.components().next() else { continue };
+        let first = first.as_os_str().to_string_lossy().to_string();
+        if first == "__MACOSX" {
+            continue;
+        }
+        match &prefix {
+            None => prefix = Some(first),
+            Some(p) if *p != first => {
+                uniform = false;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let strip = if uniform { prefix } else { None };
+
+    let mut total: u64 = 0;
+    let mut wrote_any = false;
+    for i in 0..n {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        // enclosed_name() rejects absolute paths and `..` traversal (zip-slip guard).
+        let Some(rel) = entry.enclosed_name().map(|r| r.to_path_buf()) else { continue };
+        let rel = match &strip {
+            Some(p) => match rel.strip_prefix(p) {
+                Ok(r) => r.to_path_buf(),
+                Err(_) => rel,
+            },
+            None => rel,
+        };
+        if rel.as_os_str().is_empty()
+            || rel.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+            || rel.starts_with("__MACOSX")
+        {
+            continue;
+        }
+        if entry.size() > MAX_FILE_BYTES {
+            continue; // no single template file is this big; likely junk
+        }
+        if total >= MAX_TOTAL_BYTES {
+            break;
+        }
+        let out = root.join(&rel);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut f = std::fs::File::create(&out).map_err(|e| anyhow!("{}: {e}", rel.display()))?;
+        let written = std::io::copy(&mut (&mut entry).take(MAX_FILE_BYTES), &mut f)
+            .map_err(|e| anyhow!("{}: {e}", rel.display()))?;
+        total += written;
+        wrote_any = true;
+    }
+    if !wrote_any {
+        return Err(anyhow!("lo .zip non contiene file utilizzabili"));
+    }
+    ensure_main_tex(root)
+}
+
+/// Make sure `root/main.tex` exists: when the template names its document
+/// differently, rename the root-level `\documentclass` file. Ambiguity
+/// (several candidates) is an error asking the user to pick by hand.
+fn ensure_main_tex(root: &Path) -> Result<()> {
+    if root.join("main.tex").exists() {
+        return Ok(());
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("tex") {
+                let head: String = std::fs::read_to_string(&p)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(64 * 1024)
+                    .collect();
+                if head.contains("\\documentclass") {
+                    candidates.push(p);
+                }
+            }
+        }
+    }
+    match candidates.len() {
+        1 => std::fs::rename(&candidates[0], root.join("main.tex"))
+            .map_err(|e| anyhow!("rinomina in main.tex: {e}")),
+        0 => Err(anyhow!(
+            "nessun file .tex con \\documentclass alla radice dello .zip: \
+             rinomina il documento principale in main.tex e riprova"
+        )),
+        _ => Err(anyhow!(
+            "più file .tex principali nello .zip ({}): rinomina quello giusto in main.tex",
+            candidates
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 /// Outcome of a compilation attempt.
 #[derive(serde::Serialize)]
 pub struct CompileResult {
+    /// A PDF was produced by THIS run (fresh mtime) — show the preview.
     pub ok: bool,
-    /// Which tool ran ("tectonic" / "latexmk"), empty if none was found.
+    /// The tool also exited cleanly. `ok && !clean` = PDF produced but with
+    /// errors/warnings (e.g. bibtex on a document with no \cite yet) — like
+    /// Overleaf, we show the result AND the log.
+    pub clean: bool,
+    /// Which tool ran ("tectonic" / "texify" / "latexmk"), empty if none found.
     pub tool: String,
     /// Tail of the combined output (the part with the error, when it fails).
     pub log: String,
@@ -159,27 +443,48 @@ pub struct CompileResult {
 /// `spawn_blocking`); enforces a wall-clock timeout by killing the process.
 pub fn compile(root: &Path) -> CompileResult {
     // Preferred: Tectonic — single binary, fetches packages on demand, runs
-    // bibtex/reruns automatically. Fallback: latexmk (TeX Live / MiKTeX).
-    let attempts: [(&str, Vec<&str>); 2] = [
+    // bibtex/reruns automatically. Then texify (MiKTeX's native driver: handles
+    // bibtex/reruns and needs NO Perl — latexmk on MiKTeX dies without Perl).
+    // Last, latexmk (TeX Live, where texify does not exist).
+    let attempts: [(&str, Vec<&str>); 3] = [
         ("tectonic", vec!["main.tex"]),
+        ("texify", vec!["--pdf", "--batch", "main.tex"]),
         ("latexmk", vec!["-pdf", "-interaction=nonstopmode", "-halt-on-error", "main.tex"]),
     ];
     for (tool, args) in attempts {
+        // A stale main.pdf from an earlier run must not count as success:
+        // only a PDF (re)written by THIS run does.
+        let started = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
         match run_with_timeout(tool, &args, root, std::time::Duration::from_secs(300)) {
             Ok((status_ok, output)) => {
                 let pdf = root.join("main.pdf");
-                let ok = status_ok && pdf.exists();
+                let fresh = pdf
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|t| t >= started)
+                    .unwrap_or(false);
+                let mut log = tail(&output, 4000);
+                if !status_ok {
+                    // The drivers (texify in particular) often just say "did not
+                    // succeed"; the actual TeX error lives in main.log.
+                    if let Some(snip) = log_errors(&root.join("main.log")) {
+                        log.push_str("\n--- errori da main.log ---\n");
+                        log.push_str(&snip);
+                    }
+                }
                 return CompileResult {
-                    ok,
+                    ok: fresh,
+                    clean: status_ok,
                     tool: tool.to_string(),
-                    log: tail(&output, 4000),
-                    pdf_rel: if ok { Some("main.pdf".into()) } else { None },
+                    log,
+                    pdf_rel: if fresh { Some("main.pdf".into()) } else { None },
                 };
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 return CompileResult {
                     ok: false,
+                    clean: false,
                     tool: tool.to_string(),
                     log: format!("avvio {tool}: {e}"),
                     pdf_rel: None,
@@ -189,12 +494,38 @@ pub fn compile(root: &Path) -> CompileResult {
     }
     CompileResult {
         ok: false,
+        clean: false,
         tool: String::new(),
         log: "Nessun compilatore LaTeX trovato. Installa Tectonic (consigliato, un solo \
               eseguibile che scarica i pacchetti da solo):\n  winget install Tectonic.Tectonic\n\
-              oppure una distribuzione TeX con latexmk (MiKTeX / TeX Live). Poi riprova."
+              oppure una distribuzione TeX (MiKTeX / TeX Live). Poi riprova."
             .to_string(),
         pdf_rel: None,
+    }
+}
+
+/// The "! …" error lines from a TeX log (each with 2 lines of context), capped.
+/// None when the log is missing/unreadable or has no error markers.
+fn log_errors(log_path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(log_path).ok()?;
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < lines.len() && out.len() < 2500 {
+        if lines[i].starts_with('!') {
+            for l in lines.iter().skip(i).take(3) {
+                out.push_str(l);
+                out.push('\n');
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -284,6 +615,55 @@ mod tests {
         assert!(safe_rel("C:/x").is_err());
         assert!(safe_rel("").is_err());
         assert!(safe_rel("a//b").is_err());
+    }
+
+    #[test]
+    fn template_zip_strips_prefix_and_renames_main() {
+        let dir = std::env::temp_dir().join(format!("tpzip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A gallery-style zip: one shared top folder, doc not named main.tex.
+        let zip_path = dir.join("t.zip");
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            use std::io::Write;
+            w.start_file("MyTemplate/paper.tex", opts).unwrap();
+            w.write_all(b"\\documentclass{article}\\begin{document}x\\end{document}").unwrap();
+            w.start_file("MyTemplate/style.cls", opts).unwrap();
+            w.write_all(b"% cls").unwrap();
+            w.start_file("__MACOSX/junk", opts).unwrap();
+            w.write_all(b"j").unwrap();
+            w.finish().unwrap();
+        }
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        extract_template_zip(&zip_path, &root).unwrap();
+        assert!(root.join("main.tex").exists(), "paper.tex renamed to main.tex");
+        assert!(root.join("style.cls").exists(), "prefix MyTemplate/ stripped");
+        assert!(!root.join("__MACOSX").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Env-gated spike: scaffold every built-in template as create_project does
+    /// (main.tex + empty refs.bib) and compile it with the real system toolchain.
+    /// Run: $env:TEXPROJ_TEST_DIR="<dir>"; cargo test --lib spike_compile_templates -- --nocapture
+    #[test]
+    fn spike_compile_templates() {
+        let Some(dir) = std::env::var_os("TEXPROJ_TEST_DIR") else { return };
+        for (id, body) in TEMPLATES {
+            let root = Path::new(&dir).join(id);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("main.tex"), body).unwrap();
+            std::fs::write(root.join("refs.bib"), "").unwrap();
+            let res = compile(&root);
+            println!("== {id}: ok={} tool={}", res.ok, res.tool);
+            if !res.ok {
+                println!("{}", res.log);
+            }
+            assert!(res.ok, "template {id} non compila");
+        }
     }
 
     #[test]

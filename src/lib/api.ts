@@ -950,16 +950,23 @@ export interface ProjectFile {
   size: number;
 }
 export interface CompileResult {
+  /** Un PDF è stato prodotto da QUESTA compilazione (mostra l'anteprima). */
   ok: boolean;
-  /** Strumento usato ("tectonic" / "latexmk"), vuoto se nessuno installato. */
+  /** Lo strumento è anche uscito pulito; ok && !clean = PDF prodotto ma con avvisi. */
+  clean: boolean;
+  /** Strumento usato ("tectonic" / "texify" / "latexmk"), vuoto se nessuno installato. */
   tool: string;
   /** Coda del log di compilazione (contiene l'errore quando fallisce). */
   log: string;
   pdf_rel: string | null;
 }
 export const listProjects = () => invoke<ProjectMeta[]>("list_projects");
-/** Crea cartella + main.tex + refs.bib (sincronizzato dalla libreria); ritorna lo slug. */
-export const createProject = (name: string) => invoke<string>("create_project", { name });
+/** Crea cartella + main.tex (da un modello integrato) + refs.bib dalla libreria; ritorna lo slug. */
+export const createProject = (name: string, template?: string) =>
+  invoke<string>("create_project", { name, template: template ?? null });
+/** Crea un progetto estraendo un template .zip scaricato (Overleaf/IEEE/ACM…). */
+export const createProjectFromZip = (name: string, zipPath: string) =>
+  invoke<string>("create_project_from_zip", { name, zipPath });
 export const projectFiles = (slug: string) => invoke<ProjectFile[]>("project_files", { slug });
 export const readProjectFile = (slug: string, rel: string) =>
   invoke<string>("read_project_file", { slug, rel });

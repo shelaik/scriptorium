@@ -1601,26 +1601,67 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<projects::ProjectMeta>, Strin
     Ok(projects::list(&projects_dir(&app)))
 }
 
-/// Scaffold a new project: folder + main.tex template + refs.bib synced from the
-/// whole library. Returns the slug.
+/// Scaffold a new project: folder + main.tex from a built-in template +
+/// refs.bib synced from the whole library. Returns the slug.
 #[tauri::command]
-pub fn create_project(app: AppHandle, state: State<'_, AppState>, name: String) -> Result<String, String> {
+pub fn create_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    template: Option<String>,
+) -> Result<String, String> {
+    let root = new_project_root(&app, &name)?;
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let body = projects::template_body(template.as_deref().unwrap_or("articolo"));
+    std::fs::write(root.join("main.tex"), body).map_err(|e| e.to_string())?;
+    write_library_bib(&state, &root)?;
+    Ok(slug_of(&root))
+}
+
+/// Create a project from a downloaded template .zip (Overleaf gallery, IEEE,
+/// ACM, …): extract, ensure main.tex, add refs.bib only if the template has none.
+#[tauri::command]
+pub fn create_project_from_zip(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    zip_path: String,
+) -> Result<String, String> {
+    let root = new_project_root(&app, &name)?;
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    if let Err(e) = projects::extract_template_zip(Path::new(&zip_path), &root) {
+        let _ = std::fs::remove_dir_all(&root); // don't leave a broken half-project
+        return Err(e.to_string());
+    }
+    if !root.join("refs.bib").exists() {
+        write_library_bib(&state, &root)?;
+    }
+    Ok(slug_of(&root))
+}
+
+/// Validate the name and return the (not yet existing) project folder.
+fn new_project_root(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     if name.trim().is_empty() {
         return Err("Dai un nome al progetto".into());
     }
-    let slug = wiki::slugify(&name);
-    let root = projects_dir(&app).join(&slug);
+    let slug = wiki::slugify(name);
+    let root = projects_dir(app).join(&slug);
     if root.exists() {
         return Err("Esiste già un progetto con questo nome".into());
     }
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    std::fs::write(root.join("main.tex"), projects::MAIN_TEMPLATE).map_err(|e| e.to_string())?;
+    Ok(root)
+}
+
+fn slug_of(root: &Path) -> String {
+    root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+fn write_library_bib(state: &State<'_, AppState>, root: &Path) -> Result<(), String> {
     let bib = {
         let conn = state.db.lock();
         library_bibtex(&conn)?
     };
-    std::fs::write(root.join("refs.bib"), bib).map_err(|e| e.to_string())?;
-    Ok(slug)
+    std::fs::write(root.join("refs.bib"), bib).map_err(|e| e.to_string())
 }
 
 /// The whole (non-deleted) library as BibTeX — the project's refs.bib content.

@@ -7,9 +7,12 @@
   import { onMount, tick } from "svelte";
   import * as pdfjsLib from "pdfjs-dist";
   import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
+  import { openInBrowser } from "$lib/share";
   import {
     listProjects,
     createProject,
+    createProjectFromZip,
     projectFiles,
     readProjectFile,
     writeProjectFile,
@@ -29,6 +32,24 @@
   /** Extensions we can open in the text editor (the rest is preview-only). */
   const TEXT_EXT = ["tex", "bib", "sty", "cls", "bst", "txt", "md"];
 
+  /** Built-in templates (ids match projects::TEMPLATES in the backend). */
+  const TEMPLATES = [
+    { id: "articolo", label: "Articolo semplice" },
+    { id: "paper", label: "Paper (due colonne)" },
+    { id: "relazione", label: "Relazione / tesi" },
+    { id: "presentazione", label: "Presentazione (beamer)" },
+    { id: "minimale", label: "Minimale" },
+  ];
+
+  /** Official template galleries: download a .zip, then "Da .zip…". */
+  const GALLERIES = [
+    { label: "Overleaf Gallery", url: "https://www.overleaf.com/latex/templates" },
+    { label: "IEEE", url: "https://template-selector.ieee.org/" },
+    { label: "ACM", url: "https://www.acm.org/publications/proceedings-template" },
+    { label: "Springer", url: "https://www.springernature.com/gp/authors/campaigns/latex-author-support" },
+    { label: "Elsevier", url: "https://www.elsevier.com/researcher/author/policies-and-guidelines/latex-instructions" },
+  ];
+
   let projects: ProjectMeta[] = $state([]);
   let current: string | null = $state(null); // slug
   let files: ProjectFile[] = $state([]);
@@ -39,6 +60,7 @@
   let loadToken = 0; // discards stale file loads after a quick switch
 
   let newName = $state("");
+  let newTemplate = $state("articolo");
   let creating = $state(false);
   let errorMsg = $state("");
 
@@ -171,7 +193,35 @@
     creating = true;
     errorMsg = "";
     try {
-      const slug = await createProject(name);
+      const slug = await createProject(name, newTemplate);
+      newName = "";
+      await refresh();
+      await openProject(slug);
+    } catch (e) {
+      errorMsg = String(e);
+    } finally {
+      creating = false;
+    }
+  }
+
+  /** New project from a downloaded template .zip; name falls back to the file name. */
+  async function doCreateFromZip() {
+    if (creating) return;
+    const picked = await openDialog({
+      multiple: false,
+      filters: [{ name: "Template LaTeX (.zip)", extensions: ["zip"] }],
+    });
+    if (typeof picked !== "string") return;
+    let name = newName.trim();
+    if (!name) {
+      const base = picked.replace(/\\/g, "/").split("/").pop() ?? "";
+      name = base.replace(/\.zip$/i, "").trim();
+    }
+    if (!name) return;
+    creating = true;
+    errorMsg = "";
+    try {
+      const slug = await createProjectFromZip(name, picked);
       newName = "";
       await refresh();
       await openProject(slug);
@@ -326,6 +376,25 @@
       />
       <button class="tbtn" onclick={doCreate} disabled={creating || !newName.trim()}>Crea</button>
     </div>
+    <div class="newopts">
+      <select
+        class="tplsel"
+        bind:value={newTemplate}
+        title="Modello di partenza per «Crea»"
+      >
+        {#each TEMPLATES as t (t.id)}
+          <option value={t.id}>{t.label}</option>
+        {/each}
+      </select>
+      <button
+        class="tbtn"
+        onclick={doCreateFromZip}
+        disabled={creating}
+        title="Crea un progetto da un template .zip scaricato (Overleaf, IEEE, ACM…)"
+      >
+        Da .zip…
+      </button>
+    </div>
     <div class="projlist">
       {#each projects as p (p.slug)}
         <button
@@ -343,6 +412,12 @@
           <code>refs.bib</code> con le citazioni della tua libreria.
         </p>
       {/if}
+    </div>
+    <div class="galleries">
+      <span class="galhead" title="Scarica un template ufficiale come .zip, poi «Da .zip…»">Modelli online:</span>
+      {#each GALLERIES as g (g.url)}
+        <button class="gallink" onclick={() => openInBrowser(g.url)} title={g.url}>{g.label}</button>
+      {/each}
     </div>
     {#if current}
       <div class="filehead">File</div>
@@ -419,6 +494,13 @@
             {showLog ? "Nascondi log" : "Mostra log"}
           </button>
         </div>
+      {:else if compileRes?.ok && !compileRes.clean}
+        <div class="note warn">
+          PDF prodotto ({compileRes.tool}), ma con avvisi o errori nel log.
+          <button class="linkbtn" onclick={() => (showLog = !showLog)}>
+            {showLog ? "Nascondi log" : "Mostra log"}
+          </button>
+        </div>
       {:else if compileRes?.ok}
         <div class="note ok">
           Compilato con {compileRes.tool}.
@@ -449,11 +531,15 @@
           <code>.bib</code> tuoi, per sempre.
         </p>
         <p>
-          Per compilare serve un compilatore LaTeX di sistema. Consigliato
+          Per compilare serve un compilatore LaTeX di sistema: va bene
+          <strong>MiKTeX</strong> o TeX Live già installati, oppure
           <strong>Tectonic</strong> (un solo eseguibile, scarica i pacchetti da solo):
         </p>
         <pre>winget install Tectonic.Tectonic</pre>
-        <p>In alternativa va bene una distribuzione TeX con <code>latexmk</code> (MiKTeX, TeX Live).</p>
+        <p>
+          Parti da un modello integrato («Crea») o scarica un template ufficiale
+          (Overleaf, IEEE, ACM…) come .zip e usa «Da .zip…».
+        </p>
         <p>Senza compilatore, editor + citazioni + bibliografia funzionano comunque.</p>
       </div>
     {/if}
@@ -516,6 +602,40 @@
     border-radius: var(--r-sm);
     padding: 6px 8px;
     font-size: 0.85rem;
+  }
+  .newopts {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .tplsel {
+    flex: 1;
+    min-width: 0;
+    background: var(--field);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: 5px 6px;
+    font-size: 0.8rem;
+  }
+  .galleries {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    align-items: baseline;
+    font-size: 0.75rem;
+  }
+  .galhead {
+    color: var(--faint);
+  }
+  .gallink {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 0.75rem;
+    text-decoration: underline;
   }
   .projlist {
     overflow-y: auto;
@@ -746,6 +866,11 @@
   .note.err {
     background: var(--danger-soft);
     color: var(--danger);
+  }
+  .note.warn {
+    background: var(--zebra);
+    color: var(--dim);
+    border: 1px solid var(--border);
   }
   .linkbtn {
     background: none;

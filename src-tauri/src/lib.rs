@@ -270,6 +270,7 @@ pub fn run() {
             commands::ai_server_stop,
             commands::list_projects,
             commands::create_project,
+            commands::create_project_from_zip,
             commands::project_files,
             commands::read_project_file,
             commands::write_project_file,
