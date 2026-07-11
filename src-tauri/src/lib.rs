@@ -224,6 +224,7 @@ pub fn run() {
             commands::extract_table,
             commands::extract_table_model,
             commands::tablestruct_status,
+            commands::save_graph_positions,
             commands::export_table,
             commands::ai_clean_table,
             commands::extract_region_text,

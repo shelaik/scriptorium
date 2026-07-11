@@ -119,6 +119,7 @@
   } from "$lib/api";
   import {
     similarityGraph,
+    saveGraphPositions,
     documentPath,
     removeFromCollection,
     getDocumentMeta,
@@ -513,7 +514,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.42";
+  const APP_VERSION = "0.9.0";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3306,18 +3307,121 @@
 
   // ----- Costellazione (semantic map) -----
   let graphError = $state(false); // latched on failure so the effect can't retry-loop
+  // Graph density controls (Costellazione 2.0 fase 1): k = neighbours per node,
+  // minSim = similarity floor. Persisted so the user's tuning survives restarts.
+  let graphK = $state(Number(localStorage.getItem("scriptorium-graph-k")) || 4);
+  let graphMinSim = $state(Number(localStorage.getItem("scriptorium-graph-minsim")) || 0.55);
   async function loadGraph(force = false) {
     if (graphLoading || (graph && !force) || (graphError && !force)) return;
     graphLoading = true;
     graphError = false;
     try {
-      graph = await similarityGraph();
+      graph = await similarityGraph(graphK, graphMinSim);
     } catch (e) {
       graphError = true;
       status = "Mappa semantica: " + e;
     } finally {
       graphLoading = false;
     }
+  }
+  // ----- Stelle fantasma: online discoveries drawn around a seed node -----
+  interface MapGhost {
+    key: string;
+    seedId: number;
+    title: string;
+    year: number | null;
+    venue: string | null;
+    inLibrary: boolean;
+    added: boolean;
+    result: SearchResult;
+  }
+  let mapGhosts = $state<MapGhost[]>([]);
+  let ghostBusy = $state(false);
+  /** Fetch papers related to a node (citations / topic / author) and show them
+   *  as dashed ghost stars anchored to it. Results append (dedup by key). */
+  async function exploreFromNode(id: number, relation: "citations" | "similar" | "author") {
+    if (ghostBusy) return;
+    let d = displayed.find((x) => x.id === id) ?? docs.find((x) => x.id === id) ?? recentDocs.find((x) => x.id === id);
+    if (!d) {
+      try {
+        d = (await listDocuments()).find((x) => x.id === id);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!d) return;
+    ghostBusy = true;
+    status =
+      relation === "citations"
+        ? "Cerco citazioni collegate…"
+        : relation === "similar"
+          ? "Cerco paper simili…"
+          : "Cerco altri lavori dell'autore…";
+    try {
+      let results: SearchResult[] = [];
+      if (relation === "citations") {
+        if (!d.doi) throw "Serve il DOI di questo paper (recuperalo con «✦ senza metadati»)";
+        const cn = await exploreCitations(d.doi);
+        results = [...cn.references, ...cn.citations];
+      } else if (relation === "similar") {
+        if (!(d.title ?? "").trim()) throw "Questo paper non ha un titolo da cercare";
+        results = await discoverSearch(d.title!, "openalex", { author: null, yearFrom: null, yearTo: null, oaOnly: false, sort: "relevance" });
+        results = results.filter((r) => !d!.doi || (r.doi ?? "") !== d!.doi); // not the seed itself
+      } else {
+        const author = d.authors[0];
+        if (!author) throw "Questo paper non ha autori registrati";
+        results = await discoverSearch(author, "openalex", { author, yearFrom: null, yearTo: null, oaOnly: false, sort: "relevance" });
+      }
+      const existing = new Set(mapGhosts.map((g) => g.key));
+      const fresh: MapGhost[] = [];
+      for (const r of results) {
+        const key = r.external_id || r.doi || r.title || "";
+        if (!key || existing.has(key)) continue;
+        existing.add(key);
+        fresh.push({
+          key,
+          seedId: id,
+          title: r.title ?? "Senza titolo",
+          year: r.year,
+          venue: r.venue,
+          inLibrary: r.in_library,
+          added: false,
+          result: r,
+        });
+        if (fresh.length >= 12) break; // keep the fan readable
+      }
+      mapGhosts = [...mapGhosts, ...fresh];
+      status = fresh.length
+        ? `${fresh.length} ${fresh.length === 1 ? "stella fantasma trovata" : "stelle fantasma trovate"} — tratteggiate attorno al paper`
+        : "Nessun nuovo risultato per questa relazione";
+    } catch (e) {
+      status = "Esplorazione non riuscita: " + e;
+    } finally {
+      ghostBusy = false;
+    }
+  }
+  /** Add a ghost's paper to the library (downloads the PDF when Open Access). */
+  async function addGhostToLibrary(key: string) {
+    const g = mapGhosts.find((x) => x.key === key);
+    if (!g || g.added || g.inLibrary) return;
+    status = "Aggiungo alla libreria…";
+    try {
+      await discoverAdd(g.result);
+      mapGhosts = mapGhosts.map((x) => (x.key === key ? { ...x, added: true } : x));
+      status = "Aggiunto alla libreria ✓ — entrerà nel grafo al prossimo aggiornamento dell'indice";
+      loadDocs();
+    } catch (e) {
+      status = "Aggiunta non riuscita: " + e;
+    }
+  }
+
+  /** Apply new density parameters from the map's HUD and rebuild the graph. */
+  function setGraphParams(k: number, minSim: number) {
+    graphK = Math.min(8, Math.max(1, Math.round(k)));
+    graphMinSim = Math.min(0.95, Math.max(0.3, minSim));
+    localStorage.setItem("scriptorium-graph-k", String(graphK));
+    localStorage.setItem("scriptorium-graph-minsim", String(graphMinSim));
+    loadGraph(true);
   }
   // Depend on `view` only: loadGraph's internal reads must not re-trigger this.
   $effect(() => {
@@ -5365,8 +5469,17 @@
               {graph}
               loading={graphLoading}
               {selected}
-              onOpen={(id) => openById(id)}
+              onOpen={(id) => {
+                if (id < 0) {
+                  // A note node: negative id carries the vault slug.
+                  const slug = graph?.nodes.find((n) => n.id === id)?.slug;
+                  if (slug) openNoteHit(slug);
+                  return;
+                }
+                openById(id);
+              }}
               onContext={async (e, id) => {
+                if (id < 0) return; // notes have no document radial
                 let d = displayed.find((x) => x.id === id) ?? docs.find((x) => x.id === id) ?? recentDocs.find((x) => x.id === id);
                 if (!d) {
                   // Node outside the current filter: fetch it so the radial menu
@@ -5379,9 +5492,16 @@
                 }
                 if (d) openRadialDoc(e, d);
               }}
-              onToggleSelect={(id) => toggleSelect(id)}
+              onToggleSelect={(id) => { if (id >= 0) toggleSelect(id); }}
               onGenerate={() => generateIndex()}
               onRefresh={() => loadGraph(true)}
+              params={{ k: graphK, minSim: graphMinSim }}
+              onParams={(k, minSim) => setGraphParams(k, minSim)}
+              onSavePositions={(pos) => saveGraphPositions(pos).catch(() => {})}
+              ghosts={mapGhosts}
+              onExplore={(id, rel) => exploreFromNode(id, rel)}
+              onGhostAdd={(key) => addGhostToLibrary(key)}
+              onGhostsClear={() => (mapGhosts = [])}
               resolve={(id) => {
                 const d = displayed.find((x) => x.id === id) ?? docs.find((x) => x.id === id) ?? recentDocs.find((x) => x.id === id);
                 return d ? { authors: d.authors, venue: d.venue, tags: d.tags.map((t) => ({ name: t.name, color: t.color })) } : undefined;

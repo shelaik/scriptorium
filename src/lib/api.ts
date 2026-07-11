@@ -732,6 +732,29 @@ export interface GraphNode {
   degree: number;
   unread: boolean;
   favorite: boolean;
+  /** Published in a peer-reviewed venue (same derivation as the sidebar facet). */
+  peer_reviewed: boolean;
+  /** Has a linked GitHub repository. */
+  has_github: boolean;
+  /** PCA projection of the embedding (−1..1): semantic seed position for the layout. */
+  px: number;
+  py: number;
+  /** Layout position saved from a previous session (world units), if any. */
+  sx: number | null;
+  sy: number | null;
+  /** Semantic community index (−1 = no sizeable cluster). */
+  community: number;
+  /** "doc" for papers; "note" for vault appunti (their id is the NEGATED note id). */
+  kind: "doc" | "note";
+  /** The note's slug ("note" kind only). */
+  slug: string | null;
+}
+
+export interface ClusterInfo {
+  id: number;
+  /** Short label from the most characteristic title terms. */
+  label: string;
+  size: number;
 }
 export interface GraphEdge {
   a: number;
@@ -742,6 +765,8 @@ export interface GraphEdge {
 export interface SimilarityGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** Sizeable semantic communities (size ≥ 3), largest first. */
+  clusters: ClusterInfo[];
   embedded: number;
   total: number;
 }
@@ -750,6 +775,10 @@ export interface SimilarityGraph {
 export async function similarityGraph(k?: number, minSim?: number): Promise<SimilarityGraph> {
   return invoke<SimilarityGraph>("similarity_graph", { k: k ?? null, minSim: minSim ?? null });
 }
+
+/** Persist the Costellazione's settled node positions (map stays stable across sessions). */
+export const saveGraphPositions = (positions: { id: number; x: number; y: number }[]) =>
+  invoke<void>("save_graph_positions", { positions });
 
 /** Explain / translate / answer a question about a selected passage with the local LLM.
  *  Streams "explain-token" events ({ token: string; req: string | null }) while generating —

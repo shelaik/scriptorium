@@ -79,3 +79,130 @@ pub fn embed_query(cache_dir: &Path, text: &str) -> Result<Vec<f32>> {
         .pop()
         .context("no embedding produced for query")
 }
+
+/// Project vectors onto their two principal components (PCA via power iteration
+/// on the centered data, deterministic start, ~24 iterations per component).
+/// Returns one (x, y) per input vector, scaled so the largest |coordinate| is 1 —
+/// the Costellazione uses these as semantically meaningful seed positions, so the
+/// force layout refines a sensible map instead of untangling a random spiral.
+pub fn pca_2d(data: &[Vec<f32>]) -> Vec<(f32, f32)> {
+    let n = data.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let d = data[0].len();
+    if n < 3 || d == 0 {
+        return vec![(0.0, 0.0); n];
+    }
+    let mut mean = vec![0f32; d];
+    for v in data {
+        for (m, x) in mean.iter_mut().zip(v) {
+            *m += x;
+        }
+    }
+    for m in &mut mean {
+        *m /= n as f32;
+    }
+    let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+
+    let mut comps: Vec<Vec<f32>> = Vec::new();
+    let mut seed = 0x9E37_79B9u32; // fixed → deterministic layout seeds
+    for _ in 0..2 {
+        let mut v: Vec<f32> = (0..d)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((seed >> 8) as f32 / 16_777_216.0) - 0.5
+            })
+            .collect();
+        for _ in 0..24 {
+            // w = Xᵀ(Xv) on the centered data — never materializes the covariance.
+            let mut w = vec![0f32; d];
+            for row in data {
+                let mut s = 0f32;
+                for i in 0..d {
+                    s += (row[i] - mean[i]) * v[i];
+                }
+                for i in 0..d {
+                    w[i] += (row[i] - mean[i]) * s;
+                }
+            }
+            // Deflate: stay orthogonal to the components already found.
+            for c in &comps {
+                let p = dot(&w, c);
+                for i in 0..d {
+                    w[i] -= p * c[i];
+                }
+            }
+            let norm = dot(&w, &w).sqrt();
+            if norm < 1e-12 {
+                break;
+            }
+            for x in &mut w {
+                *x /= norm;
+            }
+            v = w;
+        }
+        comps.push(v);
+    }
+
+    let mut out: Vec<(f32, f32)> = data
+        .iter()
+        .map(|row| {
+            let (mut px, mut py) = (0f32, 0f32);
+            for i in 0..d {
+                let c = row[i] - mean[i];
+                px += c * comps[0][i];
+                py += c * comps[1][i];
+            }
+            (px, py)
+        })
+        .collect();
+    let mx = out
+        .iter()
+        .map(|(x, y)| x.abs().max(y.abs()))
+        .fold(0f32, f32::max)
+        .max(1e-9);
+    for p in &mut out {
+        p.0 /= mx;
+        p.1 /= mx;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pca_separates_two_blobs() {
+        // Two tight clusters far apart along one direction: the first component
+        // must separate them cleanly, whatever its sign.
+        let mut data: Vec<Vec<f32>> = Vec::new();
+        for i in 0..10 {
+            let jitter = (i as f32) * 0.01;
+            data.push(vec![5.0 + jitter, 0.1 * jitter, 0.0, 0.0]);
+            data.push(vec![-5.0 - jitter, -0.1 * jitter, 0.0, 0.0]);
+        }
+        let proj = pca_2d(&data);
+        assert_eq!(proj.len(), 20);
+        // Alternating rows belong to opposite blobs → opposite signs on x.
+        for pair in proj.chunks(2) {
+            assert!(
+                pair[0].0.signum() != pair[1].0.signum(),
+                "blobs not separated: {pair:?}"
+            );
+        }
+        // Normalized: everything within [-1, 1], at least one coordinate at ±1.
+        assert!(proj.iter().all(|(x, y)| x.abs() <= 1.001 && y.abs() <= 1.001));
+        assert!(proj.iter().any(|(x, _)| x.abs() > 0.99));
+    }
+
+    #[test]
+    fn pca_degenerate_inputs() {
+        assert!(pca_2d(&[]).is_empty());
+        assert_eq!(pca_2d(&[vec![1.0, 2.0]]), vec![(0.0, 0.0)]);
+        // Identical vectors: no variance → all projections collapse to ~0.
+        let same = vec![vec![1.0f32; 8]; 5];
+        assert!(pca_2d(&same).iter().all(|(x, y)| x.abs() < 1e-3 && y.abs() < 1e-3));
+    }
+}

@@ -211,6 +211,23 @@ CREATE VIRTUAL TABLE IF NOT EXISTS doc_vec USING vec0(
   embedding   float[1024] distance_metric=cosine
 );
 
+-- ===== Vettori degli appunti (.md vault) =====
+-- Same bge-m3 space as doc_vec, so notes join the semantic map next to the
+-- papers they are about. Filled by the Indice semantico job; purely derived.
+CREATE VIRTUAL TABLE IF NOT EXISTS note_vec USING vec0(
+  note_id   INTEGER PRIMARY KEY,
+  embedding float[1024] distance_metric=cosine
+);
+
+-- ===== Costellazione: posizioni dei nodi persistite =====
+-- Saved by the frontend when the layout settles, so the map keeps the same shape
+-- across sessions (mental-map stability). Purely a cache: safe to drop anytime.
+CREATE TABLE IF NOT EXISTS graph_positions (
+  document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+  x REAL NOT NULL,
+  y REAL NOT NULL
+);
+
 -- ===== RAG: passage chunks + their embeddings ("ask your library") =====
 -- Document-level vectors above are great for "find similar docs"; the engine
 -- needs passage-level retrieval to answer questions and cite specific text.

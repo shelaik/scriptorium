@@ -810,22 +810,43 @@ pub async fn generate_embeddings(app: AppHandle) -> Result<EmbedSummary, String>
         let state = app.state::<AppState>();
         state.cancel_embed.store(false, Ordering::SeqCst);
 
-        let candidates: Vec<(i64, Option<String>, Option<String>, String)> = {
+        let (candidates, note_candidates) = {
             let conn = state.db.lock();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, title, abstract, COALESCE(fulltext, '')
-                     FROM documents
-                     WHERE id NOT IN (SELECT document_id FROM doc_vec) AND deleted_at IS NULL",
-                )
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-                .map_err(|e| e.to_string())?;
-            rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+            // Vectors of deleted notes are orphans: sweep them so the map is clean.
+            let _ = conn.execute(
+                "DELETE FROM note_vec WHERE note_id NOT IN (SELECT id FROM notes)",
+                [],
+            );
+            let candidates: Vec<(i64, Option<String>, Option<String>, String)> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, title, abstract, COALESCE(fulltext, '')
+                         FROM documents
+                         WHERE id NOT IN (SELECT document_id FROM doc_vec) AND deleted_at IS NULL",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+            };
+            // Notes (.md vault) still missing a vector — they join the map too.
+            let note_candidates: Vec<(i64, Option<String>, Option<String>)> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, title, body FROM notes
+                         WHERE id NOT IN (SELECT note_id FROM note_vec)",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+            };
+            (candidates, note_candidates)
         };
 
-        let total = candidates.len();
+        let total = candidates.len() + note_candidates.len();
         let mut summary = EmbedSummary {
             embedded: 0,
             errors: Vec::new(),
@@ -883,6 +904,43 @@ pub async fn generate_embeddings(app: AppHandle) -> Result<EmbedSummary, String>
                 Err(e) => summary.errors.push(format!("batch: {e}")),
             }
 
+            let _ = app.emit(
+                "embed-progress",
+                EmbedProgress { done: summary.embedded, total, phase: "running".into() },
+            );
+        }
+
+        // Notes: same batching, into note_vec (same bge-m3 space as the docs).
+        for chunk in note_candidates.chunks(BATCH) {
+            if state.cancel_embed.load(Ordering::SeqCst) {
+                let _ = app.emit(
+                    "embed-progress",
+                    EmbedProgress { done: summary.embedded, total, phase: "cancelled".into() },
+                );
+                return Ok(summary);
+            }
+            let ids: Vec<i64> = chunk.iter().map(|c| c.0).collect();
+            let texts: Vec<String> = chunk
+                .iter()
+                .map(|(_, title, body)| {
+                    embed::compose_text(title.as_deref(), None, body.as_deref().unwrap_or(""))
+                })
+                .collect();
+            match embed::embed_batch(&cache, texts) {
+                Ok(vectors) => {
+                    let conn = state.db.lock();
+                    for (id, v) in ids.iter().zip(vectors.iter()) {
+                        match conn.execute(
+                            "INSERT INTO note_vec (note_id, embedding) VALUES (?1, ?2)",
+                            params![id, v.as_slice().as_bytes()],
+                        ) {
+                            Ok(_) => summary.embedded += 1,
+                            Err(e) => summary.errors.push(format!("nota {id}: {e}")),
+                        }
+                    }
+                }
+                Err(e) => summary.errors.push(format!("batch note: {e}")),
+            }
             let _ = app.emit(
                 "embed-progress",
                 EmbedProgress { done: summary.embedded, total, phase: "running".into() },
@@ -1044,6 +1102,34 @@ pub struct GraphNode {
     pub degree: i64,
     pub unread: bool,
     pub favorite: bool,
+    /// Published in a peer-reviewed venue (same derivation as the sidebar facet).
+    pub peer_reviewed: bool,
+    /// Has a linked GitHub repository.
+    pub has_github: bool,
+    /// PCA projection of the embedding (normalized −1..1): a semantically
+    /// meaningful SEED position for the layout.
+    pub px: f32,
+    pub py: f32,
+    /// Layout position saved from a previous session (world units), if any —
+    /// keeps the map stable across restarts.
+    pub sx: Option<f32>,
+    pub sy: Option<f32>,
+    /// Semantic community index (label propagation on the KNN graph), −1 when
+    /// the node belongs to no sizeable cluster.
+    pub community: i64,
+    /// "doc" for papers, "note" for vault appunti (drawn as diamonds; their
+    /// `id` is the NEGATED note id so the two id spaces can't collide).
+    pub kind: String,
+    /// The note's slug ("note" kind only) — lets the frontend open it.
+    pub slug: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ClusterInfo {
+    pub id: i64,
+    /// Short human label from the most characteristic title terms (TF-IDF).
+    pub label: String,
+    pub size: i64,
 }
 
 #[derive(serde::Serialize)]
@@ -1058,8 +1144,97 @@ pub struct GraphEdge {
 pub struct SimilarityGraphData {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+    /// Sizeable semantic communities (size ≥ 3), largest first.
+    pub clusters: Vec<ClusterInfo>,
     pub embedded: i64,
     pub total: i64,
+}
+
+/// Community detection by weighted label propagation, deterministic (fixed node
+/// order, ties to the smallest label). Returns doc id → community label (a doc id).
+fn label_propagation(
+    ids: &std::collections::HashSet<i64>,
+    edges: &[GraphEdge],
+) -> std::collections::HashMap<i64, i64> {
+    use std::collections::HashMap;
+    let mut adj: HashMap<i64, Vec<(i64, f64)>> = HashMap::new();
+    for e in edges {
+        adj.entry(e.a).or_default().push((e.b, e.w));
+        adj.entry(e.b).or_default().push((e.a, e.w));
+    }
+    let mut label: HashMap<i64, i64> = ids.iter().map(|&i| (i, i)).collect();
+    let mut order: Vec<i64> = ids.iter().copied().collect();
+    order.sort_unstable();
+    for _ in 0..12 {
+        let mut changed = false;
+        for &id in &order {
+            let Some(nb) = adj.get(&id) else { continue };
+            let mut scores: HashMap<i64, f64> = HashMap::new();
+            for (n, w) in nb {
+                if let Some(&l) = label.get(n) {
+                    *scores.entry(l).or_default() += w;
+                }
+            }
+            // Highest total weight wins; ties break to the smallest label so the
+            // outcome is independent of hash iteration order.
+            if let Some((&best, _)) = scores.iter().max_by(|a, b| {
+                a.1.partial_cmp(b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(b.0.cmp(a.0))
+            }) {
+                if label.get(&id) != Some(&best) {
+                    label.insert(id, best);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    label
+}
+
+/// A short label for a cluster: the 2 most characteristic title tokens (TF-IDF
+/// against the whole node set).
+fn cluster_label(
+    member_titles: &[&str],
+    df: &std::collections::HashMap<String, usize>,
+    n_docs: usize,
+) -> String {
+    use std::collections::HashMap;
+    let mut tf: HashMap<String, usize> = HashMap::new();
+    for t in member_titles {
+        for tok in title_tokens(t) {
+            *tf.entry(tok).or_default() += 1;
+        }
+    }
+    let mut scored: Vec<(String, f64)> = tf
+        .into_iter()
+        .map(|(tok, f)| {
+            let d = df.get(&tok).copied().unwrap_or(1).max(1) as f64;
+            let idf = ((n_docs as f64 + 1.0) / d).ln();
+            (tok, f as f64 * idf)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+    scored.into_iter().take(2).map(|(t, _)| t).collect::<Vec<_>>().join(" · ")
+}
+
+/// Lowercased alphabetic tokens of a title, minus trivial stopwords.
+fn title_tokens(title: &str) -> Vec<String> {
+    const STOP: [&str; 42] = [
+        "the", "and", "for", "with", "from", "into", "via", "using", "based", "towards",
+        "toward", "over", "under", "between", "through", "your", "our", "their", "its",
+        "are", "can", "not", "all", "when", "what", "how", "why", "who", "this", "that",
+        "di", "del", "della", "delle", "dei", "per", "con", "una", "uno", "gli", "les", "das",
+    ];
+    title
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() > 2 && !STOP.contains(t) && !t.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect()
 }
 
 /// K-nearest-neighbour similarity graph over all embedded, non-deleted
@@ -1096,10 +1271,13 @@ pub async fn similarity_graph(
             .map_err(|e| e.to_string())?;
 
         // Every embedded, non-deleted document (most recent first, capped).
-        let docs: Vec<(i64, Option<String>, Option<i64>, bool, bool, Vec<u8>)> = {
+        // (id, title, year, is_read, favorite, peer_reviewed, has_github, embedding)
+        #[allow(clippy::type_complexity)]
+        let docs: Vec<(i64, Option<String>, Option<i64>, bool, bool, bool, bool, Vec<u8>)> = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT d.id, d.title, d.year, d.is_read, d.favorite, v.embedding
+                    "SELECT d.id, d.title, d.year, d.is_read, d.favorite,
+                            d.doi, d.venue, d.path, d.github_url, v.embedding
                      FROM documents d JOIN doc_vec v ON v.document_id = d.id
                      WHERE d.deleted_at IS NULL
                      ORDER BY d.id DESC LIMIT 3000",
@@ -1107,13 +1285,27 @@ pub async fn similarity_graph(
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([], |r| {
+                    let doi = r.get::<_, Option<String>>(5)?;
+                    let venue = r.get::<_, Option<String>>(6)?;
+                    let path = r.get::<_, Option<String>>(7)?;
+                    let gh = r.get::<_, Option<String>>(8)?;
+                    // Same derivation as the sidebar "peer-reviewed" facet.
+                    let peer = discovery::classify_pub_status(
+                        doi.as_deref(),
+                        venue.as_deref(),
+                        path.as_deref(),
+                    )
+                    .as_deref()
+                        == Some("published");
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, Option<String>>(1)?,
                         r.get::<_, Option<i64>>(2)?,
                         r.get::<_, i64>(3)? != 0,
                         r.get::<_, i64>(4)? != 0,
-                        r.get::<_, Vec<u8>>(5)?,
+                        peer,
+                        gh.map(|s| !s.trim().is_empty()).unwrap_or(false),
+                        r.get::<_, Vec<u8>>(9)?,
                     ))
                 })
                 .map_err(|e| e.to_string())?;
@@ -1122,6 +1314,30 @@ pub async fn similarity_graph(
         (total, embedded, docs)
     };
     let node_ids: std::collections::HashSet<i64> = docs.iter().map(|d| d.0).collect();
+
+    // Saved layout positions (previous sessions) — a pure cache, may be empty.
+    let saved: std::collections::HashMap<i64, (f32, f32)> = {
+        let conn = state.db.lock();
+        let mut stmt = conn
+            .prepare("SELECT document_id, x, y FROM graph_positions")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, (r.get::<_, f64>(1)? as f32, r.get::<_, f64>(2)? as f32)))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
+
+    // PCA seed positions from the embeddings (deterministic; off the async thread —
+    // ~3000 × 1024-dim vectors take a few hundred ms of pure math).
+    let vectors: Vec<Vec<f32>> = docs
+        .iter()
+        .map(|d| d.7.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+        .collect();
+    let pca: Vec<(f32, f32)> = tauri::async_runtime::spawn_blocking(move || embed::pca_2d(&vectors))
+        .await
+        .map_err(|e| e.to_string())?;
 
     // KNN per document (k+1 to skip self); edges deduplicated on the unordered
     // pair, keeping the strongest weight. vec0 with distance_metric=cosine
@@ -1135,7 +1351,7 @@ pub async fn similarity_graph(
                 "SELECT document_id, distance FROM doc_vec WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance",
             )
             .map_err(|e| e.to_string())?;
-        for (id, _, _, _, _, emb) in chunk {
+        for (id, _, _, _, _, _, _, emb) in chunk {
             let neighbours: Vec<(i64, f64)> = knn
                 .query_map(params![emb, (k + 1) as i64], |r| {
                     Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
@@ -1162,6 +1378,48 @@ pub async fn similarity_graph(
         }
     }
 
+    // Notes (.md vault) with a vector become satellite nodes: each links to its
+    // k nearest DOCUMENTS (id = −note_id so the id spaces can't collide).
+    let notes: Vec<(i64, String, Option<String>)> = {
+        let conn = state.db.lock();
+        let mut stmt = conn
+            .prepare("SELECT n.id, n.slug, n.title FROM notes n JOIN note_vec v ON v.note_id = n.id ORDER BY n.id DESC LIMIT 500")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
+    for chunk in notes.chunks(CHUNK) {
+        let conn = state.db.lock();
+        let mut nvec = conn
+            .prepare_cached("SELECT embedding FROM note_vec WHERE note_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let mut knn = conn
+            .prepare_cached(
+                "SELECT document_id, distance FROM doc_vec WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance",
+            )
+            .map_err(|e| e.to_string())?;
+        for (nid, _, _) in chunk {
+            let Ok(emb) = nvec.query_row(params![nid], |r| r.get::<_, Vec<u8>>(0)) else { continue };
+            let neighbours: Vec<(i64, f64)> = knn
+                .query_map(params![emb, k as i64], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok)
+                .collect();
+            for (did, dist) in neighbours {
+                if !node_ids.contains(&did) {
+                    continue;
+                }
+                let sim = 1.0 - dist;
+                if sim < min_sim {
+                    continue;
+                }
+                edge_map.insert((-nid, did), sim);
+            }
+        }
+    }
+
     let mut degree: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     let mut edges: Vec<GraphEdge> = Vec::with_capacity(edge_map.len());
     for (&(a, b), &w) in &edge_map {
@@ -1171,8 +1429,51 @@ pub async fn similarity_graph(
     }
     edges.sort_by(|x, y| (x.a, x.b).cmp(&(y.a, y.b))); // deterministic output
 
+    // Semantic communities + their labels (for cluster coloring and the far-zoom
+    // "nebulae"). Only sizeable groups (≥3) get an index; the rest stay −1.
+    // Notes participate (they inherit the community of the papers they orbit).
+    let mut all_ids = node_ids.clone();
+    for (nid, _, _) in &notes {
+        all_ids.insert(-nid);
+    }
+    let labels = label_propagation(&all_ids, &edges);
+    let mut groups: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+    for (&id, &l) in &labels {
+        groups.entry(l).or_default().push(id);
+    }
+    let mut sized: Vec<(i64, Vec<i64>)> = groups.into_iter().filter(|(_, m)| m.len() >= 3).collect();
+    sized.sort_by_key(|(l, m)| (std::cmp::Reverse(m.len()), *l));
+    let title_of: std::collections::HashMap<i64, &str> = docs
+        .iter()
+        .map(|d| (d.0, d.1.as_deref().unwrap_or("")))
+        .collect();
+    let mut df: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for d in &docs {
+        let mut seen = std::collections::HashSet::new();
+        for tok in title_tokens(d.1.as_deref().unwrap_or("")) {
+            if seen.insert(tok.clone()) {
+                *df.entry(tok).or_default() += 1;
+            }
+        }
+    }
+    let mut community_of: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let mut clusters: Vec<ClusterInfo> = Vec::new();
+    for (ci, (_, members)) in sized.iter().enumerate() {
+        let member_titles: Vec<&str> =
+            members.iter().filter_map(|id| title_of.get(id).copied()).collect();
+        clusters.push(ClusterInfo {
+            id: ci as i64,
+            label: cluster_label(&member_titles, &df, docs.len()),
+            size: members.len() as i64,
+        });
+        for id in members {
+            community_of.insert(*id, ci as i64);
+        }
+    }
+
     // Node color = color of the document's most-used tag (chunked like above).
     let mut nodes: Vec<GraphNode> = Vec::with_capacity(docs.len());
+    let mut doc_idx = 0usize; // parallel index into `pca` (same order as `docs`)
     for chunk in docs.chunks(CHUNK) {
         let conn = state.db.lock();
         let mut color_stmt = conn
@@ -1183,12 +1484,15 @@ pub async fn similarity_graph(
                  LIMIT 1",
             )
             .map_err(|e| e.to_string())?;
-        for (id, title, year, is_read, favorite, _) in chunk {
+        for (id, title, year, is_read, favorite, peer, gh, _) in chunk {
             let color: Option<String> = color_stmt
                 .query_row(params![id], |r| r.get::<_, Option<String>>(0))
                 .optional()
                 .map_err(|e| e.to_string())?
                 .flatten();
+            let (px, py) = pca.get(doc_idx).copied().unwrap_or((0.0, 0.0));
+            doc_idx += 1;
+            let pos = saved.get(id);
             nodes.push(GraphNode {
                 id: *id,
                 title: title.clone(),
@@ -1197,11 +1501,75 @@ pub async fn similarity_graph(
                 degree: degree.get(id).copied().unwrap_or(0),
                 unread: !is_read,
                 favorite: *favorite,
+                peer_reviewed: *peer,
+                has_github: *gh,
+                px,
+                py,
+                sx: pos.map(|p| p.0),
+                sy: pos.map(|p| p.1),
+                community: community_of.get(id).copied().unwrap_or(-1),
+                kind: "doc".to_string(),
+                slug: None,
             });
         }
     }
 
-    Ok(SimilarityGraphData { nodes, edges, embedded, total })
+    // Note nodes (diamonds in the map). No PCA seed: the frontend places them
+    // next to their strongest paper; positions aren't persisted (FK on docs).
+    for (nid, slug, title) in &notes {
+        let id = -nid;
+        nodes.push(GraphNode {
+            id,
+            title: title.clone(),
+            year: None,
+            color: None,
+            degree: degree.get(&id).copied().unwrap_or(0),
+            unread: false,
+            favorite: false,
+            peer_reviewed: false,
+            has_github: false,
+            px: 0.0,
+            py: 0.0,
+            sx: None,
+            sy: None,
+            community: community_of.get(&id).copied().unwrap_or(-1),
+            kind: "note".to_string(),
+            slug: Some(slug.clone()),
+        });
+    }
+
+    Ok(SimilarityGraphData { nodes, edges, clusters, embedded, total })
+}
+
+#[derive(serde::Deserialize)]
+pub struct NodePos {
+    pub id: i64,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Persist the Costellazione's settled layout positions (called by the frontend
+/// when the simulation cools). Pure cache: rows for deleted docs are ignored and
+/// eventually cascade away.
+#[tauri::command]
+pub fn save_graph_positions(
+    state: State<'_, AppState>,
+    positions: Vec<NodePos>,
+) -> Result<(), String> {
+    let mut conn = state.db.lock();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    {
+        let mut stmt = tx
+            .prepare("INSERT OR REPLACE INTO graph_positions (document_id, x, y) VALUES (?1, ?2, ?3)")
+            .map_err(|e| e.to_string())?;
+        for p in positions.iter().take(4000) {
+            if !p.x.is_finite() || !p.y.is_finite() {
+                continue;
+            }
+            let _ = stmt.execute(params![p.id, p.x as f64, p.y as f64]);
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())
 }
 
 // ===== RAG engine: "ask your library" (passage index + graph-augmented Q&A) =====
@@ -7144,6 +7512,11 @@ pub fn delete_note(app: AppHandle, slug: String) -> Result<(), String> {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
         unindex_note(&conn, &slug);
+        // Its vector (if the note was embedded) is now an orphan: sweep.
+        let _ = conn.execute(
+            "DELETE FROM note_vec WHERE note_id NOT IN (SELECT id FROM notes)",
+            [],
+        );
     }
     Ok(())
 }

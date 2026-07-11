@@ -10,15 +10,30 @@
     degree: number;
     unread: boolean;
     favorite: boolean;
+    peer_reviewed: boolean;
+    has_github: boolean;
+    px: number;
+    py: number;
+    sx: number | null;
+    sy: number | null;
+    community: number;
+    kind: "doc" | "note";
+    slug: string | null;
   }
   interface GraphEdge {
     a: number;
     b: number;
     w: number; // cosine similarity 0..1
   }
+  interface ClusterInfo {
+    id: number;
+    label: string;
+    size: number;
+  }
   interface SimilarityGraph {
     nodes: GraphNode[];
     edges: GraphEdge[];
+    clusters: ClusterInfo[];
     embedded: number;
     total: number;
   }
@@ -31,6 +46,20 @@
     tags?: { name: string; color: string | null }[];
   }
 
+  /** An online discovery ("ghost star"): a paper found around a seed node that is
+   *  not (yet) in the library. Owned by the parent; this component only draws it
+   *  anchored to its seed and reports clicks/adds. */
+  export interface GhostStar {
+    key: string;
+    seedId: number;
+    title: string;
+    year: number | null;
+    venue: string | null;
+    inLibrary: boolean;
+    added: boolean;
+  }
+  type ExploreRelation = "citations" | "similar" | "author";
+
   let {
     graph,
     loading,
@@ -41,6 +70,13 @@
     onGenerate,
     onRefresh,
     resolve,
+    params,
+    onParams,
+    onSavePositions,
+    ghosts,
+    onExplore,
+    onGhostAdd,
+    onGhostsClear,
   }: {
     graph: SimilarityGraph | null;
     loading: boolean;
@@ -51,6 +87,20 @@
     onGenerate: () => void;
     onRefresh: () => void;
     resolve?: (id: number) => DocExtra | undefined;
+    /** Current graph density parameters (k neighbours, similarity floor). */
+    params?: { k: number; minSim: number };
+    /** Apply new density parameters (triggers a graph rebuild in the parent). */
+    onParams?: (k: number, minSim: number) => void;
+    /** Persist settled node positions (called when the simulation cools). */
+    onSavePositions?: (positions: { id: number; x: number; y: number }[]) => void;
+    /** Online discoveries to draw as dashed "ghost stars" around their seeds. */
+    ghosts?: GhostStar[];
+    /** Fetch online papers related to a node (the parent populates `ghosts`). */
+    onExplore?: (id: number, relation: ExploreRelation) => void;
+    /** Add a ghost's paper to the library. */
+    onGhostAdd?: (key: string) => void;
+    /** Dismiss all ghost stars. */
+    onGhostsClear?: () => void;
   } = $props();
 
   // ----- Simulation state (plain, non-reactive: the canvas is redrawn manually) -----
@@ -62,6 +112,10 @@
     degree: number;
     unread: boolean;
     favorite: boolean;
+    peer: boolean; // peer-reviewed
+    gh: boolean; // has a GitHub repo
+    community: number; // semantic cluster index (−1 = none)
+    kind: "doc" | "note";
     x: number;
     y: number;
     vx: number;
@@ -98,6 +152,9 @@
   let idToIdx = new Map<number, number>();
   let adj = new Map<number, number[]>();
   let adjW = new Map<number, { id: number; w: number }[]>(); // neighbors with similarity, for the info card
+  let clusterMeta: ClusterInfo[] = []; // sizeable communities (labels for the nebulae)
+  let yearMin = 0;
+  let yearMax = 0; // year range for the "Anno" color mode
   let topLabelIds = new Set<number>();
   let fx = new Float32Array(0);
   let fy = new Float32Array(0);
@@ -120,6 +177,58 @@
   let tip = $state<{ x: number; y: number; title: string; meta: string } | null>(null);
   let generating = $state(false); // local guard: the "Genera indice" CTA must not double-fire
 
+  // Node color mode: dominant tag (default) · semantic community · year · read state.
+  type ColorMode = "tag" | "community" | "year" | "read";
+  const COLOR_MODES: { value: ColorMode; label: string }[] = [
+    { value: "tag", label: "Tag dominante" },
+    { value: "community", label: "Comunità semantiche" },
+    { value: "year", label: "Anno" },
+    { value: "read", label: "Stato lettura" },
+  ];
+  let colorMode = $state<ColorMode>(
+    (localStorage.getItem("scriptorium-map-color") as ColorMode) || "tag",
+  );
+  $effect(() => {
+    localStorage.setItem("scriptorium-map-color", colorMode);
+    schedule();
+  });
+  /** Stable, well-spread hue per community (golden-angle walk). */
+  function commColor(i: number, alpha = 1): string {
+    return `hsla(${(i * 137.508) % 360}, 55%, 52%, ${alpha})`;
+  }
+  const NOTE_FILL = "#8b6fae"; // violet: vault appunti stand apart from papers
+  function nodeFill(n: SimNode): string {
+    switch (colorMode) {
+      case "community":
+        return n.community >= 0 ? commColor(n.community) : withAlpha(theme.faint, 0.5);
+      case "year": {
+        if (n.year === null || yearMax <= yearMin) return withAlpha(theme.faint, 0.5);
+        const t = (n.year - yearMin) / (yearMax - yearMin);
+        return `hsl(${210 - 175 * t}, 60%, 52%)`; // blu (vecchio) → arancio (recente)
+      }
+      case "read":
+        return n.kind === "note" ? NOTE_FILL : n.unread ? theme.accent : withAlpha(theme.dim, 0.55);
+      default:
+        return n.kind === "note" ? NOTE_FILL : n.color || paint.nodeFill;
+    }
+  }
+
+  // Density tuning panel (k / minSim → parent rebuilds the graph).
+  let tuneOpen = $state(false);
+  let tuneK = $state(4);
+  let tuneSim = $state(0.55);
+  function toggleTune() {
+    if (!tuneOpen) {
+      tuneK = params?.k ?? 4;
+      tuneSim = params?.minSim ?? 0.55;
+    }
+    tuneOpen = !tuneOpen;
+  }
+  function applyTune() {
+    tuneOpen = false;
+    onParams?.(tuneK, tuneSim);
+  }
+
   // ----- Focused node ("scheda"): single click pins a paper card with its
   //       connections; double click opens the paper. -----
   interface PanelNeighbor {
@@ -130,11 +239,14 @@
   }
   interface PanelData {
     id: number;
+    kind: "doc" | "note";
     title: string;
     year: number | null;
     degree: number;
     unread: boolean;
     favorite: boolean;
+    peer: boolean;
+    gh: boolean;
     extra: DocExtra | undefined;
     neighbors: PanelNeighbor[];
   }
@@ -159,17 +271,66 @@
       .sort((a, b) => b.w - a.w);
     panel = {
       id,
+      kind: n.kind,
       title: n.title || "Senza titolo",
       year: n.year,
       degree: n.degree,
       unread: n.unread,
       favorite: n.favorite,
-      extra: resolve?.(id),
+      peer: n.peer,
+      gh: n.gh,
+      extra: n.kind === "doc" ? resolve?.(id) : undefined,
       neighbors,
     };
     pinnedSet = new Set<number>([id, ...neighbors.map((x) => x.id)]);
     schedule();
   }
+  // ----- Ghost stars: online discoveries anchored around their seed node -----
+  let ghostAnchor = new Map<string, { angle: number; dist: number }>();
+  let ghostCard = $state<GhostStar | null>(null);
+  $effect(() => {
+    const list = ghosts ?? [];
+    // Fan each seed's ghosts evenly around it; anchors are recomputed on every
+    // list change (the parent appends), so placement stays deterministic.
+    const bySeed = new Map<number, GhostStar[]>();
+    for (const g of list) {
+      let arr = bySeed.get(g.seedId);
+      if (!arr) bySeed.set(g.seedId, (arr = []));
+      arr.push(g);
+    }
+    const anchors = new Map<string, { angle: number; dist: number }>();
+    for (const gs of bySeed.values()) {
+      const n = gs.length;
+      gs.forEach((g, i) => {
+        const angle = -Math.PI / 2 + (i * TAU) / Math.max(n, 7);
+        anchors.set(g.key, { angle, dist: 95 + (i % 2) * 44 });
+      });
+    }
+    ghostAnchor = anchors;
+    // Keep the open card in sync (added flag) or close it if its ghost vanished.
+    if (ghostCard) ghostCard = list.find((g) => g.key === ghostCard!.key) ?? null;
+    schedule();
+  });
+  /** World position of a ghost (anchored to its seed); null if the seed is gone. */
+  function ghostWorld(g: GhostStar): { x: number; y: number } | null {
+    const i = idToIdx.get(g.seedId);
+    if (i === undefined) return null;
+    const a = ghostAnchor.get(g.key);
+    if (!a) return null;
+    const s = nodes[i];
+    return { x: s.x + Math.cos(a.angle) * a.dist, y: s.y + Math.sin(a.angle) * a.dist };
+  }
+  function hitGhost(sx: number, sy: number): GhostStar | null {
+    for (const g of ghosts ?? []) {
+      const w = ghostWorld(g);
+      if (!w) continue;
+      const dx = sx - (w.x * zoom + tx);
+      const dy = sy - (w.y * zoom + ty);
+      if (dx * dx + dy * dy <= 100) return g; // ~10px radius
+    }
+    return null;
+  }
+
   /** Glide the camera so the node is centered (zoom unchanged). */
   function panToNode(id: number) {
     const i = idToIdx.get(id);
@@ -288,13 +449,29 @@
     const golden = Math.PI * (3 - Math.sqrt(5));
     let si = 0; // spiral index (connected nodes)
     let ri = 0; // outer-ring index (isolated nodes)
+    let anySaved = false;
     for (const gn of g.nodes) {
       const prev = old.get(gn.id);
       let x: number;
       let y: number;
+      // Position priority: this session's live position → position saved on disk
+      // → PCA seed (semantically meaningful) → legacy spiral/ring fallback.
+      // Notes have no PCA seed: they get placed next to their strongest paper
+      // in a second pass below (x stays NaN as the marker).
       if (prev) {
         x = prev.x;
         y = prev.y;
+      } else if (gn.sx != null && gn.sy != null) {
+        x = gn.sx;
+        y = gn.sy;
+        anySaved = true;
+      } else if (gn.kind === "note") {
+        x = Number.NaN;
+        y = Number.NaN;
+      } else if (gn.px !== 0 || gn.py !== 0) {
+        // Small deterministic jitter so coincident projections don't stack.
+        x = gn.px * spread * 1.5 + ((gn.id % 13) - 6) * 1.7;
+        y = gn.py * spread * 1.5 + ((gn.id % 7) - 3) * 1.7;
       } else if (gn.degree > 0) {
         const rr = spread * Math.sqrt((si + 0.5) / connected);
         const a = si * golden;
@@ -316,6 +493,10 @@
         degree: gn.degree,
         unread: gn.unread,
         favorite: gn.favorite,
+        peer: gn.peer_reviewed,
+        gh: gn.has_github,
+        community: gn.community,
+        kind: gn.kind,
         x,
         y,
         vx: 0,
@@ -341,10 +522,35 @@
       if (!wb) adjW.set(ge.b, (wb = []));
       wb.push({ id: ge.a, w: ge.w });
     }
+    // Second pass: a note without a saved position sits beside its strongest
+    // paper (deterministic angle from its id); orphan notes go to the outer ring.
+    for (const n of nodes) {
+      if (!Number.isNaN(n.x)) continue;
+      const best = (adjW.get(n.id) ?? []).reduce(
+        (m, e) => (m === null || e.w > m.w ? e : m),
+        null as { id: number; w: number } | null,
+      );
+      const anchor = best ? nodes[idToIdx.get(best.id) ?? -1] : undefined;
+      if (anchor && !Number.isNaN(anchor.x)) {
+        const a = ((Math.abs(n.id) * 61) % 360) * (Math.PI / 180);
+        n.x = anchor.x + Math.cos(a) * 46;
+        n.y = anchor.y + Math.sin(a) * 46;
+      } else {
+        const a = ((Math.abs(n.id) % 97) / 97) * TAU;
+        n.x = (spread + 170) * Math.cos(a);
+        n.y = (spread + 170) * Math.sin(a);
+      }
+    }
     for (const gn of [...g.nodes].sort((a, b) => b.degree - a.degree).slice(0, 12)) topLabelIds.add(gn.id);
+    clusterMeta = g.clusters ?? [];
+    const years = g.nodes.map((n) => n.year).filter((y): y is number => y !== null);
+    yearMin = years.length ? Math.min(...years) : 0;
+    yearMax = years.length ? Math.max(...years) : 0;
     fx = new Float32Array(nodes.length);
     fy = new Float32Array(nodes.length);
-    alpha = hadNodes ? 0.25 : 1; // re-heat gently on refresh, fully on first build
+    // Re-heat gently on refresh; on first build, saved positions need only a
+    // touch of relaxation (the map must not wander), a PCA seed a bit more.
+    alpha = hadNodes ? 0.25 : anySaved ? 0.3 : 0.8;
     needFit = !hadNodes;
     // Refresh (or drop) the pinned card against the fresh graph data. `untrack`
     // is essential: rebuild() runs inside an $effect, and without it the `panel`
@@ -457,6 +663,20 @@
     schedule();
   }
 
+  // ----- Persist the settled layout (map stability across sessions) -----
+  let layoutDirty = false;
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  function flushPositions(now = false) {
+    if (!onSavePositions || nodes.length === 0 || !layoutDirty) return;
+    clearTimeout(saveTimer);
+    const run = () => {
+      layoutDirty = false;
+      onSavePositions?.(nodes.map((n) => ({ id: n.id, x: n.x, y: n.y })));
+    };
+    if (now) run();
+    else saveTimer = setTimeout(run, 1200);
+  }
+
   // ----- Frame loop: physics while hot, otherwise redraw-on-interaction only -----
   function schedule() {
     if (rafId === null) rafId = requestAnimationFrame(frame);
@@ -471,6 +691,8 @@
     if (alpha >= MIN_ALPHA && nodes.length > 0) {
       const complete = tickChunk(performance.now() + 8);
       animating = !complete || alpha >= MIN_ALPHA;
+      layoutDirty = true;
+      if (alpha < MIN_ALPHA) flushPositions(); // just cooled: persist (debounced)
     }
     if (camAnim) {
       const t = Math.min(1, (performance.now() - camAnim.t0) / 250);
@@ -547,6 +769,45 @@
     c.lineWidth = 0.75;
     c.stroke();
   }
+  /// Above this zoom the status badges (peer-reviewed ✓, GitHub fork) are drawn.
+  const BADGE_ZOOM = 0.9;
+  /// Below this zoom the semantic communities render as labelled "nebulae".
+  const NEBULA_ZOOM = 0.5;
+  /** Peer-reviewed: a small green disc with a check mark. */
+  function drawCheckBadge(c: CanvasRenderingContext2D, x: number, y: number, R: number) {
+    c.fillStyle = "#2e9e63";
+    c.beginPath();
+    c.arc(x, y, R, 0, TAU);
+    c.fill();
+    c.strokeStyle = theme.surface;
+    c.lineWidth = Math.max(1, R * 0.32);
+    c.lineCap = "round";
+    c.beginPath();
+    c.moveTo(x - R * 0.45, y + R * 0.05);
+    c.lineTo(x - R * 0.1, y + R * 0.42);
+    c.lineTo(x + R * 0.5, y - R * 0.35);
+    c.stroke();
+  }
+  /** GitHub repo: a small disc with a tiny fork (two branch dots joined to one). */
+  function drawForkBadge(c: CanvasRenderingContext2D, x: number, y: number, R: number) {
+    c.fillStyle = theme.dim;
+    c.beginPath();
+    c.arc(x, y, R, 0, TAU);
+    c.fill();
+    c.strokeStyle = theme.surface;
+    c.lineWidth = Math.max(1, R * 0.26);
+    c.lineCap = "round";
+    const t = -R * 0.42; // branch dots height
+    c.beginPath();
+    c.moveTo(x - R * 0.4, y + t);
+    c.lineTo(x - R * 0.4, y);
+    c.quadraticCurveTo(x - R * 0.4, y + R * 0.3, x, y + R * 0.3);
+    c.quadraticCurveTo(x + R * 0.4, y + R * 0.3, x + R * 0.4, y);
+    c.lineTo(x + R * 0.4, y + t);
+    c.moveTo(x, y + R * 0.3);
+    c.lineTo(x, y + R * 0.55);
+    c.stroke();
+  }
   function draw() {
     if (!ctx || vw === 0 || vh === 0) return;
     const c = ctx;
@@ -558,6 +819,51 @@
     // otherwise the pinned card's neighborhood (if any) stays lit.
     const hovId = hoverIdx >= 0 && hoverIdx < nodes.length ? nodes[hoverIdx].id : (panel?.id ?? -1);
     const focus = hoverIdx >= 0 ? hoverSet : pinnedSet;
+
+    // Nebulae (far zoom): soft halos + labels over each semantic community, so
+    // the map reads as thematic areas before individual stars are legible.
+    if (zoom < NEBULA_ZOOM && clusterMeta.length > 0) {
+      const acc: Map<number, { sx: number; sy: number; n: number; r2: number }> = new Map();
+      for (const n of nodes) {
+        if (n.community < 0) continue;
+        let a = acc.get(n.community);
+        if (!a) acc.set(n.community, (a = { sx: 0, sy: 0, n: 0, r2: 0 }));
+        a.sx += n.x;
+        a.sy += n.y;
+        a.n++;
+      }
+      for (const n of nodes) {
+        const a = n.community >= 0 ? acc.get(n.community) : undefined;
+        if (!a) continue;
+        const dx = n.x - a.sx / a.n;
+        const dy = n.y - a.sy / a.n;
+        a.r2 = Math.max(a.r2, dx * dx + dy * dy);
+      }
+      c.textAlign = "center";
+      c.textBaseline = "middle";
+      for (const meta of clusterMeta) {
+        const a = acc.get(meta.id);
+        if (!a || a.n < 3) continue;
+        const cx = (a.sx / a.n) * zoom + tx;
+        const cy = (a.sy / a.n) * zoom + ty;
+        const rr = (Math.sqrt(a.r2) * 0.85 + 60) * zoom;
+        if (cx < -rr || cx > vw + rr || cy < -rr || cy > vh + rr) continue;
+        const g = c.createRadialGradient(cx, cy, rr * 0.15, cx, cy, rr);
+        g.addColorStop(0, commColor(meta.id, 0.16));
+        g.addColorStop(1, commColor(meta.id, 0));
+        c.fillStyle = g;
+        c.beginPath();
+        c.arc(cx, cy, rr, 0, TAU);
+        c.fill();
+        c.font = '600 13px Georgia, "Times New Roman", serif';
+        c.fillStyle = withAlpha(theme.text, 0.75);
+        c.fillText(ellipsize(meta.label, 34), cx, cy - rr * 0.1);
+        c.font = LABEL_FONT;
+        c.fillStyle = withAlpha(theme.dim, 0.7);
+        c.fillText(`${a.n} paper`, cx, cy - rr * 0.1 + 16);
+      }
+      c.textAlign = "left";
+    }
 
     // Edges
     c.strokeStyle = paint.edge;
@@ -611,24 +917,89 @@
         c.arc(sx, sy, rs + 2, 0, TAU);
         c.stroke();
       }
-      c.fillStyle = n.color || paint.nodeFill;
+      c.fillStyle = nodeFill(n);
       c.beginPath();
-      c.arc(sx, sy, rs, 0, TAU);
+      if (n.kind === "note") {
+        // Diamond: an appunto, not a paper.
+        const d = rs * 1.25;
+        c.moveTo(sx, sy - d);
+        c.lineTo(sx + d, sy);
+        c.lineTo(sx, sy + d);
+        c.lineTo(sx - d, sy);
+        c.closePath();
+      } else {
+        c.arc(sx, sy, rs, 0, TAU);
+      }
       c.fill();
       c.strokeStyle = paint.nodeStroke;
       c.lineWidth = 1;
       c.stroke();
       if (n.favorite) drawSparkle(c, sx + rs * 0.85, sy - rs * 0.85, Math.max(3.5, rs * 0.36));
+      // Status badges only when zoomed in enough to read them (LOD).
+      if (zoom > BADGE_ZOOM) {
+        const br = Math.max(3.2, rs * 0.34);
+        if (n.peer) drawCheckBadge(c, sx + rs * 0.85, sy + rs * 0.85, br);
+        if (n.gh) drawForkBadge(c, sx - rs * 0.85, sy + rs * 0.85, br);
+      }
     }
     c.globalAlpha = 1;
 
-    // Labels: hovered node + neighbors, plus the 12 highest-degree nodes when zoomed in
+    // Ghost stars: dashed discoveries anchored around their seed.
+    if (ghosts && ghosts.length > 0) {
+      c.font = LABEL_FONT;
+      c.textAlign = "center";
+      for (const g of ghosts) {
+        const w = ghostWorld(g);
+        if (!w) continue;
+        const gx = w.x * zoom + tx;
+        const gy = w.y * zoom + ty;
+        if (gx < -60 || gx > vw + 60 || gy < -40 || gy > vh + 40) continue;
+        const i = idToIdx.get(g.seedId);
+        if (i !== undefined) {
+          const s = nodes[i];
+          c.setLineDash([3, 4]);
+          c.strokeStyle = withAlpha(theme.accent, 0.4);
+          c.lineWidth = 1;
+          c.beginPath();
+          c.moveTo(s.x * zoom + tx, s.y * zoom + ty);
+          c.lineTo(gx, gy);
+          c.stroke();
+        }
+        c.setLineDash([2.5, 3]);
+        c.strokeStyle = g.added || g.inLibrary ? "#2e9e63" : withAlpha(theme.accent, 0.8);
+        c.fillStyle = withAlpha(theme.surface, 0.55);
+        c.lineWidth = 1.4;
+        c.beginPath();
+        c.arc(gx, gy, 6.5, 0, TAU);
+        c.fill();
+        c.stroke();
+        c.setLineDash([]);
+        if (g.added || g.inLibrary) {
+          c.strokeStyle = "#2e9e63";
+          c.lineWidth = 1.6;
+          c.beginPath();
+          c.moveTo(gx - 2.6, gy + 0.3);
+          c.lineTo(gx - 0.6, gy + 2.4);
+          c.lineTo(gx + 3.0, gy - 2.2);
+          c.stroke();
+        }
+        if (zoom > 0.75) {
+          c.fillStyle = withAlpha(theme.dim, 0.85);
+          c.fillText(ellipsize(g.title || "Senza titolo", 26), gx, gy + 17);
+        }
+      }
+      c.textAlign = "left";
+    }
+
+    // Labels (LOD): hovered node + neighbors always; the 12 top hubs at mid zoom;
+    // EVERY visible node when zoomed right in (the loop below culls offscreen).
     const labelIds = new Set<number>();
     if (hovId >= 0) {
       labelIds.add(hovId);
       for (const nb of adj.get(hovId) ?? []) labelIds.add(nb);
     }
     if (zoom > 0.55) for (const id of topLabelIds) labelIds.add(id);
+    if (zoom > 1.6) for (const n of nodes) labelIds.add(n.id);
     if (labelIds.size > 0) {
       c.font = LABEL_FONT;
       c.textAlign = "left";
@@ -688,7 +1059,12 @@
         x: clamp(px + 16, 0, Math.max(0, vw - 256)),
         y: clamp(py + 18, 0, Math.max(0, vh - 84)),
         title: n.title || "Senza titolo",
-        meta: n.year !== null ? `${n.year} · ${conn}` : conn,
+        meta:
+          n.kind === "note"
+            ? `appunto · ${conn}`
+            : n.year !== null
+              ? `${n.year} · ${conn}`
+              : conn,
       };
     } else {
       tip = null;
@@ -711,7 +1087,20 @@
   }
   function onPointerMove(e: PointerEvent) {
     if (!ptr.down) {
-      setHover(hitTest(e.offsetX, e.offsetY), e.offsetX, e.offsetY);
+      const i = hitTest(e.offsetX, e.offsetY);
+      setHover(i, e.offsetX, e.offsetY);
+      if (i < 0) {
+        const g = hitGhost(e.offsetX, e.offsetY);
+        if (g) {
+          canvas.style.cursor = "pointer";
+          tip = {
+            x: clamp(e.offsetX + 16, 0, Math.max(0, vw - 256)),
+            y: clamp(e.offsetY + 18, 0, Math.max(0, vh - 84)),
+            title: g.title || "Senza titolo",
+            meta: `${g.year ?? "s.d."} · stella fantasma — clic per la scheda`,
+          };
+        }
+      }
       return;
     }
     const dx = e.offsetX - ptr.startX;
@@ -747,12 +1136,18 @@
     canvas.style.cursor = hoverIdx >= 0 ? "pointer" : "default";
     if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     if (wasClick) {
+      const ghost = idx < 0 ? hitGhost(e.offsetX, e.offsetY) : null;
       if (idx >= 0 && idx < nodes.length) {
         const id = nodes[idx].id;
+        ghostCard = null;
         if (e.ctrlKey || e.metaKey) onToggleSelect(id);
         else setFocus(id); // single click = info card; double click opens the paper
+      } else if (ghost) {
+        setFocus(null);
+        ghostCard = ghost; // ghost card replaces the doc card (same corner)
       } else if (ptr.mode === "pan") {
-        setFocus(null); // click on empty sky dismisses the card
+        setFocus(null); // click on empty sky dismisses the cards
+        ghostCard = null;
       }
     }
   }
@@ -817,6 +1212,7 @@
     canvas.addEventListener("wheel", onWheel, { passive: false });
     armDprWatch();
     return () => {
+      flushPositions(true); // leaving the map: persist the settled layout now
       if (rafId !== null) cancelAnimationFrame(rafId);
       rafId = null;
       ro?.disconnect();
@@ -862,14 +1258,42 @@
   ></canvas>
 
   {#if showMap}
-    <div class="chip counts">{countsText}</div>
-    <div class="chip legend">clic = scheda · doppio clic = apri · ◦ da leggere · ✦ preferito · colore = tag dominante</div>
+    <div class="chip counts">
+      {countsText}
+      {#if (ghosts?.length ?? 0) > 0}
+        · {ghosts!.length} fantasm{ghosts!.length === 1 ? "a" : "i"}
+        {#if onGhostsClear}<button class="chipx" onclick={onGhostsClear} title="Nascondi le stelle fantasma">×</button>{/if}
+      {/if}
+    </div>
+    <div class="chip legend">clic = scheda · doppio clic = apri · ✦ preferito · ◆ appunto · da vicino: ✓ peer-reviewed, ⑂ GitHub</div>
     <div class="hud">
+      <select class="hudsel" bind:value={colorMode} title="Colora le stelle per…">
+        {#each COLOR_MODES as m (m.value)}<option value={m.value}>{m.label}</option>{/each}
+      </select>
+      {#if onParams}
+        <button title="Densità del grafo (vicini e soglia di somiglianza)" class:on={tuneOpen} onclick={toggleTune}>⚙</button>
+      {/if}
       <button title="Adatta alla vista" onclick={() => fitToView(true)}>⤢</button>
       <button title="Ingrandisci" onclick={() => zoomAt(vw / 2, vh / 2, 1.3)}>+</button>
       <button title="Riduci" onclick={() => zoomAt(vw / 2, vh / 2, 1 / 1.3)}>−</button>
       <button title="Ricarica il grafo" onclick={onRefresh}>↻</button>
     </div>
+    {#if tuneOpen}
+      <div class="tune" role="group" aria-label="Densità del grafo">
+        <label>
+          <span>Legami per nodo <b>{tuneK}</b></span>
+          <input type="range" min="1" max="8" step="1" bind:value={tuneK} />
+        </label>
+        <label>
+          <span>Soglia somiglianza <b>{Math.round(tuneSim * 100)}%</b></span>
+          <input type="range" min="0.4" max="0.8" step="0.05" bind:value={tuneSim} />
+        </label>
+        <div class="tunerow">
+          <button class="tuneapply" onclick={applyTune}>Ricalcola</button>
+          <button class="tunecancel" onclick={() => (tuneOpen = false)}>Annulla</button>
+        </div>
+      </div>
+    {/if}
   {/if}
 
   {#if panel}
@@ -877,9 +1301,15 @@
       <button class="card-x" title="Chiudi la scheda" onclick={() => setFocus(null)}>×</button>
       <div class="card-title">{panel.title}</div>
       <div class="card-meta">
-        {panel.year ?? "s.d."}
-        {#if panel.favorite}· ✦ preferito{/if}
-        {#if panel.unread}· da leggere{/if}
+        {#if panel.kind === "note"}
+          ◆ Appunto (.md)
+        {:else}
+          {panel.year ?? "s.d."}
+          {#if panel.favorite}· ✦ preferito{/if}
+          {#if panel.unread}· da leggere{/if}
+          {#if panel.peer}· <span class="card-peer">✓ peer-reviewed</span>{/if}
+          {#if panel.gh}· ⑂ GitHub{/if}
+        {/if}
       </div>
       {#if panel.extra?.authors?.length}
         <div class="card-authors">{panel.extra.authors.slice(0, 4).join(", ")}{panel.extra.authors.length > 4 ? " e altri" : ""}</div>
@@ -905,9 +1335,39 @@
           <p class="card-none">Nessun legame sopra la soglia.</p>
         {/each}
       </div>
+      {#if onExplore && panel.kind === "doc"}
+        <div class="card-sec">Esplora dintorni (online)</div>
+        <div class="card-explore">
+          <button onclick={() => onExplore(panel!.id, "citations")} title="Chi cita e chi è citato da questo paper (OpenAlex) — serve il DOI">Citazioni</button>
+          <button onclick={() => onExplore(panel!.id, "similar")} title="Paper simili per argomento (OpenAlex)">Simili</button>
+          <button onclick={() => onExplore(panel!.id, "author")} title="Altri lavori del primo autore">Autore</button>
+        </div>
+        <p class="card-ghosthint">I risultati appaiono come stelle tratteggiate attorno a questa.</p>
+      {/if}
       <div class="card-actions">
-        <button class="card-open" onclick={() => onOpen(panel!.id)}>Apri il paper</button>
+        <button class="card-open" onclick={() => onOpen(panel!.id)}>{panel.kind === "note" ? "Apri l'appunto" : "Apri il paper"}</button>
         <span class="card-hint">o doppio clic sulla stella</span>
+      </div>
+    </aside>
+  {/if}
+
+  {#if ghostCard}
+    <aside class="card ghostcard" aria-label="Scheda della scoperta">
+      <button class="card-x" title="Chiudi" onclick={() => (ghostCard = null)}>×</button>
+      <div class="card-meta ghostlbl">✦ Stella fantasma — trovata online</div>
+      <div class="card-title">{ghostCard.title || "Senza titolo"}</div>
+      <div class="card-meta">
+        {ghostCard.year ?? "s.d."}
+        {#if ghostCard.venue}· {ghostCard.venue}{/if}
+      </div>
+      <div class="card-actions">
+        {#if ghostCard.inLibrary}
+          <span class="ghost-in">✓ Già nella libreria</span>
+        {:else if ghostCard.added}
+          <span class="ghost-in">✓ Aggiunto — entrerà nel grafo al prossimo aggiornamento dell'indice</span>
+        {:else if onGhostAdd}
+          <button class="card-open" onclick={() => onGhostAdd(ghostCard!.key)}>Aggiungi alla libreria</button>
+        {/if}
       </div>
     </aside>
   {/if}
@@ -1011,6 +1471,55 @@
     color: var(--accent);
     border-color: var(--accent-soft2);
   }
+  .hud button.on {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .hudsel {
+    height: 26px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm, 8px);
+    background: color-mix(in srgb, var(--surface) 80%, transparent);
+    backdrop-filter: blur(6px);
+    color: var(--dim);
+    font-size: 11px;
+    padding: 0 4px;
+    cursor: pointer;
+  }
+  .hudsel:hover { color: var(--accent); border-color: var(--accent-soft2); }
+  /* Density tuning panel, anchored above the HUD. */
+  .tune {
+    position: absolute;
+    right: 12px;
+    bottom: 48px;
+    z-index: 4;
+    width: 220px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md, 11px);
+    box-shadow: var(--shadow-md, 0 4px 16px rgba(20, 22, 28, 0.09));
+    font-size: 11.5px;
+    color: var(--dim);
+  }
+  .tune label { display: flex; flex-direction: column; gap: 3px; }
+  .tune label b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .tune input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .tunerow { display: flex; gap: 8px; justify-content: flex-end; }
+  .tuneapply {
+    border: none; cursor: pointer; background: var(--accent);
+    color: var(--on-accent, #fff); border-radius: var(--r-pill, 999px);
+    padding: 5px 14px; font-size: 11.5px; font-weight: 600;
+  }
+  .tunecancel {
+    border: 1px solid var(--border); background: none; cursor: pointer;
+    color: var(--dim); border-radius: var(--r-pill, 999px); padding: 5px 12px; font-size: 11.5px;
+  }
+  .card-peer { color: #2e9e63; }
   /* Pinned info card: paper details + its similarity links. */
   .card {
     position: absolute;
@@ -1101,6 +1610,21 @@
     overflow: hidden;
   }
   .card-none { margin: 4px 2px; font-size: 11.5px; color: var(--faint); }
+  .card-explore { display: flex; gap: 6px; margin-top: 4px; }
+  .card-explore button {
+    flex: 1; border: 1px solid var(--border); background: none; cursor: pointer;
+    color: var(--dim); border-radius: var(--r-pill, 999px); padding: 5px 0; font-size: 11.5px;
+  }
+  .card-explore button:hover { color: var(--accent); border-color: var(--accent); }
+  .card-ghosthint { margin: 6px 0 0; font-size: 10.5px; color: var(--faint); }
+  .ghostcard { border-style: dashed; }
+  .ghostlbl { color: var(--accent); }
+  .ghost-in { font-size: 12px; color: #2e9e63; line-height: 1.4; }
+  .chipx {
+    pointer-events: auto; border: none; background: none; cursor: pointer;
+    color: var(--faint); font-size: 12px; padding: 0 2px; line-height: 1;
+  }
+  .chipx:hover { color: var(--danger); }
   .card-actions { margin-top: 10px; display: flex; align-items: center; gap: 8px; }
   .card-open {
     border: none;
