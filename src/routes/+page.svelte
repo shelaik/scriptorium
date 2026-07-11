@@ -514,7 +514,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.40";
+  const APP_VERSION = "0.8.41";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3831,6 +3831,27 @@
       status = "Esportazione non riuscita: " + e;
     }
   }
+  /** Export the note as a plain .md copy (the note IS Markdown on disk: this just
+   *  saves the freshly-flushed content wherever the user chooses). */
+  async function exportNoteMd() {
+    if (!noteView) return;
+    await flushNote(); // export the latest content
+    if (!noteSaved) {
+      status = "Salvataggio non riuscito: riprova prima di esportare";
+      return;
+    }
+    const path = await save({
+      defaultPath: `${noteView.slug}.md`,
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (!path) return;
+    try {
+      await writeTextFile(path, noteDraft);
+      status = "Appunto esportato in Markdown ✓";
+    } catch (e) {
+      status = "Esportazione non riuscita: " + e;
+    }
+  }
   /** Export the note to PDF: render it to a self-contained HTML page, then open the
    *  print dialog on that page alone (the user chooses "Salva come PDF"). */
   async function exportNotePdf() {
@@ -4910,9 +4931,11 @@
                   />
                 {:else}
                   <h2 class="wikititle notetitleh" ondblclick={startRename} title="Doppio clic per rinominare">{noteView.title}</h2>
-                  <button class="ghost small" onclick={startRename} title="Rinomina l'appunto: cambia il titolo e il nome del file">Rinomina</button>
                 {/if}
                 <span class="notesaved" class:pending={!noteSaved}>{noteSaved ? "Salvato ✓" : "Salvo…"}</span>
+              </header>
+              <div class="noteactions">
+                <button class="ghost small" disabled={noteRenaming} onclick={startRename} title="Rinomina l'appunto: cambia il titolo e il nome del file">Rinomina</button>
                 <div class="notemodes">
                   <button class="ghost small" class:on={noteMode === "edit"} onclick={() => (noteMode = "edit")} title="Modifica il Markdown">Modifica</button>
                   <button class="ghost small" class:on={noteMode === "split"} onclick={() => { noteMode = "split"; renderLivePreview(); }} title="Modifica con anteprima affiancata in tempo reale">Affiancato</button>
@@ -4920,11 +4943,12 @@
                 </div>
                 <div class="noteexport">
                   <span class="noteexplbl">Esporta</span>
+                  <button class="ghost small" onclick={exportNoteMd} title="Salva una copia .md dell'appunto (Markdown puro)">MD</button>
                   <button class="ghost small" onclick={() => exportNoteAs("html")} title="Esporta come pagina HTML autonoma (formule in MathML e immagini incluse)">HTML</button>
                   <button class="ghost small" onclick={() => exportNoteAs("latex")} title="Esporta come documento LaTeX (.tex con le figure estratte in una cartella)">LaTeX</button>
                   <button class="ghost small" onclick={exportNotePdf} title="Apre la stampa dell'appunto reso: scegli «Salva come PDF»">PDF</button>
                 </div>
-              </header>
+              </div>
               <div class="noteinfo">
                 <button class="noteinfopath" onclick={revealNotesDir} title={"Apri la cartella — " + noteView.path}>📁 {noteView.path}</button>
                 <span class="noteinfodate" title="Data di creazione del file">creata {fmtNoteDate(noteView.created_at)}</span>
@@ -7845,8 +7869,15 @@
   .notetitle { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
   .noteexc { font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
   .notedates { font-size: 10px; color: var(--faint); opacity: 0.85; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  /* Title on its own line; the actions live in the row below (.noteactions). */
+  .notehead { border-bottom: none; padding-bottom: 0; margin-bottom: 4px; }
   .notehead .notesaved { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
   .notehead .notesaved.pending { color: var(--accent); }
+  .noteactions {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    max-width: 780px; border-bottom: 1px solid var(--border-soft);
+    padding-bottom: 10px; margin-bottom: 6px;
+  }
   .notemodes { display: inline-flex; gap: 4px; }
   .notemodes .ghost.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
   .noteexport { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
