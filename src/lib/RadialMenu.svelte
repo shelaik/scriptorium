@@ -31,9 +31,9 @@
   const MARGIN = 14;
   const LABEL_W = 170; // deve combaciare con max-width di .label nel blocco di stile
   const PAD_X = 44 + LABEL_W + 8; // offset etichetta laterale + larghezza + respiro
-  const PAD_Y = 100; // etichette sopra/sotto + barra dell'hint sporgono oltre il centro del petalo
-  const MIN_ARC = 62; // distanza minima fra i centri di due petali adiacenti (i petali sono 54px)
-  const LABEL_GAP = 24; // distacco verticale minimo fra due etichette dello stesso lato
+  const PAD_Y = 132; // etichette sopra/sotto + chip del titolo + barra dell'hint (fino a 3 righe)
+  const MIN_ARC = 68; // distanza minima fra i centri di due petali adiacenti (i petali sono 54px)
+  const LABEL_GAP = 30; // distacco verticale minimo fra i CENTRI di due etichette (~23px di scatola)
 
   let el = $state<HTMLDivElement | null>(null);
   let stack = $state.raw<RadialItem[][]>([]); // solo sotto-anelli; la radice è `items`
@@ -412,7 +412,7 @@
       <circle cx={R + 2} cy={R + 2} r={R} />
     </svg>
 
-    <div class="chip" style="top:{-(R + 62)}px">
+    <div class="chip" style="top:{-(R + 72)}px">
       <span class="chipTitle">{title}</span>
       {#if subtitle}<span class="chipSub">{subtitle}</span>{/if}
     </div>
@@ -498,8 +498,9 @@
       {/if}
     </div>
 
+    <!-- top: sotto l'etichetta della voce a ore 6 (che arriva a R+62) -->
     {#if hintText}
-      <div class="hintbar" style="top:{R + 44}px">{hintText}</div>
+      <div class="hintbar" style="top:{R + 72}px">{hintText}</div>
     {/if}
 
     {#if query}
@@ -652,13 +653,14 @@
   /* descrizione della voce evidenziata: barra leggibile sotto l'anello */
   .hintbar {
     position: absolute; left: 0; transform: translateX(-50%);
-    font-size: 12px; line-height: 1.35; color: var(--dim); text-align: center;
-    background: color-mix(in srgb, var(--surface) 90%, transparent);
+    font-size: 12.5px; line-height: 1.4; color: var(--dim); text-align: center;
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
     backdrop-filter: blur(8px);
     border: 1px solid var(--border-soft); border-radius: var(--r-md);
     box-shadow: var(--shadow-sm);
-    padding: 5px 14px; max-width: min(380px, calc(100vw - 28px));
-    display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    padding: 6px 16px; max-width: min(460px, calc(100vw - 28px));
+    /* mai troncare la spiegazione: va a capo (il clamp a 4 è solo estremo) */
+    display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
     pointer-events: none; animation: fade 120ms ease-out both;
   }
 
