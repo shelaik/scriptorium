@@ -276,7 +276,6 @@
   // The last PDF opened in the reader — powers the "Riprendi lettura" quick action
   // (toolbar + radial). Seeded from the recent shelf at load so it survives a restart.
   let lastReadDoc = $state<DocumentItem | null>(null);
-  let headerMenu = $state<{ kind: "import" | "export"; x: number; y: number } | null>(null);
   // Compact tool bar: which global-radial group's dropdown is open (items are
   // derived live from buildGlobalRadial() at render, so disabled/badge stay fresh).
   let toolMenu = $state<{ id: string; x: number; y: number } | null>(null);
@@ -514,7 +513,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.41";
+  const APP_VERSION = "0.8.42";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2532,23 +2531,10 @@
     return { update: apply };
   }
 
-  /** Open the header Importa/Esporta dropdown anchored under its button. */
-  function openHeaderMenu(e: MouseEvent, kind: "import" | "export") {
-    e.stopPropagation();
-    toolMenu = null;
-    if (headerMenu?.kind === kind) {
-      headerMenu = null;
-      return;
-    }
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    headerMenu = { kind, x: r.left, y: r.bottom + 6 };
-  }
-
   /** Tool-bar icon click: open the group's dropdown, or run it if it's a leaf. */
   function openTool(e: MouseEvent, g: RadialItem) {
     e.stopPropagation();
     if (g.disabled) return; // defensive: a disabled top-level icon does nothing
-    headerMenu = null;
     sortPop = false;
     indexPop = false;
     if (g.children && g.children.length) {
@@ -3308,9 +3294,8 @@
       }
     }
     if (e.key === "Escape") {
-      if (toolMenu || headerMenu || sortPop || indexPop) {
+      if (toolMenu || sortPop || indexPop) {
         toolMenu = null;
-        headerMenu = null;
         sortPop = false;
         indexPop = false;
       } else if (focusId != null) {
@@ -4343,7 +4328,7 @@
 </script>
 
 <svelte:window
-  onclick={() => { headerMenu = null; toolMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; mapPop = null; tagEdit = null; }}
+  onclick={() => { toolMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; mapPop = null; tagEdit = null; }}
   onkeydown={onGlobalKey}
   oncontextmenu={onGlobalContext}
   onfocus={checkClipboard}
@@ -4426,7 +4411,7 @@
         class:busy={!!embedProgress && embedProgress.phase !== "done" && embedProgress.phase !== "cancelled"}
         title="Indice semantico: abilita ricerca per significato, correlati e costellazione"
         aria-label="Indice semantico"
-        onclick={(e) => { e.stopPropagation(); indexPop = !indexPop; sortPop = false; toolMenu = null; headerMenu = null; }}
+        onclick={(e) => { e.stopPropagation(); indexPop = !indexPop; sortPop = false; toolMenu = null; }}
       >
         <span class="aidot"></span>◈ {emb.embedded}/{emb.total}
       </button>
@@ -4463,9 +4448,6 @@
     {/if}
     <button class="iconbtn" title="Palette comandi — ogni azione, digitando (Ctrl+K)" aria-label="Palette comandi" onclick={(e) => { e.stopPropagation(); paletteOpen = true; }}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3" /></svg>
-    </button>
-    <button class="primary" class:menuopen={headerMenu?.kind === "import"} onclick={(e) => openHeaderMenu(e, "import")} title="Aggiungi: PDF dal disco, BibTeX, identificatori o URL">
-      {busy || exportingObsidian ? "…" : "+ Aggiungi"}
     </button>
   </header>
 
@@ -4517,7 +4499,7 @@
       <div class="stripright">
         {#if displayed.length && view !== "map"}
           <button class="chipbtn" onclick={toggleSelectAll} title="Seleziona o deseleziona tutti i documenti mostrati (per le azioni multiple)">{allSelected ? "Deseleziona tutti" : "Seleziona tutti"}</button>
-          <button class="chipbtn" class:on={sortChain.length > 0} onclick={(e) => { e.stopPropagation(); sortPop = !sortPop; indexPop = false; toolMenu = null; headerMenu = null; }} title="Ordina i documenti (più criteri combinabili)">
+          <button class="chipbtn" class:on={sortChain.length > 0} onclick={(e) => { e.stopPropagation(); sortPop = !sortPop; indexPop = false; toolMenu = null; }} title="Ordina i documenti (più criteri combinabili)">
             Ordina{#if sortChain.length}: {SORT_LABELS[sortChain[0].key]} {sortArrow(sortChain[0].key)}{#if sortChain.length > 1} +{sortChain.length - 1}{/if}{/if} ▾
           </button>
         {/if}
@@ -5583,15 +5565,6 @@
     />
   {/if}
 
-  {#if headerMenu}
-    <div class="menu" use:clamp={{ x: headerMenu.x, y: headerMenu.y }}>
-      <button class="medit" onclick={() => { headerMenu = null; importViaDialog(); }}>PDF dal disco…</button>
-      <button class="medit" onclick={() => { headerMenu = null; importBibtexDialog(); }}>Da BibTeX (.bib) — Zotero/Mendeley…</button>
-      <button class="medit" onclick={() => { headerMenu = null; idModal = true; }} title="Incolla DOI / arXiv / ISBN / PMID (crea voci anche senza PDF)">Per identificatore…</button>
-      <button class="medit" onclick={() => { headerMenu = null; openUrlModal(); }} title="Scarica un PDF incollando il link (o col bookmarklet dal browser)">Da URL…</button>
-    </div>
-  {/if}
-
   {#if toolMenu}
     {@const grp = buildGlobalRadial().find((g) => g.id === toolMenu?.id)}
     <div class="menu toolmenu" use:clamp={{ x: toolMenu.x, y: toolMenu.y }}>
@@ -6359,7 +6332,7 @@
         <div class="helpsec">
           <h3>Libreria e organizzazione</h3>
           <ul>
-            <li><strong>+ Aggiungi</strong> (in alto): PDF dal disco (anche trascinandoli), libreria <strong>Zotero/Mendeley</strong> via <em>.bib</em>, riferimenti per <em>identificatore</em> (DOI/arXiv/ISBN/PMID) o <em>da URL</em>. Dal menu <strong>Importa</strong> della barra anche un <strong>progetto LaTeX (.zip)</strong> — i tuoi PDF con la loro bibliografia, marcati come «Il mio lavoro» — e la <strong>Cartella sorvegliata</strong>.</li>
+            <li><strong>Importa</strong> (icona nella barra strumenti): PDF dal disco (anche trascinandoli nella finestra), libreria <strong>Zotero/Mendeley</strong> via <em>.bib</em>, riferimenti per <em>identificatore</em> (DOI/arXiv/ISBN/PMID), <em>da URL</em>, un <strong>progetto LaTeX (.zip)</strong> — i tuoi PDF con la loro bibliografia, marcati come «Il mio lavoro» — e la <strong>Cartella sorvegliata</strong>.</li>
             <li><strong>Aggancia dal browser</strong>, dal più semplice: (1) <strong>copia il link</strong> del PDF e torna su Scriptorium — compare da solo il suggerimento «Aggancia» (appunti intelligenti, interruttore in Impostazioni → Connettore); (2) il <strong>bookmarklet</strong> — sui siti che bloccano le richieste (es. GitHub) apre una scheda di conferma che completa l'aggancio; (3) punta la <strong>Cartella sorvegliata</strong> su Download e importa automaticamente ciò che scarichi. I link GitHub <code>…/blob/….pdf</code> vengono corretti da soli verso il file vero.</li>
             <li><strong>Tag</strong> colorati e <strong>Collezioni</strong> (anche “smart”, che si popolano da sole). In una collezione, tasto destro → Organizza → <em>Togli da…</em>.</li>
             <li><strong>Filtri</strong> rapidi nella sidebar: Tutti, Preferiti, Da leggere, <strong>Con codice (GitHub)</strong>, <strong>Peer-reviewed</strong>.</li>
