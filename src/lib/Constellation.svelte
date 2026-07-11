@@ -133,7 +133,7 @@
   const TAU = Math.PI * 2;
   const MIN_ALPHA = 0.02;
   const CELL = 120; // uniform-grid cell (world units) for chunked repulsion
-  const REPEL = 1300;
+  const REPEL = 2400;
   const LABEL_FONT = '11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 
   let container: HTMLDivElement;
@@ -470,8 +470,8 @@
         y = Number.NaN;
       } else if (gn.px !== 0 || gn.py !== 0) {
         // Small deterministic jitter so coincident projections don't stack.
-        x = gn.px * spread * 1.5 + ((gn.id % 13) - 6) * 1.7;
-        y = gn.py * spread * 1.5 + ((gn.id % 7) - 3) * 1.7;
+        x = gn.px * spread * 2.2 + ((gn.id % 13) - 6) * 2.2;
+        y = gn.py * spread * 2.2 + ((gn.id % 7) - 3) * 2.2;
       } else if (gn.degree > 0) {
         const rr = spread * Math.sqrt((si + 0.5) / connected);
         const a = si * golden;
@@ -508,7 +508,9 @@
       const ai = idToIdx.get(ge.a);
       const bi = idToIdx.get(ge.b);
       if (ai === undefined || bi === undefined || ai === bi) continue;
-      edges.push({ ai, bi, w: ge.w, rest: 70 + (1 - ge.w) * 90, k: 0.04 * ge.w });
+      // Longer rest lengths + softer springs than the original: repulsion wins at
+      // short range, so linked stars keep readable air between them.
+      edges.push({ ai, bi, w: ge.w, rest: 100 + (1 - ge.w) * 120, k: 0.032 * ge.w });
       let la = adj.get(ge.a);
       if (!la) adj.set(ge.a, (la = []));
       la.push(ge.b);
@@ -548,9 +550,10 @@
     yearMax = years.length ? Math.max(...years) : 0;
     fx = new Float32Array(nodes.length);
     fy = new Float32Array(nodes.length);
-    // Re-heat gently on refresh; on first build, saved positions need only a
-    // touch of relaxation (the map must not wander), a PCA seed a bit more.
-    alpha = hadNodes ? 0.25 : anySaved ? 0.3 : 0.8;
+    // Re-heat gently on refresh; on first build, saved positions get a real
+    // relaxation pass (so tuned physics can open up an older, tighter layout),
+    // a PCA seed a bit more.
+    alpha = hadNodes ? 0.25 : anySaved ? 0.5 : 0.85;
     needFit = !hadNodes;
     // Refresh (or drop) the pinned card against the fresh graph data. `untrack`
     // is essential: rebuild() runs inside an $effect, and without it the `panel`
@@ -584,7 +587,11 @@
       d2 = dx * dx + dy * dy;
     }
     const d = Math.sqrt(d2);
-    const f = Math.min(12, REPEL / d2);
+    let f = Math.min(14, REPEL / d2);
+    // Collision guard: below the "personal space" of the pair (their radii plus
+    // breathing room) the push grows linearly, so stars never sit on each other.
+    const minD = (a.r + b.r) * 1.7 + 10;
+    if (d < minD) f += (minD - d) * 0.4;
     const ux = (dx / d) * f;
     const uy = (dy / d) * f;
     fx[i] += ux;
@@ -642,8 +649,8 @@
         nd.vy = 0;
         continue; // pinned under the cursor
       }
-      const ax = fx[i] - nd.x * 0.012; // centering gravity toward the origin
-      const ay = fy[i] - nd.y * 0.012;
+      const ax = fx[i] - nd.x * 0.008; // centering gravity toward the origin (gentle: let the map breathe)
+      const ay = fy[i] - nd.y * 0.008;
       nd.vx = (nd.vx + ax * alpha) * 0.86;
       nd.vy = (nd.vy + ay * alpha) * 0.86;
       const sp = Math.hypot(nd.vx, nd.vy);
@@ -742,6 +749,35 @@
     schedule();
   }
 
+  // ----- Background starfield: pre-rendered once per size/theme (free per frame) -----
+  let skyCanvas: HTMLCanvasElement | null = null;
+  function buildSky() {
+    if (vw <= 0 || vh <= 0) {
+      skyCanvas = null;
+      return;
+    }
+    const cv = document.createElement("canvas");
+    cv.width = Math.max(1, Math.round(vw * dpr));
+    cv.height = Math.max(1, Math.round(vh * dpr));
+    const s = cv.getContext("2d");
+    if (!s) return;
+    s.setTransform(dpr, 0, 0, dpr, 0, 0);
+    let seed = 987654321; // fixed → the sky doesn't shimmer between rebuilds
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const count = Math.round((vw * vh) / 9000);
+    s.fillStyle = theme.faint;
+    for (let i = 0; i < count; i++) {
+      const x = rnd() * vw;
+      const y = rnd() * vh;
+      const r = 0.4 + rnd() * 1.1;
+      s.globalAlpha = 0.07 + rnd() * 0.16;
+      s.beginPath();
+      s.arc(x, y, r, 0, TAU);
+      s.fill();
+    }
+    skyCanvas = cv;
+  }
+
   // ----- Drawing (all in screen space, DPR-aware) -----
   function chipPath(c: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
     const rr = Math.min(r, h / 2, w / 2);
@@ -813,6 +849,7 @@
     const c = ctx;
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
     c.clearRect(0, 0, vw, vh);
+    if (skyCanvas) c.drawImage(skyCanvas, 0, 0, vw, vh); // il cielo dietro le stelle
     if (nodes.length === 0) return;
 
     // Focus: the hovered neighborhood wins while the pointer is on a node;
@@ -882,10 +919,10 @@
         (ay > vh + 40 && by > vh + 40)
       )
         continue;
-      let al = 0.1 + e.w * 0.28;
+      let al = 0.09 + e.w * 0.3;
       if (focus && a.id !== hovId && b.id !== hovId) al *= 0.18;
       c.globalAlpha = al;
-      c.lineWidth = e.w > 0.75 ? 1.5 : 1;
+      c.lineWidth = 0.7 + e.w * 1.1; // heavier ties read thicker, continuously
       c.beginPath();
       c.moveTo(ax, ay);
       c.lineTo(bx, by);
@@ -899,6 +936,16 @@
       const rs = clamp(n.r * zoom, 3, 26);
       if (sx < -34 || sx > vw + 34 || sy < -34 || sy > vh + 34) continue;
       c.globalAlpha = focus && !focus.has(n.id) ? 0.18 : 1;
+      // Soft glow behind the star, in its own color: the "shine" that makes the
+      // sky read as stars instead of dots (one extra arc: negligible cost).
+      const fill = nodeFill(n);
+      const a0 = c.globalAlpha;
+      c.globalAlpha = a0 * 0.16;
+      c.fillStyle = fill;
+      c.beginPath();
+      c.arc(sx, sy, rs * 2.2, 0, TAU);
+      c.fill();
+      c.globalAlpha = a0;
       if (selectedSet.has(n.id)) {
         c.save();
         c.shadowColor = theme.accent;
@@ -917,7 +964,7 @@
         c.arc(sx, sy, rs + 2, 0, TAU);
         c.stroke();
       }
-      c.fillStyle = nodeFill(n);
+      c.fillStyle = fill;
       c.beginPath();
       if (n.kind === "note") {
         // Diamond: an appunto, not a paper.
@@ -1185,6 +1232,7 @@
   function onDprChange() {
     armDprWatch();
     setupBackingStore();
+    buildSky();
     schedule();
   }
   function armDprWatch() {
@@ -1201,11 +1249,13 @@
       vw = en.contentRect.width;
       vh = en.contentRect.height;
       setupBackingStore();
+      buildSky();
       schedule();
     });
     ro.observe(container);
     mo = new MutationObserver(() => {
       readTheme();
+      buildSky(); // the starfield uses theme tokens
       schedule();
     });
     mo.observe(document.body, { attributes: true, attributeFilter: ["data-theme"] });
