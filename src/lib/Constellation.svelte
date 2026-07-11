@@ -133,7 +133,7 @@
   const TAU = Math.PI * 2;
   const MIN_ALPHA = 0.02;
   const CELL = 120; // uniform-grid cell (world units) for chunked repulsion
-  const REPEL = 2400;
+  const REPEL = 3200;
   const LABEL_FONT = '11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 
   let container: HTMLDivElement;
@@ -518,7 +518,7 @@
         ai,
         bi,
         w: ge.w,
-        rest: 125 + (1 - ge.w) * 140,
+        rest: 160 + (1 - ge.w) * 170,
         k: (0.032 * ge.w) / Math.sqrt(dmin),
       });
       let la = adj.get(ge.a);
@@ -600,8 +600,8 @@
     let f = Math.min(14, REPEL / d2);
     // Collision guard: below the "personal space" of the pair (their radii plus
     // breathing room) the push grows linearly, so stars never sit on each other.
-    const minD = (a.r + b.r) * 2.1 + 14;
-    if (d < minD) f += (minD - d) * 0.65;
+    const minD = (a.r + b.r) * 2.4 + 20;
+    if (d < minD) f += (minD - d) * 0.8;
     const ux = (dx / d) * f;
     const uy = (dy / d) * f;
     fx[i] += ux;
@@ -659,8 +659,8 @@
         nd.vy = 0;
         continue; // pinned under the cursor
       }
-      const ax = fx[i] - nd.x * 0.008; // centering gravity toward the origin (gentle: let the map breathe)
-      const ay = fy[i] - nd.y * 0.008;
+      const ax = fx[i] - nd.x * 0.006; // centering gravity toward the origin (gentle: let the map breathe)
+      const ay = fy[i] - nd.y * 0.006;
       nd.vx = (nd.vx + ax * alpha) * 0.86;
       nd.vy = (nd.vy + ay * alpha) * 0.86;
       const sp = Math.hypot(nd.vx, nd.vy);
@@ -867,9 +867,11 @@
     const hovId = hoverIdx >= 0 && hoverIdx < nodes.length ? nodes[hoverIdx].id : (panel?.id ?? -1);
     const focus = hoverIdx >= 0 ? hoverSet : pinnedSet;
 
-    // Nebulae (far zoom): soft halos + labels over each semantic community, so
-    // the map reads as thematic areas before individual stars are legible.
-    if (zoom < NEBULA_ZOOM && clusterMeta.length > 0) {
+    // Nebulae: soft halos over each semantic community, at EVERY zoom — strong
+    // from afar (the map reads as thematic areas), a subtle tint up close.
+    // Cluster labels only from afar, where node labels aren't legible yet.
+    if (clusterMeta.length > 0) {
+      const nebAlpha = zoom < NEBULA_ZOOM ? 0.16 : Math.max(0.06, 0.16 - (zoom - NEBULA_ZOOM) * 0.08);
       const acc: Map<number, { sx: number; sy: number; n: number; r2: number }> = new Map();
       for (const n of nodes) {
         if (n.community < 0) continue;
@@ -896,18 +898,20 @@
         const rr = (Math.sqrt(a.r2) * 0.85 + 60) * zoom;
         if (cx < -rr || cx > vw + rr || cy < -rr || cy > vh + rr) continue;
         const g = c.createRadialGradient(cx, cy, rr * 0.15, cx, cy, rr);
-        g.addColorStop(0, commColor(meta.id, 0.16));
+        g.addColorStop(0, commColor(meta.id, nebAlpha));
         g.addColorStop(1, commColor(meta.id, 0));
         c.fillStyle = g;
         c.beginPath();
         c.arc(cx, cy, rr, 0, TAU);
         c.fill();
-        c.font = '600 13px Georgia, "Times New Roman", serif';
-        c.fillStyle = withAlpha(theme.text, 0.75);
-        c.fillText(ellipsize(meta.label, 34), cx, cy - rr * 0.1);
-        c.font = LABEL_FONT;
-        c.fillStyle = withAlpha(theme.dim, 0.7);
-        c.fillText(`${a.n} paper`, cx, cy - rr * 0.1 + 16);
+        if (zoom < NEBULA_ZOOM) {
+          c.font = '600 13px Georgia, "Times New Roman", serif';
+          c.fillStyle = withAlpha(theme.text, 0.75);
+          c.fillText(ellipsize(meta.label, 34), cx, cy - rr * 0.1);
+          c.font = LABEL_FONT;
+          c.fillStyle = withAlpha(theme.dim, 0.7);
+          c.fillText(`${a.n} paper`, cx, cy - rr * 0.1 + 16);
+        }
       }
       c.textAlign = "left";
     }
@@ -1341,11 +1345,11 @@
     </div>
     {#if tuneOpen}
       <div class="tune" role="group" aria-label="Densità del grafo">
-        <label>
+        <label title="Quanti vicini più simili collegare a ogni paper. Più alto = rete più fitta e cluster più fusi; più basso = mappa più rada e leggibile.">
           <span>Legami per nodo <b>{tuneK}</b></span>
           <input type="range" min="1" max="8" step="1" bind:value={tuneK} />
         </label>
-        <label>
+        <label title="Somiglianza minima perché un legame esista (0-100%). Più alta = restano solo i legami forti (mappa più frammentata ma affidabile); più bassa = più connessioni, anche deboli.">
           <span>Soglia somiglianza <b>{Math.round(tuneSim * 100)}%</b></span>
           <input type="range" min="0.4" max="0.8" step="0.05" bind:value={tuneSim} />
         </label>
@@ -1500,7 +1504,7 @@
     left: 12px;
   }
   .legend {
-    bottom: 12px;
+    top: 44px;
     left: 12px;
     font-size: 10.5px;
     color: var(--faint);
