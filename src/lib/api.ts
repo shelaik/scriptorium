@@ -937,3 +937,38 @@ export interface PathStep {
 }
 /** Cosa leggere prima per capire un paper (grafo citazioni + embedding, senza LLM). */
 export const readingPath = (id: number) => invoke<PathStep[]>("reading_path", { id });
+
+// ===== Progetti LaTeX (cartelle in app_data/projects, compilazione via toolchain di sistema) =====
+export interface ProjectMeta {
+  slug: string;
+  name: string;
+  /** mtime del file più recente, epoch ms. */
+  updated_at: number | null;
+}
+export interface ProjectFile {
+  rel: string;
+  size: number;
+}
+export interface CompileResult {
+  ok: boolean;
+  /** Strumento usato ("tectonic" / "latexmk"), vuoto se nessuno installato. */
+  tool: string;
+  /** Coda del log di compilazione (contiene l'errore quando fallisce). */
+  log: string;
+  pdf_rel: string | null;
+}
+export const listProjects = () => invoke<ProjectMeta[]>("list_projects");
+/** Crea cartella + main.tex + refs.bib (sincronizzato dalla libreria); ritorna lo slug. */
+export const createProject = (name: string) => invoke<string>("create_project", { name });
+export const projectFiles = (slug: string) => invoke<ProjectFile[]>("project_files", { slug });
+export const readProjectFile = (slug: string, rel: string) =>
+  invoke<string>("read_project_file", { slug, rel });
+export const writeProjectFile = (slug: string, rel: string, content: string) =>
+  invoke<void>("write_project_file", { slug, rel, content });
+/** Contenuto binario in base64 (per l'anteprima del PDF compilato). */
+export const readProjectFileB64 = (slug: string, rel: string) =>
+  invoke<string>("read_project_file_b64", { slug, rel });
+/** Riscrive refs.bib con tutta la libreria; ritorna il numero di voci. */
+export const syncProjectBib = (slug: string) => invoke<number>("sync_project_bib", { slug });
+export const compileProject = (slug: string) => invoke<CompileResult>("compile_project", { slug });
+export const revealProjectDir = (slug: string) => invoke<void>("reveal_project_dir", { slug });

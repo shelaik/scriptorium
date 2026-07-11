@@ -14,6 +14,7 @@ use crate::metadata;
 use crate::notes;
 use crate::obsidian;
 use crate::pdf;
+use crate::projects;
 use crate::rag;
 use crate::secret;
 use crate::table;
@@ -1570,6 +1571,146 @@ pub fn save_graph_positions(
         }
     }
     tx.commit().map_err(|e| e.to_string())
+}
+
+// ===== Progetti LaTeX: folders of .tex/.bib the user owns, compiled via system toolchain =====
+
+/// Root folder of the LaTeX projects (created on demand).
+fn projects_dir(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .map(|d| d.join("projects"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("pdfmanage_projects"))
+}
+
+fn project_root(app: &AppHandle, slug: &str) -> Result<PathBuf, String> {
+    // The slug doubles as the folder name: same guard as any relative segment.
+    let s = projects::safe_rel(slug).map_err(|e| e.to_string())?;
+    if s.contains('/') {
+        return Err("nome progetto non valido".into());
+    }
+    let root = projects_dir(app).join(&s);
+    if !root.is_dir() {
+        return Err("progetto non trovato".into());
+    }
+    Ok(root)
+}
+
+#[tauri::command]
+pub fn list_projects(app: AppHandle) -> Result<Vec<projects::ProjectMeta>, String> {
+    Ok(projects::list(&projects_dir(&app)))
+}
+
+/// Scaffold a new project: folder + main.tex template + refs.bib synced from the
+/// whole library. Returns the slug.
+#[tauri::command]
+pub fn create_project(app: AppHandle, state: State<'_, AppState>, name: String) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("Dai un nome al progetto".into());
+    }
+    let slug = wiki::slugify(&name);
+    let root = projects_dir(&app).join(&slug);
+    if root.exists() {
+        return Err("Esiste già un progetto con questo nome".into());
+    }
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    std::fs::write(root.join("main.tex"), projects::MAIN_TEMPLATE).map_err(|e| e.to_string())?;
+    let bib = {
+        let conn = state.db.lock();
+        library_bibtex(&conn)?
+    };
+    std::fs::write(root.join("refs.bib"), bib).map_err(|e| e.to_string())?;
+    Ok(slug)
+}
+
+/// The whole (non-deleted) library as BibTeX — the project's refs.bib content.
+fn library_bibtex(conn: &Connection) -> Result<String, String> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM documents WHERE deleted_at IS NULL ORDER BY id")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
+    let items = load_cite_items(conn, &ids).map_err(|e| e.to_string())?;
+    Ok(citation::build(&items, "bibtex"))
+}
+
+#[tauri::command]
+pub fn project_files(app: AppHandle, slug: String) -> Result<Vec<projects::ProjectFile>, String> {
+    Ok(projects::files(&project_root(&app, &slug)?))
+}
+
+#[tauri::command]
+pub fn read_project_file(app: AppHandle, slug: String, rel: String) -> Result<String, String> {
+    let rel = projects::safe_rel(&rel).map_err(|e| e.to_string())?;
+    let p = project_root(&app, &slug)?.join(&rel);
+    let md = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+    if md.len() > 2_000_000 {
+        return Err("File troppo grande per l'editor".into());
+    }
+    std::fs::read_to_string(&p).map_err(|e| format!("Lettura {rel}: {e}"))
+}
+
+/// Atomic write (temp + rename), like the notes vault.
+#[tauri::command]
+pub fn write_project_file(app: AppHandle, slug: String, rel: String, content: String) -> Result<(), String> {
+    let rel = projects::safe_rel(&rel).map_err(|e| e.to_string())?;
+    let root = project_root(&app, &slug)?;
+    let p = root.join(&rel);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let tmp = root.join(format!("{}.tmp-write", rel.replace('/', "_")));
+    std::fs::write(&tmp, content).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
+}
+
+/// A project file as base64 (the compiled PDF for the in-app preview).
+#[tauri::command]
+pub fn read_project_file_b64(app: AppHandle, slug: String, rel: String) -> Result<String, String> {
+    let rel = projects::safe_rel(&rel).map_err(|e| e.to_string())?;
+    let p = project_root(&app, &slug)?.join(&rel);
+    let md = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+    if md.len() > 40_000_000 {
+        return Err("File troppo grande".into());
+    }
+    let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+    Ok(BASE64_STANDARD.encode(bytes))
+}
+
+/// Rewrite refs.bib from the current library; returns the entry count.
+#[tauri::command]
+pub fn sync_project_bib(app: AppHandle, state: State<'_, AppState>, slug: String) -> Result<usize, String> {
+    let root = project_root(&app, &slug)?;
+    let bib = {
+        let conn = state.db.lock();
+        library_bibtex(&conn)?
+    };
+    let n = bib.lines().filter(|l| l.starts_with('@')).count();
+    let tmp = root.join("refs.bib.tmp-write");
+    std::fs::write(&tmp, bib).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, root.join("refs.bib")).map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+/// Compile main.tex with the system toolchain (Tectonic, then latexmk).
+#[tauri::command]
+pub async fn compile_project(app: AppHandle, slug: String) -> Result<projects::CompileResult, String> {
+    let root = project_root(&app, &slug)?;
+    tauri::async_runtime::spawn_blocking(move || projects::compile(&root))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Open the project folder in the file explorer.
+#[tauri::command]
+pub fn reveal_project_dir(app: AppHandle, slug: String) -> Result<(), String> {
+    let root = project_root(&app, &slug)?;
+    run_powershell(&format!(
+        "Start-Process explorer.exe -ArgumentList '\"{}\"'",
+        ps_lit(&root.to_string_lossy())
+    ))
 }
 
 // ===== RAG engine: "ask your library" (passage index + graph-augmented Q&A) =====

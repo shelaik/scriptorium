@@ -169,10 +169,11 @@
   import CitationMap from "$lib/CitationMap.svelte";
   import DetailPanel from "$lib/DetailPanel.svelte";
   import SendToNotePicker from "$lib/SendToNotePicker.svelte";
+  import TexProjects from "$lib/TexProjects.svelte";
   import { refToken, type NotePayload } from "$lib/notecite";
 
   type Filter = {
-    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita" | "mywork" | "notes";
+    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita" | "mywork" | "notes" | "projects";
     id?: number;
     label?: string;
   };
@@ -287,6 +288,7 @@
     switch (filter.kind) {
       case "novita": return "g-novita";
       case "notes": return "g-notes";
+      case "projects": return "g-projects";
       case "ask": return "g-ask";
       case "wiki": return "g-wiki";
       case "discover": return "g-disc";
@@ -514,7 +516,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.3";
+  const APP_VERSION = "0.9.4";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3085,6 +3087,13 @@
         hint: "I tuoi appunti in Markdown (file .md) con [[collegamenti]]",
         action: () => openNotesView(),
       },
+      {
+        id: "g-projects",
+        label: "Progetti (LaTeX)",
+        icon: I.code,
+        hint: "Scrivi in LaTeX con citazioni dalla libreria; compila con Tectonic/latexmk",
+        action: () => setFilter({ kind: "projects" }),
+      },
       { id: "g-redis", label: "Riscopri", icon: I.compass, hint: "Un documento dimenticato, pescato per te", action: () => rediscover() },
       {
         id: "g-novita",
@@ -5104,6 +5113,8 @@
             {/if}
           </section>
         </div>
+      {:else if filter.kind === "projects"}
+        <TexProjects />
       {:else if filter.kind === "novita"}
         <div class="novhead">
           <div class="novtitle">

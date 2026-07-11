@@ -16,6 +16,7 @@ mod model;
 mod notes;
 mod obsidian;
 mod ocr;
+mod projects;
 mod rag;
 mod secret;
 mod table;
@@ -267,6 +268,15 @@ pub fn run() {
             commands::share_via_outlook,
             commands::ai_server_start,
             commands::ai_server_stop,
+            commands::list_projects,
+            commands::create_project,
+            commands::project_files,
+            commands::read_project_file,
+            commands::write_project_file,
+            commands::read_project_file_b64,
+            commands::sync_project_bib,
+            commands::compile_project,
+            commands::reveal_project_dir,
             commands::term_open,
             commands::term_write,
             commands::term_resize,
