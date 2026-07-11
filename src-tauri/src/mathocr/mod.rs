@@ -276,10 +276,14 @@ impl Engine {
 
     /// Beam-search autoregressive decode. Keeps the `BEAM` most-probable partial
     /// sequences and returns the best finished one by length-normalized
-    /// log-probability. All active beams share the current length, so they are
-    /// batched into a single decoder call per step (≈ as fast as greedy). With
-    /// `BEAM = 1` this reduces to plain greedy decoding.
-    fn decode(&mut self, ctx: &[f32], ctx_shape: &[usize]) -> Result<Vec<i64>> {
+    /// log-probability, plus whether it actually finished (reached EOS). An
+    /// unfinished winner means the transcription overflowed MAX_SEQ — in practice
+    /// the crop holds more than one line and the model spiraled into a verbose
+    /// `\begin{array}…` it never closes; callers use the flag to rescue that case.
+    /// All active beams share the current length, so they are batched into a
+    /// single decoder call per step (≈ as fast as greedy). With `BEAM = 1` this
+    /// reduces to plain greedy decoding.
+    fn decode(&mut self, ctx: &[f32], ctx_shape: &[usize]) -> Result<(Vec<i64>, bool)> {
         let s = *ctx_shape.get(1).unwrap_or(&0);
         let d = *ctx_shape.get(2).unwrap_or(&0);
         // (tokens, cumulative log-probability)
@@ -366,12 +370,13 @@ impl Engine {
             let n = (t.0.len().saturating_sub(1)).max(1) as f32; // exclude BOS
             t.1 / n.powf(LENGTH_PENALTY)
         };
-        let pool = if finished.is_empty() { active } else { finished };
+        let terminated = !finished.is_empty();
+        let pool = if terminated { finished } else { active };
         let best = pool
             .into_iter()
             .max_by(|a, b| norm(a).partial_cmp(&norm(b)).unwrap_or(std::cmp::Ordering::Equal))
             .ok_or_else(|| anyhow!("decoder senza sequenze"))?;
-        Ok(best.0)
+        Ok((best.0, terminated))
     }
 }
 
@@ -513,15 +518,13 @@ fn minmax_size(img: &GrayImage) -> GrayImage {
     canvas
 }
 
-/// Split a multi-line selection into separate formula bands by horizontal
-/// projection. Conservative: only breaks at blank gaps taller than a fraction of
-/// the tallest ink band, so a single formula's internal gaps (around fraction
-/// bars, sub/superscripts) never split it. Returns the whole image unchanged when
-/// there is only one line.
-fn segment_bands(gray: &GrayImage) -> Vec<GrayImage> {
+/// Runs of consecutive non-blank rows ("ink bands"), via a contrast-relative ink
+/// test with background-polarity detection (like `pad()`), so dark-themed pages
+/// segment too. Shared by `segment_bands` and the bisection rescue.
+fn ink_bands(gray: &GrayImage) -> Vec<(u32, u32)> {
     let (w, h) = gray.dimensions();
-    if h < 8 || w == 0 {
-        return vec![gray.clone()];
+    if h == 0 || w == 0 {
+        return Vec::new();
     }
     // Contrast-relative ink test.
     let (mut mn, mut mx) = (255u8, 0u8);
@@ -532,8 +535,6 @@ fn segment_bands(gray: &GrayImage) -> Vec<GrayImage> {
     }
     let range = (mx.saturating_sub(mn)).max(1) as f32;
     let stretch = |v: u8| ((v.saturating_sub(mn)) as f32 / range * 255.0) as u8;
-    // Detect background polarity like `pad()` does, so light-on-dark selections
-    // (dark-themed pages) are segmented too rather than read as one solid band.
     let mean: f64 = gray.pixels().map(|p| stretch(p.0[0]) as f64).sum::<f64>() / (w as f64 * h as f64);
     let dark_bg = mean <= 128.0;
     let is_ink = |v: u8| {
@@ -545,7 +546,8 @@ fn segment_bands(gray: &GrayImage) -> Vec<GrayImage> {
         }
     };
     let blank_limit = (w / 100).max(1); // a row with <~1% ink counts as blank
-    let mut row_ink = vec![0u32; h as usize];
+    let mut bands: Vec<(u32, u32)> = Vec::new();
+    let mut start: Option<u32> = None;
     for y in 0..h {
         let mut c = 0u32;
         for x in 0..w {
@@ -553,13 +555,7 @@ fn segment_bands(gray: &GrayImage) -> Vec<GrayImage> {
                 c += 1;
             }
         }
-        row_ink[y as usize] = c;
-    }
-    // Fine ink bands (runs of non-blank rows).
-    let mut bands: Vec<(u32, u32)> = Vec::new();
-    let mut start: Option<u32> = None;
-    for y in 0..h {
-        if row_ink[y as usize] > blank_limit {
+        if c > blank_limit {
             if start.is_none() {
                 start = Some(y);
             }
@@ -570,6 +566,20 @@ fn segment_bands(gray: &GrayImage) -> Vec<GrayImage> {
     if let Some(st) = start {
         bands.push((st, h - 1));
     }
+    bands
+}
+
+/// Split a multi-line selection into separate formula bands by horizontal
+/// projection. Conservative: only breaks at blank gaps taller than a fraction of
+/// the tallest ink band, so a single formula's internal gaps (around fraction
+/// bars, sub/superscripts) never split it. Returns the whole image unchanged when
+/// there is only one line.
+fn segment_bands(gray: &GrayImage) -> Vec<GrayImage> {
+    let (w, h) = gray.dimensions();
+    if h < 8 || w == 0 {
+        return vec![gray.clone()];
+    }
+    let bands = ink_bands(gray);
     if bands.len() <= 1 {
         return vec![gray.clone()];
     }
@@ -599,6 +609,61 @@ fn segment_bands(gray: &GrayImage) -> Vec<GrayImage> {
             image::imageops::crop_imm(gray, 0, y0, w, y1 - y0 + 1).to_image()
         })
         .collect()
+}
+
+/// Cut the image in two at the WIDEST blank gap between ink bands (min 4px), for
+/// the bisection rescue. In a stacked-lines crop the inter-line gap is wider than
+/// any gap inside one formula (fraction bars, sum limits), so the widest gap is a
+/// natural, threshold-free line boundary. None when there is nothing to split.
+fn split_at_widest_gap(gray: &GrayImage) -> Option<(GrayImage, GrayImage)> {
+    let (w, h) = gray.dimensions();
+    let bands = ink_bands(gray);
+    if bands.len() < 2 {
+        return None;
+    }
+    let (mut cut, mut widest) = (0u32, 0u32);
+    for pair in bands.windows(2) {
+        let gap = pair[1].0 - pair[0].1 - 1;
+        if gap > widest {
+            widest = gap;
+            cut = pair[0].1 + 1 + gap / 2;
+        }
+    }
+    if widest < 4 {
+        return None;
+    }
+    let top = image::imageops::crop_imm(gray, 0, 0, w, cut).to_image();
+    let bottom = image::imageops::crop_imm(gray, 0, cut, w, h - cut).to_image();
+    Some((top, bottom))
+}
+
+/// Structural sanity of a LaTeX transcription: balanced braces (honoring `\{`)
+/// and as many `\begin` as `\end`. Any CORRECT transcription passes — unlike
+/// "does it render in engine X", this is renderer-independent — so it can safely
+/// gate the rescue: a failure here means the model emitted garbage (typically an
+/// unclosed `\begin{array}…` on a stacked-lines crop).
+fn latex_is_sane(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut depth: i64 = 0;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => {
+                i += 2; // skip the escaped char (`\{`, `\}`, `\\`)
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    depth == 0 && s.matches("\\begin").count() == s.matches("\\end").count()
 }
 
 /// Normalize a grayscale image to the model's (1,1,H,W) tensor.
@@ -710,24 +775,98 @@ fn post_process(s: &str) -> String {
 }
 
 /// Recognize a single grayscale formula image with the already-loaded engine.
-fn recognize_gray(eng: &mut Engine, gray: &GrayImage) -> Result<String> {
+/// The boolean is the decoder's EOS flag: `false` means the transcription
+/// overflowed (typically a multi-line crop) and the text is unreliable.
+fn recognize_gray(eng: &mut Engine, gray: &GrayImage) -> Result<(String, bool)> {
     let base = minmax_size(&pad(gray));
     let (data, h, w) = eng.resize_loop(&base)?;
     let (ctx, ctx_shape) = eng.encode(data, h, w)?;
-    let ids = eng.decode(&ctx, &ctx_shape)?;
+    let (ids, terminated) = eng.decode(&ctx, &ctx_shape)?;
     // Skip the leading BOS; the tokenizer drops the rest of the special tokens.
     let toks: Vec<u32> = ids.iter().skip(1).map(|&x| x as u32).collect();
     let raw = eng
         .tokenizer
         .decode(&toks, true)
         .map_err(|e| anyhow!("decode tokenizer: {e}"))?;
-    Ok(post_process(&raw))
+    Ok((post_process(&raw), terminated))
+}
+
+/// Recognize `gray`, rescuing a bad transcription by bisection: when the decode
+/// overflows OR the LaTeX is structurally broken (unbalanced braces / unmatched
+/// `\begin` — the model's tell on stacked-line crops, where it spirals into an
+/// unclosed `\begin{array}…`), cut at the widest blank gap and recurse on the two
+/// halves. Good lines land in `lines`.
+///
+/// `budget` is the shared decode allowance for the whole rescue tree — it strictly
+/// decreases on every call, so the recursion terminates and the worst-case latency
+/// is bounded (each garbage decode runs the full 512-step beam loop, the slow kind).
+/// With equal inter-line gaps the widest-gap cut peels ONE line per split, so fully
+/// resolving N lines costs ~2N-1 decodes; when the budget runs out mid-tree the
+/// enclosing split is rejected and that region keeps its whole-crop text instead —
+/// content is never dropped.
+///
+/// Returns `(clean, complete)`: whether any pushed line passed the sanity gate, and
+/// whether this subtree fully covered its crop (false only on budget exhaustion).
+/// A split is accepted only if BOTH halves are complete AND at least one is clean —
+/// otherwise (e.g. a hard single-line formula whose widest gap is internal, like a
+/// sum's limits: both halves garbage) the whole-crop text is kept, never fragments.
+fn rescue_lines(
+    eng: &mut Engine,
+    gray: &GrayImage,
+    budget: &mut u32,
+    lines: &mut Vec<String>,
+) -> Result<(bool, bool)> {
+    if *budget == 0 {
+        return Ok((false, false)); // no allowance to even look at this region
+    }
+    *budget -= 1;
+    let (latex, terminated) = recognize_gray(eng, gray)?;
+    let ok = terminated && latex_is_sane(&latex);
+    if !ok {
+        if let Some((top, bottom)) = split_at_widest_gap(gray) {
+            let mut sub: Vec<String> = Vec::new();
+            let (a_clean, a_complete) = rescue_lines(eng, &top, budget, &mut sub)?;
+            let (b_clean, b_complete) = if a_complete {
+                rescue_lines(eng, &bottom, budget, &mut sub)?
+            } else {
+                (false, false) // don't burn budget on the bottom of a rejected split
+            };
+            if a_complete && b_complete && (a_clean || b_clean) {
+                lines.append(&mut sub);
+                return Ok((a_clean || b_clean, true));
+            }
+            // Split rejected (budget ran out, or both halves were garbage too):
+            // fall through to the whole-crop text.
+        }
+    }
+    // Sane result — or nothing left to split: keep the text (the user can edit it).
+    if !latex.trim().is_empty() {
+        lines.push(latex);
+    }
+    Ok((ok, true))
+}
+
+/// Stack recognized lines: one stays plain, more become a `gathered` block
+/// (independent equations, each centered on its own line — an `&`-less `aligned`
+/// would silently not align at all).
+fn join_lines(mut lines: Vec<String>) -> Result<String> {
+    if lines.is_empty() {
+        anyhow::bail!("nessuna formula riconosciuta");
+    }
+    if lines.len() == 1 {
+        return Ok(lines.pop().unwrap());
+    }
+    let body = lines.join(" \\\\\n");
+    Ok(format!("\\begin{{gathered}}\n{body}\n\\end{{gathered}}"))
 }
 
 /// Recognize a formula image (PNG/any) from in-memory bytes, using the models
 /// under `dir`. Pure CPU; call from a blocking context. `ensure_models` must have
 /// succeeded first. When `multi` is set, a multi-line selection is segmented into
-/// separate equations and returned as a LaTeX `aligned` block.
+/// separate equations up front; either way, a garbage transcription (overflowed or
+/// structurally broken LaTeX — what the model produces on stacked-line crops) is
+/// rescued by bisecting the crop at its widest blank gap and recognizing the
+/// halves, so a multi-line selection yields a clean `gathered` block instead.
 pub fn recognize(dir: &Path, image_bytes: &[u8], multi: bool) -> Result<String> {
     let gray = to_gray_on_white(image_bytes)?;
 
@@ -737,35 +876,27 @@ pub fn recognize(dir: &Path, image_bytes: &[u8], multi: bool) -> Result<String> 
     }
     let eng = guard.as_mut().unwrap();
 
+    // Decode budget: 9 fully resolves a 4-line stack under one-line-per-split
+    // peeling (2N-1) with margin; beyond that the rescue degrades gracefully
+    // (good head lines + one whole-tail chunk) instead of running unbounded.
+    const RESCUE_BUDGET: u32 = 9;
+    let mut lines: Vec<String> = Vec::new();
     if multi {
+        // Explicit multi-line mode: conservative segmentation first, then each band
+        // still gets the bisection rescue (a band may itself hold merged lines).
+        // The budget is shared across bands but every band is guaranteed at least
+        // its own plain decode (the pre-rescue behavior), so none is ever skipped.
         let bands = segment_bands(&gray);
-        if bands.len() > 1 {
-            let mut lines: Vec<String> = Vec::new();
-            for band in &bands {
-                let l = recognize_gray(eng, band)?;
-                if !l.trim().is_empty() {
-                    lines.push(l);
-                }
-            }
-            if lines.is_empty() {
-                anyhow::bail!("nessuna formula riconosciuta");
-            }
-            if lines.len() == 1 {
-                return Ok(lines.pop().unwrap());
-            }
-            // `gathered`, not `aligned`: these are independent equations with no
-            // shared alignment point, so each is centered on its own line. (An
-            // `&`-less `aligned` would silently not align at all.)
-            let body = lines.join(" \\\\\n");
-            return Ok(format!("\\begin{{gathered}}\n{body}\n\\end{{gathered}}"));
+        let mut budget = RESCUE_BUDGET.max(3 * bands.len() as u32);
+        for band in bands {
+            budget = budget.max(1);
+            rescue_lines(eng, &band, &mut budget, &mut lines)?;
         }
+    } else {
+        let mut budget = RESCUE_BUDGET;
+        rescue_lines(eng, &gray, &mut budget, &mut lines)?;
     }
-
-    let latex = recognize_gray(eng, &gray)?;
-    if latex.is_empty() {
-        anyhow::bail!("nessuna formula riconosciuta");
-    }
-    Ok(latex)
+    join_lines(lines)
 }
 
 #[cfg(test)]
@@ -826,6 +957,59 @@ mod tests {
         assert_eq!(post_process("\\int _ 0 ^ 1 f \\, d x"), "\\int_0^1f\\,\\mathrm{d}x");
     }
 
+    /// The bisection rescue's building blocks. Two display lines whose tight gap the
+    /// conservative segmentation merges must still split at the WIDEST gap; internal
+    /// micro-gaps (fraction bar, sum limits) must never be the cut point.
+    #[test]
+    fn widest_gap_split() {
+        // Sparse ink (every 4th column) like real glyphs — a solid block would tip
+        // the mean over the dark-background polarity heuristic.
+        let block = |img: &mut GrayImage, y0: u32, y1: u32| {
+            for y in y0..=y1 {
+                for x in (0..img.width()).step_by(4) {
+                    img.put_pixel(x, y, Luma([0]));
+                }
+            }
+        };
+        // Two 60px lines, 12px gap: conservative segmentation merges (12 < 0.6×60),
+        // the rescue split cuts inside the gap (rows 60..71).
+        let mut two = GrayImage::from_pixel(300, 132, Luma([255]));
+        block(&mut two, 0, 59);
+        block(&mut two, 72, 131);
+        assert_eq!(segment_bands(&two).len(), 1, "conservative merges tight lines");
+        let (top, bottom) = split_at_widest_gap(&two).expect("splits at the 12px gap");
+        assert!((60..=72).contains(&top.height()), "cut inside the gap: {}", top.height());
+        assert_eq!(top.height() + bottom.height(), 132);
+        // A formula with an internal 5px gap (sum limits) and a 14px line gap: the
+        // widest gap wins, so the cut lands in the line gap, not inside the formula.
+        let mut mixed = GrayImage::from_pixel(300, 159, Luma([255]));
+        block(&mut mixed, 0, 39); // formula body
+        block(&mut mixed, 45, 65); // its limits, 5px internal gap
+        block(&mut mixed, 80, 158); // next line, 14px gap
+        let (t, _) = split_at_widest_gap(&mixed).expect("splits at the line gap");
+        assert!((66..=80).contains(&t.height()), "cut in the 14px gap: {}", t.height());
+        // Nothing to split → None (single band; micro-gaps below 4px).
+        let mut one = GrayImage::from_pixel(300, 60, Luma([255]));
+        block(&mut one, 0, 27);
+        block(&mut one, 30, 59); // 2px gap: below the 4px floor
+        assert!(split_at_widest_gap(&one).is_none(), "micro-gaps never split");
+    }
+
+    /// The structural gate that triggers the rescue: correct LaTeX passes, the
+    /// model's stacked-lines garbage (unbalanced braces, unclosed \begin) fails.
+    #[test]
+    fn latex_sanity() {
+        assert!(latex_is_sane(r"\frac{x^{2}}{a^{2}}-\frac{y^{2}}{b^{2}}=1"));
+        assert!(latex_is_sane(r"\begin{gathered} a=b \\ c=d \end{gathered}"));
+        assert!(latex_is_sane(r"\left\{x\right\}")); // escaped braces don't count
+        assert!(latex_is_sane(r"\{a\}+\|b\|"));
+        // The real garbage observed on a stacked two-line crop:
+        assert!(!latex_is_sane(r"\begin{array}{c}{{\displaystyle\frac{}{}\!\!\!\!\begin"));
+        assert!(!latex_is_sane(r"\frac{a}{b")); // unbalanced braces
+        assert!(!latex_is_sane(r"a}b{")); // premature close
+        assert!(!latex_is_sane(r"\begin{array}{c}x\\y")); // begin without end
+    }
+
     /// Spike: end-to-end recognition against a real image. Runs only when
     /// MATHOCR_DIR (models) and MATHOCR_TEST_IMG are set; otherwise a no-op.
     /// Prints model I/O specs and the recognized LaTeX (run with --nocapture).
@@ -869,11 +1053,33 @@ mod tests {
         eprintln!("[spike] resized to {w}x{h}");
         let (ctx, shape) = eng.encode(data, h, w).expect("encode");
         eprintln!("[spike] context shape {:?}", shape);
-        let ids = eng.decode(&ctx, &shape).expect("decode");
+        let (ids, terminated) = eng.decode(&ctx, &shape).expect("decode");
         let toks: Vec<u32> = ids.iter().skip(1).map(|&x| x as u32).collect();
         let raw = eng.tokenizer.decode(&toks, true).expect("detok");
+        eprintln!("[spike] terminated = {terminated}");
         eprintln!("[spike] raw   = {raw}");
         eprintln!("[spike] LATEX = {}", post_process(&raw));
+    }
+
+    /// Spike: the full single-mode entry point (`recognize`, multi=false) against a
+    /// real image — exercises the truncation rescue on stacked-line crops. Env-gated
+    /// like the other spikes.
+    #[test]
+    fn spike_recognize_single() {
+        let dir = match std::env::var("MATHOCR_DIR") {
+            Ok(d) => std::path::PathBuf::from(d),
+            Err(_) => return,
+        };
+        let img = match std::env::var("MATHOCR_TEST_IMG") {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        if !models_present(&dir) {
+            return;
+        }
+        let bytes = std::fs::read(&img).expect("read test image");
+        let out = recognize(&dir, &bytes, false).expect("recognize single");
+        eprintln!("[spike-single] LATEX =\n{out}");
     }
 
     /// Spike: multi-formula. Stacks MATHOCR_TEST_IMG over MATHOCR_TEST_IMG2 with a
