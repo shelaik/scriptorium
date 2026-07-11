@@ -31,6 +31,104 @@ export function textToLatex(s: string): string {
   return escapeLatex(body);
 }
 
+// ----- The rich-Markdown subset emitted by the region-text extractor -----
+// The backend renders extracted paper text as Markdown carrying only: `*italic*`,
+// `**bold**`, `***both***`, `<sup>…</sup>`, `<sub>…</sub>`, backslash escapes
+// (\* \_ \` \[ \\ and a guarded leading \# \> \- \+ \.) and the entities
+// &lt;/&amp;. The two converters below walk exactly that subset, so a formatted
+// extraction exports cleanly as plain text or LaTeX too.
+
+type RichMark = "***" | "**" | "*" | "<sup>" | "</sup>" | "<sub>" | "</sub>";
+const RICH_MARKS: readonly RichMark[] = ["<sup>", "</sup>", "<sub>", "</sub>", "***", "**", "*"];
+
+/** Tokenize the extractor's rich-Markdown into text pieces and style markers. */
+function walkRichMd(md: string, emit: { text: (t: string) => void; mark: (m: RichMark) => void }): void {
+  const s = md ?? "";
+  let i = 0;
+  let buf = "";
+  const flush = () => {
+    if (buf) emit.text(buf);
+    buf = "";
+  };
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "\\" && i + 1 < s.length) {
+      buf += s[i + 1]; // backslash escape → the literal character
+      i += 2;
+      continue;
+    }
+    if (s.startsWith("&lt;", i)) { buf += "<"; i += 4; continue; }
+    if (s.startsWith("&amp;", i)) { buf += "&"; i += 5; continue; }
+    const mark = RICH_MARKS.find((m) => s.startsWith(m, i));
+    if (mark) {
+      flush();
+      emit.mark(mark);
+      i += mark.length;
+      continue;
+    }
+    buf += c;
+    i += 1;
+  }
+  flush();
+}
+
+/** Strip the extractor's rich-Markdown down to plain text (markers removed,
+ *  escapes and entities resolved). */
+export function richMdToPlain(md: string): string {
+  let out = "";
+  walkRichMd(md, { text: (t) => (out += t), mark: () => {} });
+  return out;
+}
+
+/** Convert the extractor's rich-Markdown to LaTeX: italic/bold become
+ *  \textit/\textbf, sup/sub become \textsuperscript/\textsubscript, and the
+ *  text itself is LaTeX-escaped. */
+export function richMdToLatex(md: string): string {
+  let out = "";
+  const open: string[] = [];
+  const toggle = (cmd: string) => {
+    if (open[open.length - 1] === cmd) {
+      out += "}";
+      open.pop();
+    } else {
+      out += `\\${cmd}{`;
+      open.push(cmd);
+    }
+  };
+  walkRichMd(md.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(), {
+    text: (t) => (out += escapeLatex(t)),
+    mark: (m) => {
+      if (m === "*") toggle("textit");
+      else if (m === "**") toggle("textbf");
+      else if (m === "***") {
+        // Open/close both; closing order mirrors opening.
+        if (open[open.length - 1] === "textit" && open[open.length - 2] === "textbf") {
+          out += "}}";
+          open.pop();
+          open.pop();
+        } else {
+          out += "\\textbf{\\textit{";
+          open.push("textbf", "textit");
+        }
+      } else if (m === "<sup>") { out += "\\textsuperscript{"; open.push("sup"); }
+      else if (m === "<sub>") { out += "\\textsubscript{"; open.push("sub"); }
+      else if (m === "</sup>" || m === "</sub>") {
+        // Close only a matching opener: a stray closer (possible after a hand
+        // edit of the MD) must not emit an unbalanced brace.
+        if (open[open.length - 1] === (m === "</sup>" ? "sup" : "sub")) {
+          out += "}";
+          open.pop();
+        }
+      }
+    },
+  });
+  while (open.length) {
+    out += "}";
+    open.pop();
+  }
+  return out;
+}
+
 /** Render a table grid (rows of cells) as a `booktabs` table float. The first row
  *  is treated as the header when there is more than one row. Requires
  *  \usepackage{booktabs} in the document. */

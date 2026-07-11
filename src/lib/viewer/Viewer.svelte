@@ -19,8 +19,8 @@
   } from "$lib/api";
   import { printDocument } from "$lib/print";
   import { revealDocument } from "$lib/share";
-  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, writeBinaryFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, textFromImageAi, getAiSettings, aiListModels } from "$lib/api";
-  import { escapeLatex, textToLatex, tableToLatex, tableToMarkdown, tableToCsv } from "$lib/latex";
+  import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, writeBinaryFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, textFromImageAi, getAiSettings, aiListModels, extractTableModel, tablestructStatus } from "$lib/api";
+  import { escapeLatex, textToLatex, tableToLatex, tableToMarkdown, tableToCsv, richMdToPlain, richMdToLatex } from "$lib/latex";
   import { renderMathString } from "$lib/math";
   import { save } from "@tauri-apps/plugin-dialog";
   import ShareMenu from "$lib/ShareMenu.svelte";
@@ -175,7 +175,7 @@
   let tableGrid = $state<string[][]>([]);
   let aiCleaning = $state(false);
   // Table engine chosen in the modal: native (pdfium text) or a local vision LLM.
-  let tableEngine = $state<"native" | "ollama">("native");
+  let tableEngine = $state<"native" | "model" | "ollama">("native");
   let tableImg = $state(""); // cropped table image (data URL), for the vision engine
   let tableRegion: { x: number; y: number; w: number; h: number } | null = null;
   let tablePage = 0;
@@ -198,6 +198,9 @@
   let tableView = $state<"grid" | "latex">("grid");
   // Export format chosen in each modal (drives Copia / Salva / → Appunti).
   let textFormat = $state<"txt" | "latex" | "md">("txt");
+  // True when textContent is the native extractor's rich-Markdown (formatting
+  // markers to strip/convert per export format); false for vision-OCR plain text.
+  let textIsRich = $state(false);
   let tableFormat = $state<"md" | "latex" | "csv">("md");
   let formulaFormat = $state<"latex" | "md">("latex");
   // Figure extraction: drag a region, keep it as a PNG (save or embed in an appunto).
@@ -712,11 +715,20 @@
   }
   async function onTableUp() {
     const start = dragStart;
-    const rect = dragRect;
+    const rawRect = dragRect;
     dragStart = null;
     dragRect = null;
-    if (!start || !rect || rect.w < 8 || rect.h < 8) return;
+    if (!start || !rawRect || rawRect.w < 8 || rawRect.h < 8) return;
     const b = start.wrap.getBoundingClientRect();
+    // Clamp the drag to the page bounds ONCE, so the normalized region and the
+    // canvas crop describe the SAME rectangle even when the drag overshoots the
+    // page edge (the crop clamps internally; the region must match it).
+    const cx0 = Math.max(rawRect.x, b.left);
+    const cy0 = Math.max(rawRect.y, b.top);
+    const cx1 = Math.min(rawRect.x + rawRect.w, b.right);
+    const cy1 = Math.min(rawRect.y + rawRect.h, b.bottom);
+    if (cx1 - cx0 < 8 || cy1 - cy0 < 8) return; // nothing usable on the page
+    const rect = { x: cx0, y: cy0, w: cx1 - cx0, h: cy1 - cy0 };
     const page = Number(start.wrap.dataset.page);
     extractPage = Number.isFinite(page) ? page : null;
     const norm = [
@@ -808,6 +820,9 @@
         out = await extractRegionText(id, textPageId, textRegion);
       }
       if (textReq !== req) return;
+      // Only the native engine emits the rich-Markdown subset (italic/bold/sup/sub);
+      // the vision OCR returns plain prose that must never be de-escaped.
+      textIsRich = engine === "native";
       textContent = out;
     } catch (err) {
       if (textReq !== req) return;
@@ -821,6 +836,13 @@
   // ----- Unified format-aware export (Copia / Salva / → Appunti) for the modals -----
   /** The current text/table/formula rendered in the given export format. */
   function textOut(fmt: "txt" | "latex" | "md" = textFormat): string {
+    if (textIsRich) {
+      // Rich extraction: MD is the native form; the others are derived from it
+      // (formatting → \textit/\textsuperscript…, or stripped for plain text).
+      if (fmt === "latex") return richMdToLatex(textContent);
+      if (fmt === "txt") return richMdToPlain(textContent);
+      return textContent;
+    }
     return fmt === "latex" ? textToLatex(textContent) : textContent;
   }
   function tableOut(fmt: "md" | "latex" | "csv" = tableFormat): string {
@@ -885,9 +907,9 @@
   }
   function textToNote(e: MouseEvent) {
     textModal = false;
-    if (textFormat === "latex") sendFormatted(textToLatex(textContent), { code: "latex", label: "Testo (LaTeX) da" }, e);
-    else if (textFormat === "md") sendFormatted(textContent, { raw: true, label: "Testo da" }, e);
-    else sendFormatted(textContent, { label: "Testo da" }, e);
+    if (textFormat === "latex") sendFormatted(textOut("latex"), { code: "latex", label: "Testo (LaTeX) da" }, e);
+    else if (textFormat === "md") sendFormatted(textOut("md"), { raw: true, label: "Testo da" }, e);
+    else sendFormatted(textOut("txt"), { label: "Testo da" }, e);
   }
   function tableCopy() {
     copyFormatted(tableOut());
@@ -1114,7 +1136,7 @@
     }
   }
 
-  async function selectTableEngine(engine: "native" | "ollama") {
+  async function selectTableEngine(engine: "native" | "model" | "ollama") {
     tableEngine = engine; // highlight the picked toggle right away
     if (engine === "ollama") {
       tableLoading = true; // show progress while the model list loads
@@ -1125,7 +1147,7 @@
     runTable(engine);
   }
   /** (Re)build the extracted-table grid with the chosen engine. */
-  async function runTable(engine: "native" | "ollama" = tableEngine) {
+  async function runTable(engine: "native" | "model" | "ollama" = tableEngine) {
     const req = ++tableReq;
     tableEngine = engine;
     tableLoading = true;
@@ -1138,6 +1160,19 @@
         if (!tableImg) throw "Immagine della tabella non disponibile";
         if (!visionModel) throw "Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).";
         grid = await tableFromImageAi(tableImg, visionModel);
+      } else if (engine === "model") {
+        // TATR structure model: reads the crop IMAGE for rows/columns/spans, fills
+        // the cells with the PDF's own words (byte-exact, no OCR).
+        if (!tableImg || !tableRegion) throw "Immagine o regione della tabella non disponibile";
+        // The crop is in the ROTATED view frame while the PDF words live in the
+        // rotation-0 frame: mixing them would garble the grid. Known limitation.
+        if (rotation % 360 !== 0) throw "Il motore «Modello» non supporta la pagina ruotata: riporta la rotazione a 0°, oppure usa «Nativa» o «Ollama».";
+        const st = await tablestructStatus();
+        if (tableReq !== req) return; // superseded while awaiting
+        if (!st.ready) {
+          setNotice(`Primo uso: scarico il modello struttura tabelle (~${st.downloadMb} MB), attendi…`);
+        }
+        grid = await extractTableModel(tableImg, id, tablePage, tableRegion);
       } else {
         if (!tableRegion) throw "Regione non disponibile";
         grid = await extractTable(id, tablePage, tableRegion);
@@ -2419,8 +2454,9 @@
         <div class="tablehd">
           <strong>Tabella estratta</strong>
           <div class="viewtoggle" title="Motore di estrazione">
-            <button class:on={tableEngine === "native"} onclick={() => selectTableEngine("native")} title="Estrazione nativa dal testo del PDF">Nativa</button>
-            <button class:on={tableEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectTableEngine("ollama")} title={aiEnabled ? "Estrai con un modello di visione locale (Ollama / LM Studio)" : "Abilita l'AI locale nelle Impostazioni per usare Ollama"}>Ollama</button>
+            <button class:on={tableEngine === "native"} onclick={() => selectTableEngine("native")} title="Euristica veloce sul testo del PDF (tabelle semplici)">Nativa</button>
+            <button class:on={tableEngine === "model"} onclick={() => selectTableEngine("model")} title="Modello struttura tabelle (TATR, locale): righe/colonne/intestazioni riconosciute dall'immagine, testo esatto dal PDF — il migliore per le tabelle dei paper (~111 MB al primo uso)">Modello</button>
+            <button class:on={tableEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectTableEngine("ollama")} title={aiEnabled ? "Estrai con un modello di visione locale (Ollama / LM Studio) — utile su pagine scansionate" : "Abilita l'AI locale nelle Impostazioni per usare Ollama"}>Ollama</button>
           </div>
           {#if tableEngine === "ollama"}{@render vmodelSelect("table")}{/if}
           {#if !tableLoading && tableGrid.length}
@@ -2503,9 +2539,14 @@
           {:else if !textContent.trim()}
             <p class="tdim">Nessun testo riconosciuto nell'area selezionata. Se il PDF è scansionato, prova il motore «Ollama» (OCR con un modello di visione).</p>
           {:else if textFormat === "latex"}
-            <pre class="latexview">{textToLatex(textContent)}</pre>
+            <pre class="latexview">{textOut("latex")}</pre>
+          {:else if textFormat === "txt"}
+            <textarea class="exttext" value={textOut("txt")} oninput={(e) => { textContent = e.currentTarget.value; textIsRich = false; }} spellcheck="false" title="Testo semplice (formattazione rimossa). Passa a MD per vedere/correggere corsivi, apici e pedici."></textarea>
           {:else}
-            <textarea class="exttext" bind:value={textContent} spellcheck="false"></textarea>
+            <textarea class="exttext" bind:value={textContent} spellcheck="false" title={textIsRich ? "Markdown con la formattazione del PDF: *corsivo*, **grassetto**, <sup>apici</sup>, <sub>pedici</sub> — modificabile" : "Testo estratto — modificabile"}></textarea>
+          {/if}
+          {#if !textLoading && textIsRich && /((^|[^\\])\*|<su[bp]>)/.test(textContent)}
+            <p class="tdim richnote">Formattazione del PDF rilevata (corsivo, grassetto, apici/pedici): conservata negli export MD e LaTeX, rimossa in «Testo».</p>
           {/if}
         </div>
       </div>
@@ -2843,6 +2884,7 @@
   .viewtoggle { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
   .viewtoggle button { flex: 0 0 auto; white-space: nowrap; border: none; border-radius: 0; padding: 4px 10px; font-size: 12px; }
   .viewtoggle button.on, .viewtoggle button.on:hover { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+  .richnote { margin: 6px 2px 0; font-size: 11px; }
   .latexview {
     width: 100%; min-height: 320px; max-height: 62vh; box-sizing: border-box; margin: 0;
     overflow: auto; white-space: pre-wrap; word-break: break-word;

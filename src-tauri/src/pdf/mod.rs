@@ -102,7 +102,9 @@ pub fn extract_pages(pdfium: &Pdfium, path: &Path) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// A word with its bounding box, normalized to 0..1 in the page's top-left frame.
+/// A word with its bounding box, normalized to 0..1 in the page's top-left frame,
+/// plus the character style needed to reconstruct paper formatting (italic/bold
+/// runs, superscript citation markers, subscripts in chemical formulas).
 #[derive(Debug, Clone)]
 pub struct PdfWord {
     pub text: String,
@@ -110,6 +112,13 @@ pub struct PdfWord {
     pub y0: f32,
     pub x1: f32,
     pub y1: f32,
+    pub italic: bool,
+    pub bold: bool,
+    /// Scaled font size in PDF points (0 when unknown).
+    pub size: f32,
+    /// Baseline in PDF points, flipped to a top-left origin (`ph - origin_y`);
+    /// NaN when pdfium can't report it. Smaller = higher on the page.
+    pub baseline: f32,
 }
 
 /// Extract words (with positions) inside a normalized region `[rx, ry, rw, rh]`
@@ -133,19 +142,28 @@ pub fn extract_region_words(
     let [rx, ry, rw, rh] = region;
 
     let mut words: Vec<PdfWord> = Vec::new();
-    // Current word accumulator.
+    // Current word accumulator (text + geometry + style of its first character).
     let mut cur = String::new();
     let (mut wx0, mut wy0, mut wx1, mut wy1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    let (mut w_italic, mut w_bold) = (false, false);
+    let mut w_size = 0f32;
+    let mut w_base = f32::NAN;
     let mut prev_x1 = f32::NAN;
     let mut prev_cy = f32::NAN;
 
-    let flush = |cur: &mut String, words: &mut Vec<PdfWord>, x0: f32, y0: f32, x1: f32, y1: f32| {
+    #[allow(clippy::too_many_arguments)]
+    fn flush(
+        cur: &mut String,
+        words: &mut Vec<PdfWord>,
+        x0: f32, y0: f32, x1: f32, y1: f32,
+        italic: bool, bold: bool, size: f32, baseline: f32,
+    ) {
         let t = cur.trim();
         if !t.is_empty() && x1 > x0 {
-            words.push(PdfWord { text: t.to_string(), x0, y0, x1, y1 });
+            words.push(PdfWord { text: t.to_string(), x0, y0, x1, y1, italic, bold, size, baseline });
         }
         cur.clear();
-    };
+    }
 
     for ch in text.chars().iter() {
         let c = ch.unicode_char().unwrap_or(' ');
@@ -161,19 +179,48 @@ pub fn extract_region_words(
         let inside = ccx >= rx && ccx <= rx + rw && ccy >= ry && ccy <= ry + rh;
 
         if c.is_whitespace() || !inside {
-            flush(&mut cur, &mut words, wx0, wy0, wx1, wy1);
+            flush(&mut cur, &mut words, wx0, wy0, wx1, wy1, w_italic, w_bold, w_size, w_base);
             wx0 = f32::MAX; wy0 = f32::MAX; wx1 = f32::MIN; wy1 = f32::MIN;
             prev_x1 = f32::NAN;
             prev_cy = f32::NAN;
             continue;
         }
-        // Break the word on a new line or a wide horizontal gap (column boundary).
+        // Character style. Flags are the cheap primary signal; the font NAME is the
+        // fallback (many paper fonts don't set the descriptor flags but are named
+        // "…-Italic"/"…-Bold"). Weight >= 600 also counts as bold.
+        let name = ch.font_name().to_ascii_lowercase();
+        let c_italic = ch.font_is_italic() || name.contains("italic") || name.contains("oblique");
+        let c_bold = ch.font_is_bold_reenforced()
+            || name.contains("bold")
+            || matches!(
+                ch.font_weight(),
+                Some(PdfFontWeight::Weight600)
+                    | Some(PdfFontWeight::Weight700Bold)
+                    | Some(PdfFontWeight::Weight800)
+                    | Some(PdfFontWeight::Weight900)
+            );
+        let c_size = ch.scaled_font_size().value;
+        let c_base = ch.origin_y().map(|oy| ph - oy.value).unwrap_or(f32::NAN);
+
+        // Break the word on a new line, a wide horizontal gap (column boundary), or
+        // a STYLE change — so every emitted word is style-pure ("E=mc" + sup "2").
         let h = (cy1 - cy0).max(0.001);
-        if !prev_x1.is_nan()
-            && ((cx0 - prev_x1) > 0.4 * h || (ccy - prev_cy).abs() > 0.6 * h)
+        let style_broke = !cur.is_empty()
+            && (c_italic != w_italic
+                || c_bold != w_bold
+                || (w_size > 0.0 && (c_size - w_size).abs() > 0.2 * w_size));
+        if style_broke
+            || (!prev_x1.is_nan()
+                && ((cx0 - prev_x1) > 0.4 * h || (ccy - prev_cy).abs() > 0.6 * h))
         {
-            flush(&mut cur, &mut words, wx0, wy0, wx1, wy1);
+            flush(&mut cur, &mut words, wx0, wy0, wx1, wy1, w_italic, w_bold, w_size, w_base);
             wx0 = f32::MAX; wy0 = f32::MAX; wx1 = f32::MIN; wy1 = f32::MIN;
+        }
+        if cur.is_empty() {
+            w_italic = c_italic;
+            w_bold = c_bold;
+            w_size = c_size;
+            w_base = c_base;
         }
         cur.push(c);
         wx0 = wx0.min(cx0);
@@ -183,7 +230,7 @@ pub fn extract_region_words(
         prev_x1 = cx1;
         prev_cy = ccy;
     }
-    flush(&mut cur, &mut words, wx0, wy0, wx1, wy1);
+    flush(&mut cur, &mut words, wx0, wy0, wx1, wy1, w_italic, w_bold, w_size, w_base);
     Ok(words)
 }
 
@@ -221,6 +268,18 @@ mod tests {
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.pdf")
+    }
+
+    /// Spike: rich-formatted extraction against a REAL paper. Env-gated
+    /// (RICH_TEST_PDF, optional RICH_TEST_PAGE 0-based); prints the Markdown.
+    #[test]
+    fn spike_rich_region() -> Result<()> {
+        let Ok(pdf) = std::env::var("RICH_TEST_PDF") else { return Ok(()) };
+        let page: u16 = std::env::var("RICH_TEST_PAGE").ok().and_then(|p| p.parse().ok()).unwrap_or(0);
+        let words = extract_region_words(test_pdfium(), Path::new(&pdf), page, [0.0, 0.0, 1.0, 1.0])?;
+        eprintln!("[rich] {} words", words.len());
+        eprintln!("{}", crate::table::join_text_rich(&words));
+        Ok(())
     }
 
     #[test]

@@ -62,98 +62,23 @@ const LEGACY_FILES: [&str; 3] = ["encoder.onnx", "decoder.onnx", "image_resizer.
 
 /// True when every model file is present at its expected size.
 pub fn models_present(dir: &Path) -> bool {
-    MODELS.iter().all(|(name, _, size)| {
-        std::fs::metadata(dir.join(name))
-            .map(|m| m.len() == *size)
-            .unwrap_or(false)
-    })
+    crate::dl::all_present(dir, &MODELS)
 }
 
 /// Total download size (bytes) still missing — for a user-facing message.
 pub fn missing_bytes(dir: &Path) -> u64 {
-    MODELS
-        .iter()
-        .filter(|(name, _, size)| {
-            std::fs::metadata(dir.join(name))
-                .map(|m| m.len() != *size)
-                .unwrap_or(true)
-        })
-        .map(|(_, _, size)| *size)
-        .sum()
+    crate::dl::missing_bytes(dir, &MODELS)
 }
 
 /// Download any missing / incomplete model file. Network IO, so it's async and
-/// Serializes concurrent downloads (two overlapping recognitions must not race on
-/// the same files) — async mutex, held across the awaits.
-static DL_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
-/// Unique temp-file suffix per attempt, so a stray concurrent writer can never
-/// clobber another attempt's `.part` file.
-static DL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Download any missing / incomplete model file. Uses its OWN client: no total
-/// request deadline (a fixed one would make big files impossible on slow links),
-/// only a connect timeout plus a per-chunk stall guard; the body is streamed to a
-/// uniquely-named `.part` file (flat memory) and renamed once the size checks out,
-/// so an interrupted download never looks complete.
+/// Download any missing / incomplete model file (shared plumbing in [`crate::dl`]:
+/// pinned URLs, streaming, stall guard, size check, global download lock).
 pub async fn ensure_models(dir: &Path, _client: &reqwest::Client) -> Result<()> {
-    let _guard = DL_LOCK.lock().await;
-    std::fs::create_dir_all(dir).ok();
     // Reclaim the previous engine's weights (best-effort).
     for name in LEGACY_FILES {
         let _ = std::fs::remove_file(dir.join(name));
     }
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::limited(4))
-        .build()
-        .context("client di download")?;
-    for (name, url, size) in MODELS.iter() {
-        let path = dir.join(name);
-        if std::fs::metadata(&path).map(|m| m.len() == *size).unwrap_or(false) {
-            continue; // downloaded by us or by the attempt that held the lock first
-        }
-        let mut resp = client
-            .get(*url)
-            .send()
-            .await
-            .with_context(|| format!("scarico {name}"))?;
-        if !resp.status().is_success() {
-            anyhow::bail!("scarico {name}: HTTP {}", resp.status());
-        }
-        let seq = DL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = dir.join(format!("{name}.part{seq}"));
-        let write_res: Result<u64> = async {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&tmp).with_context(|| format!("creo {name}"))?;
-            let mut written: u64 = 0;
-            loop {
-                // Stall guard: a chunk must arrive within 60s (slow is fine, dead is not).
-                let chunk = tokio::time::timeout(std::time::Duration::from_secs(60), resp.chunk())
-                    .await
-                    .map_err(|_| anyhow!("scarico {name}: connessione interrotta (nessun dato per 60s)"))?
-                    .with_context(|| format!("leggo {name}"))?;
-                let Some(chunk) = chunk else { break };
-                file.write_all(&chunk).with_context(|| format!("salvo {name}"))?;
-                written += chunk.len() as u64;
-            }
-            file.flush().ok();
-            Ok(written)
-        }
-        .await;
-        let written = match write_res {
-            Ok(w) => w,
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e);
-            }
-        };
-        if *size != 0 && written != *size {
-            let _ = std::fs::remove_file(&tmp);
-            anyhow::bail!("{name}: dimensione inattesa ({written} invece di {size} byte)");
-        }
-        std::fs::rename(&tmp, &path).with_context(|| format!("rinomino {name}"))?;
-    }
-    Ok(())
+    crate::dl::fetch(dir, &MODELS).await
 }
 
 /// The loaded ONNX sessions + tokenizer, plus the introspected input/output names

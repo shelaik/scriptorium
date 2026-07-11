@@ -146,6 +146,26 @@ export const formulaToLatexAi = (imageBase64: string, model: string, multi = fal
 /** Extract a cropped table image into a grid via a local vision LLM. */
 export const tableFromImageAi = (imageBase64: string, model: string) =>
   invoke<string[][]>("table_from_image_ai", { imageBase64, model });
+/** Extract a table with the local STRUCTURE model (TATR): rows/columns/spanning
+ *  cells from the crop image, cell text byte-exact from the PDF's own words. */
+export const extractTableModel = (
+  imageBase64: string,
+  id: number,
+  page: number,
+  rect: { x: number; y: number; w: number; h: number },
+) =>
+  invoke<string[][]>("extract_table_model", {
+    imageBase64,
+    id,
+    page,
+    x: rect.x,
+    y: rect.y,
+    w: rect.w,
+    h: rect.h,
+  });
+/** Whether the table-structure model is ready, and MB to download if not. */
+export const tablestructStatus = () =>
+  invoke<{ ready: boolean; downloadMb: number }>("tablestruct_status");
 /** OCR a cropped text region via a local vision LLM (for scanned pages). */
 export const textFromImageAi = (imageBase64: string, model: string) =>
   invoke<string>("text_from_image_ai", { imageBase64, model });

@@ -5,6 +5,7 @@ mod commands;
 mod connector;
 mod db;
 mod discovery;
+mod dl;
 mod embed;
 mod github;
 mod import;
@@ -18,6 +19,7 @@ mod ocr;
 mod rag;
 mod secret;
 mod table;
+mod tablestruct;
 mod pdf;
 mod term;
 mod watch;
@@ -220,6 +222,8 @@ pub fn run() {
             commands::github_repos,
             commands::github_readme,
             commands::extract_table,
+            commands::extract_table_model,
+            commands::tablestruct_status,
             commands::export_table,
             commands::ai_clean_table,
             commands::extract_region_text,

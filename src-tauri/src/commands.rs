@@ -17,6 +17,7 @@ use crate::pdf;
 use crate::rag;
 use crate::secret;
 use crate::table;
+use crate::tablestruct;
 use crate::term;
 use crate::wiki;
 use crate::model::{Annotation, Collection, Document, EditableMeta, ImportSummary, Tag};
@@ -3290,8 +3291,10 @@ pub fn extract_table(
     Ok(table::reconstruct(&words))
 }
 
-/// Extract the plain text of a normalized region `[x,y,w,h]` (rotation-0 frame)
-/// of page `page` (1-based), as readable lines.
+/// Extract the text of a normalized region `[x,y,w,h]` (rotation-0 frame) of page
+/// `page` (1-based), as readable lines in a small Markdown subset that carries the
+/// paper's formatting: `*italic*`, `**bold**`, `<sup>`/`<sub>` for citation
+/// markers and chemical formulas. The frontend derives plain text / LaTeX from it.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn extract_region_text(
@@ -3315,7 +3318,7 @@ pub fn extract_region_text(
         [x, y, w, h],
     )
     .map_err(|e| e.to_string())?;
-    Ok(table::join_text(&words))
+    Ok(table::join_text_rich(&words))
 }
 
 /// Directory where the formula-OCR (pix2tex) models are cached. Downloaded once
@@ -3325,6 +3328,102 @@ fn mathocr_dir(app: &AppHandle) -> PathBuf {
         .app_data_dir()
         .map(|d| d.join("mathocr"))
         .unwrap_or_else(|_| std::env::temp_dir().join("pdfmanage_mathocr"))
+}
+
+/// Directory where the table-structure model (TATR) is cached — same first-use
+/// download pattern as the formula OCR.
+fn tablestruct_dir(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .map(|d| d.join("tablestruct"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("pdfmanage_tablestruct"))
+}
+
+/// Whether the table-structure model is present, and the MB a first extraction
+/// would download otherwise.
+#[tauri::command]
+pub fn tablestruct_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    let dir = tablestruct_dir(&app);
+    let missing = tablestruct::missing_bytes(&dir);
+    Ok(serde_json::json!({
+        "ready": missing == 0,
+        "downloadMb": missing.div_ceil(1024 * 1024),
+    }))
+}
+
+/// Extract a table from a region using the STRUCTURE MODEL (TATR): the model reads
+/// the cropped image and predicts rows/columns/spanning cells; the cell text comes
+/// from pdfium's word boxes intersected with that grid — byte-exact, no OCR. The
+/// image must be the crop of exactly the normalized region `[x,y,w,h]`.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn extract_table_model(
+    app: AppHandle,
+    image_base64: String,
+    id: i64,
+    page: u16,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Result<Vec<Vec<String>>, String> {
+    let dir = tablestruct_dir(&app);
+    if !tablestruct::models_present(&dir) {
+        tablestruct::ensure_models(&dir)
+            .await
+            .map_err(|e| format!("scarico modello tabelle: {e}"))?;
+    }
+    let b64 = strip_data_url(&image_base64);
+    let bytes = BASE64_STANDARD
+        .decode(b64)
+        .map_err(|e| format!("immagine non valida: {e}"))?;
+
+    // Words of the SAME region, converted to region-relative coordinates.
+    let path = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        resolve_existing_path(&conn, id)?
+    };
+    let path = path.ok_or_else(|| "Questo elemento non ha un file PDF".to_string())?;
+    let words = {
+        let state = app.state::<AppState>();
+        pdf::extract_region_words(&state.pdfium, Path::new(&path), page.saturating_sub(1), [x, y, w, h])
+            .map_err(|e| e.to_string())?
+    };
+    if words.is_empty() {
+        return Err(
+            "Nessun testo nel PDF in quest'area (pagina scansionata?): il modello struttura \
+             ha bisogno del testo del PDF per riempire le celle — usa il motore «Ollama»."
+                .to_string(),
+        );
+    }
+    let rw = w.max(f32::MIN_POSITIVE);
+    let rh = h.max(f32::MIN_POSITIVE);
+    let wboxes: Vec<tablestruct::WordBox> = words
+        .into_iter()
+        .map(|wd| tablestruct::WordBox {
+            text: wd.text,
+            x0: (wd.x0 - x) / rw,
+            y0: (wd.y0 - y) / rh,
+            x1: (wd.x1 - x) / rw,
+            y1: (wd.y1 - y) / rh,
+        })
+        .collect();
+
+    let grid = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Vec<String>>, String> {
+        let dets = tablestruct::recognize(&dir, &bytes).map_err(|e| e.to_string())?;
+        Ok(tablestruct::assemble_grid(&dets, &wboxes))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if grid.is_empty() {
+        return Err(
+            "Il modello non ha riconosciuto una struttura di tabella in quest'area: \
+             restringi la selezione alla sola tabella, o prova il motore «Nativa»."
+                .to_string(),
+        );
+    }
+    Ok(grid)
 }
 
 /// Whether the formula→LaTeX models are already present, and if not, how many MB
