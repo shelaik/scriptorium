@@ -30,10 +30,12 @@
   const HUB = 46; // raggio del mozzo (px): dimensione visiva e zona di hit coincidono
   const MARGIN = 14;
   const LABEL_W = 170; // deve combaciare con max-width di .label nel blocco di stile
-  const PAD_X = 44 + LABEL_W + 8; // offset etichetta laterale + larghezza + respiro
-  const PAD_Y = 132; // etichette sopra/sotto + chip del titolo + barra dell'hint (fino a 3 righe)
-  const MIN_ARC = 68; // distanza minima fra i centri di due petali adiacenti (i petali sono 54px)
-  const LABEL_GAP = 30; // distacco verticale minimo fra i CENTRI di due etichette (~23px di scatola)
+  const MIN_ARC = 76; // distanza minima fra i centri di due petali adiacenti (i petali sono 54px)
+  const LABEL_D = 41; // distanza base petalo→ancora dell'etichetta lungo il raggio (27 petalo + 14 aria)
+  const FLARE = 34; // vicino ai poli l'etichetta esce PIÙ lontano lungo il raggio (svasatura)
+  const LABEL_GAP = 32; // distacco verticale minimo fra i CENTRI di due etichette (~23px di scatola)
+  const PAD_X = LABEL_D + LABEL_W + 8; // sporgenza orizzontale delle etichette oltre R
+  const PAD_Y = 172; // sporgenza verticale: etichette svasate + chip titolo + barra hint adattiva
 
   let el = $state<HTMLDivElement | null>(null);
   let stack = $state.raw<RadialItem[][]>([]); // solo sotto-anelli; la radice è `items`
@@ -127,34 +129,67 @@
   const cx = $derived(clampC(x, MARGIN + R + PAD_X, vw - MARGIN - R - PAD_X));
   const cy = $derived(clampC(y, MARGIN + R + PAD_Y, vh - MARGIN - R - PAD_Y));
 
-  type Geo = { p: Petal; tx: number; ty: number; hem: "r" | "l" | "t" | "b"; dy: number };
+  // Etichette a callout radiale: ogni etichetta è ancorata LUNGO il raggio del
+  // suo petalo (vicino ai poli esce più lontano: svasatura FLARE, così le
+  // etichette laterali partono oltre quella centrata del polo) e un raggio
+  // disegnato collega il petalo all'etichetta. hem: r = ancorata al bordo
+  // sinistro (cresce a destra), l = al bordo destro, c = centrata (poli).
+  type Geo = {
+    p: Petal;
+    tx: number;
+    ty: number;
+    hem: "r" | "l" | "c";
+    lx: number; // ancora etichetta (coordinate stage, dy già escluso)
+    ly: number;
+    dy: number; // scostamento verticale anti-collisione
+    rx1: number; // raggio petalo→etichetta
+    ry1: number;
+    rx2: number;
+    ry2: number;
+  };
   const geo = $derived.by<Geo[]>(() => {
     const gs: Geo[] = ring.map((p, i) => {
       const rad = ((-90 + (i * 360) / Math.max(ring.length, 1)) * Math.PI) / 180;
       const cos = Math.cos(rad);
       const sin = Math.sin(rad);
+      const d = R + LABEL_D + FLARE * sin * sin;
       return {
         p,
         tx: R * cos,
         ty: R * sin,
-        // soglia stretta: quasi tutte le etichette si ancorano di lato
-        hem: Math.abs(cos) <= 0.16 ? (sin < 0 ? "t" : "b") : cos > 0 ? "r" : "l",
+        hem: Math.abs(cos) <= 0.16 ? "c" : cos > 0 ? "r" : "l",
+        lx: d * cos,
+        ly: d * sin,
         dy: 0,
+        rx1: (R + 28) * cos,
+        ry1: (R + 28) * sin,
+        rx2: 0,
+        ry2: 0,
       };
     });
-    // Anti-collisione etichette (come nei grafici a torta): per ciascun lato,
-    // impila le etichette dall'alto imponendo un distacco minimo, poi ricentra
-    // il gruppo così lo scostamento medio è nullo. `dy` = spostamento verticale
-    // dell'etichetta rispetto al suo petalo (una lineetta la ricollega se serve).
+    // Anti-collisione (come nei grafici a torta): per lato, impila le ancore
+    // dall'alto imponendo un distacco minimo, poi ricentra il gruppo.
     for (const side of ["r", "l"] as const) {
-      const grp = gs.filter((g) => g.hem === side).sort((a, b) => a.ty - b.ty);
+      const grp = gs.filter((g) => g.hem === side).sort((a, b) => a.ly - b.ly);
       if (grp.length < 2) continue;
       const pos: number[] = [];
       for (let i = 0; i < grp.length; i++) {
-        pos.push(i === 0 ? grp[i].ty : Math.max(pos[i - 1] + LABEL_GAP, grp[i].ty));
+        pos.push(i === 0 ? grp[i].ly : Math.max(pos[i - 1] + LABEL_GAP, grp[i].ly));
       }
-      const drift = pos.reduce((s, v, i) => s + (v - grp[i].ty), 0) / grp.length;
-      for (let i = 0; i < grp.length; i++) grp[i].dy = pos[i] - drift - grp[i].ty;
+      const drift = pos.reduce((s, v, i) => s + (v - grp[i].ly), 0) / grp.length;
+      for (let i = 0; i < grp.length; i++) grp[i].dy = pos[i] - drift - grp[i].ly;
+    }
+    // Estremo del raggio: si ferma poco prima dell'etichetta (che può essere
+    // stata scostata di dy), così la linea "insegue" la sua etichetta.
+    for (const g of gs) {
+      const ex = g.lx;
+      const ey = g.ly + g.dy;
+      const ddx = ex - g.rx1;
+      const ddy = ey - g.ry1;
+      const len = Math.hypot(ddx, ddy) || 1;
+      const pull = g.hem === "c" ? 16 : 6;
+      g.rx2 = ex - (pull * ddx) / len;
+      g.ry2 = ey - (pull * ddy) / len;
     }
     return gs;
   });
@@ -412,12 +447,30 @@
       <circle cx={R + 2} cy={R + 2} r={R} />
     </svg>
 
-    <div class="chip" style="top:{-(R + 72)}px">
+    <div class="chip" style="top:{-(R + 96)}px">
       <span class="chipTitle">{title}</span>
       {#if subtitle}<span class="chipSub">{subtitle}</span>{/if}
     </div>
 
     {#key ringId}
+      <svg
+        class="rays"
+        width={(R + 120) * 2}
+        height={(R + 120) * 2}
+        style="left:{-(R + 120)}px; top:{-(R + 120)}px"
+        aria-hidden="true"
+      >
+        {#each geo as g, i (g.p.item.id)}
+          <line
+            x1={g.rx1 + R + 120}
+            y1={g.ry1 + R + 120}
+            x2={g.rx2 + R + 120}
+            y2={g.ry2 + R + 120}
+            class:hi={hi === i}
+            class:off={g.p.item.disabled}
+          />
+        {/each}
+      </svg>
       <div class="ringbox">
         {#each geo as g, i (g.p.item.id)}
           <div
@@ -454,27 +507,11 @@
                 </span>
               {/if}
             </div>
-            {#if Math.abs(g.dy) > 10 && (g.hem === "r" || g.hem === "l")}
-              <svg
-                class="leader {g.hem}"
-                width="12"
-                height={Math.abs(g.dy) + 4}
-                style="top:{Math.min(0, g.dy) - 2}px"
-                aria-hidden="true"
-              >
-                <line
-                  x1={g.hem === "r" ? 1 : 11}
-                  y1={g.dy > 0 ? 2 : Math.abs(g.dy) + 2}
-                  x2={g.hem === "r" ? 11 : 1}
-                  y2={g.dy > 0 ? Math.abs(g.dy) + 2 : 2}
-                />
-              </svg>
-            {/if}
             <div
               class="label"
               class:hi={hi === i}
               class:danger={g.p.item.danger}
-              style="--dy:{g.dy}px"
+              style="--lx:{g.lx - g.tx}px; --ly:{g.ly - g.ty + g.dy}px"
             >
               {g.p.label}
             </div>
@@ -498,9 +535,9 @@
       {/if}
     </div>
 
-    <!-- top: sotto l'etichetta della voce a ore 6 (che arriva a R+62) -->
+    <!-- top: sotto l'etichetta svasata della voce a ore 6 (che arriva a ~R+87) -->
     {#if hintText}
-      <div class="hintbar" style="top:{R + 72}px">{hintText}</div>
+      <div class="hintbar" style="top:{R + 96}px">{hintText}</div>
     {/if}
 
     {#if query}
@@ -605,31 +642,32 @@
   .check.alt { right: auto; left: 1px; }
   .check svg { width: 5px; height: 5px; fill: none; stroke: var(--on-accent); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
 
-  /* etichette fuori dal petalo, per emisfero; --dy = scostamento anti-collisione */
+  /* etichette a callout radiale: ancora (--lx/--ly) calcolata nello script,
+     allineamento per emisfero (r cresce a destra, l a sinistra, c centrata) */
   .label {
-    position: absolute; font-size: 13px; line-height: 1.25; color: var(--text);
-    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    position: absolute; left: var(--lx, 0px); top: var(--ly, 0px);
+    font-size: 13px; line-height: 1.25; color: var(--text);
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
     backdrop-filter: blur(6px);
     border: 1px solid var(--border-soft);
     box-shadow: var(--shadow-sm);
-    padding: 2.5px 10px; border-radius: var(--r-pill);
+    padding: 3px 10px; border-radius: var(--r-pill);
     white-space: nowrap; max-width: 170px; /* combacia con LABEL_W nello script */
     overflow: hidden; text-overflow: ellipsis;
     pointer-events: auto; cursor: pointer;
     transition: color var(--ease);
   }
-  .wrap.r .label { left: 39px; top: var(--dy, 0px); transform: translateY(-50%); }
-  .wrap.l .label { right: 39px; top: var(--dy, 0px); transform: translateY(-50%); }
-  .wrap.t .label { bottom: 39px; left: 0; transform: translateX(-50%); }
-  .wrap.b .label { top: 39px; left: 0; transform: translateX(-50%); }
+  .wrap.r .label { transform: translateY(-50%); }
+  .wrap.l .label { transform: translate(-100%, -50%); }
+  .wrap.c .label { transform: translate(-50%, -50%); }
   .label.hi { color: var(--accent); font-weight: 700; border-color: var(--accent-soft2); }
   .label.danger { color: var(--danger); }
 
-  /* lineetta che ricollega un'etichetta scostata al suo petalo */
-  .leader { position: absolute; pointer-events: none; overflow: visible; }
-  .leader.r { left: 27px; }
-  .leader.l { right: 27px; }
-  .leader line { stroke: var(--faint); stroke-width: 1; opacity: 0.55; }
+  /* raggi petalo→etichetta (sotto i petali, sopra la guida tratteggiata) */
+  .rays { position: absolute; pointer-events: none; overflow: visible; animation: fade 170ms ease-out both; }
+  .rays line { stroke: var(--faint); stroke-width: 1; opacity: 0.45; transition: stroke var(--ease), opacity var(--ease); }
+  .rays line.hi { stroke: var(--accent); stroke-width: 1.5; opacity: 0.95; }
+  .rays line.off { opacity: 0.15; }
 
   /* mozzo */
   .hub {
@@ -653,14 +691,14 @@
   /* descrizione della voce evidenziata: barra leggibile sotto l'anello */
   .hintbar {
     position: absolute; left: 0; transform: translateX(-50%);
-    font-size: 12.5px; line-height: 1.4; color: var(--dim); text-align: center;
-    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    font-size: 13px; line-height: 1.45; color: var(--dim); text-align: center;
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
     backdrop-filter: blur(8px);
     border: 1px solid var(--border-soft); border-radius: var(--r-md);
-    box-shadow: var(--shadow-sm);
-    padding: 6px 16px; max-width: min(460px, calc(100vw - 28px));
-    /* mai troncare la spiegazione: va a capo (il clamp a 4 è solo estremo) */
-    display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+    box-shadow: var(--shadow-md);
+    padding: 8px 18px;
+    /* si adatta al testo della voce corrente: cresce fino al massimo, poi va a capo — mai troncato */
+    width: max-content; max-width: min(560px, calc(100vw - 28px));
     pointer-events: none; animation: fade 120ms ease-out both;
   }
 
@@ -682,7 +720,7 @@
   @keyframes blink { 50% { opacity: 0; } }
 
   @media (prefers-reduced-motion: reduce) {
-    .overlay, .wrap, .hub, .chip, .hintbar { animation: none !important; }
+    .overlay, .wrap, .hub, .chip, .hintbar, .rays { animation: none !important; }
     .qpill::after { animation: none; }
     .stage, .chip, .petal, .label, .guide circle { transition: none; }
     .petal.hi { transform: none; }
