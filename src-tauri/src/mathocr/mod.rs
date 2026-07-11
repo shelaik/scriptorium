@@ -1,16 +1,18 @@
 //! Formula OCR: an image of a mathematical equation -> LaTeX.
 //!
-//! A faithful Rust port of the pix2tex / LaTeX-OCR ONNX pipeline (as packaged by
-//! RapidAI/RapidLaTeXOCR): a ViT-with-ResNet-backbone encoder produces a context
-//! sequence, and a Transformer decoder autoregressively emits LaTeX tokens.
+//! Runs Pix2Text MFR 1.5 (MIT, breezedeus/pix2text-mfr-1.5): a DeiT encoder over a
+//! fixed 384×384 input produces a context sequence, and a TrOCR decoder
+//! autoregressively emits LaTeX tokens. Trained on printed AND handwritten
+//! formulas including matrices/multi-line — a large quality step over the previous
+//! pix2tex/LaTeX-OCR model (kept the same download-on-first-use plumbing).
 //!
 //! The ONNX Runtime is the very one already linked statically into the binary via
-//! `fastembed` (bge-m3), so this adds no runtime and no extra DLL. The ~140 MB of
+//! `fastembed` (bge-m3), so this adds no runtime and no extra DLL. The ~114 MB of
 //! model weights are NOT bundled: they are downloaded once, on first use, into
 //! `app_data/mathocr/` — the same "fetch on demand" pattern as the embeddings.
 //!
-//! Reference: <https://github.com/RapidAI/RapidLaTeXOCR> (Apache-2.0) /
-//! <https://github.com/lukas-blecher/LaTeX-OCR> (MIT).
+//! Reference: <https://huggingface.co/breezedeus/pix2text-mfr-1.5> (MIT) /
+//! <https://github.com/breezedeus/Pix2Text> (MIT).
 
 use anyhow::{anyhow, Context, Result};
 use image::{GrayImage, Luma};
@@ -23,45 +25,40 @@ use regex::Regex;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-// --- Decoding / preprocessing constants (from the model's config) ---
-const BOS: i64 = 1;
+// --- Decoding / preprocessing constants (from the model's generation_config) ---
+const BOS: i64 = 1; // decoder_start_token_id == bos
 const EOS: i64 = 2;
 const MAX_SEQ: usize = 512;
 const BEAM: usize = 4; // beam width (1 == greedy)
 const LENGTH_PENALTY: f32 = 0.7; // <1 mildly favors longer, complete sequences
-const MAX_W: u32 = 672; // max_dimensions width
-const MAX_H: u32 = 192; // max_dimensions height
-const PATCH: u32 = 32; // encoder needs H,W divisible by this
-const MIN_W: u32 = 32; // min_dimensions width
-const MIN_H: u32 = 32; // min_dimensions height
-const MEAN: f32 = 0.7931;
-const STD: f32 = 0.1738;
+const MFR_SIZE: u32 = 384; // fixed encoder input side (DeiT, 384×384×3)
 
 /// (local file name, download URL, exact size in bytes for integrity check).
-/// The `image_resizer` network predicts the optimal render width so glyph scale
-/// matches the training distribution — it is essential to accuracy, not optional.
-const MODELS: [(&str, &str, u64); 4] = [
+/// URLs are pinned to a commit hash so the artifacts are immutable (HF `main`
+/// can move); the resolve endpoint 302-redirects to the CDN, which the download
+/// client follows.
+const MODELS: [(&str, &str, u64); 3] = [
     (
-        "encoder.onnx",
-        "https://github.com/RapidAI/RapidLaTeXOCR/releases/download/v0.0.0/encoder.onnx",
-        89_008_136,
+        "encoder_model.onnx",
+        "https://huggingface.co/breezedeus/pix2text-mfr-1.5/resolve/1cef9f0bdcd6a4c63df7de1311fb0894593340cc/encoder_model.onnx",
+        87_510_770,
     ),
     (
-        "decoder.onnx",
-        "https://github.com/RapidAI/RapidLaTeXOCR/releases/download/v0.0.0/decoder.onnx",
-        50_952_726,
-    ),
-    (
-        "image_resizer.onnx",
-        "https://github.com/RapidAI/RapidLaTeXOCR/releases/download/v0.0.0/image_resizer.onnx",
-        38_967_751,
+        "decoder_model.onnx",
+        "https://huggingface.co/breezedeus/pix2text-mfr-1.5/resolve/1cef9f0bdcd6a4c63df7de1311fb0894593340cc/decoder_model.onnx",
+        32_026_253,
     ),
     (
         "tokenizer.json",
-        "https://github.com/RapidAI/RapidLaTeXOCR/releases/download/v0.0.0/tokenizer.json",
-        24_174,
+        "https://huggingface.co/breezedeus/pix2text-mfr-1.5/resolve/1cef9f0bdcd6a4c63df7de1311fb0894593340cc/tokenizer.json",
+        113_168,
     ),
 ];
+
+/// Files of the previous engine (RapidLaTeXOCR pix2tex), deleted on the next
+/// model download so the ~178 MB don't linger on disk. (`tokenizer.json` is
+/// shared by name — the size check simply re-downloads the right one.)
+const LEGACY_FILES: [&str; 3] = ["encoder.onnx", "decoder.onnx", "image_resizer.onnx"];
 
 /// True when every model file is present at its expected size.
 pub fn models_present(dir: &Path) -> bool {
@@ -86,16 +83,36 @@ pub fn missing_bytes(dir: &Path) -> u64 {
 }
 
 /// Download any missing / incomplete model file. Network IO, so it's async and
-/// takes the app's shared reqwest client. Writes to a `.part` file then renames,
+/// Serializes concurrent downloads (two overlapping recognitions must not race on
+/// the same files) — async mutex, held across the awaits.
+static DL_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+/// Unique temp-file suffix per attempt, so a stray concurrent writer can never
+/// clobber another attempt's `.part` file.
+static DL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Download any missing / incomplete model file. Uses its OWN client: no total
+/// request deadline (a fixed one would make big files impossible on slow links),
+/// only a connect timeout plus a per-chunk stall guard; the body is streamed to a
+/// uniquely-named `.part` file (flat memory) and renamed once the size checks out,
 /// so an interrupted download never looks complete.
-pub async fn ensure_models(dir: &Path, client: &reqwest::Client) -> Result<()> {
+pub async fn ensure_models(dir: &Path, _client: &reqwest::Client) -> Result<()> {
+    let _guard = DL_LOCK.lock().await;
     std::fs::create_dir_all(dir).ok();
+    // Reclaim the previous engine's weights (best-effort).
+    for name in LEGACY_FILES {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(4))
+        .build()
+        .context("client di download")?;
     for (name, url, size) in MODELS.iter() {
         let path = dir.join(name);
         if std::fs::metadata(&path).map(|m| m.len() == *size).unwrap_or(false) {
-            continue;
+            continue; // downloaded by us or by the attempt that held the lock first
         }
-        let resp = client
+        let mut resp = client
             .get(*url)
             .send()
             .await
@@ -103,18 +120,37 @@ pub async fn ensure_models(dir: &Path, client: &reqwest::Client) -> Result<()> {
         if !resp.status().is_success() {
             anyhow::bail!("scarico {name}: HTTP {}", resp.status());
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .with_context(|| format!("leggo {name}"))?;
-        if *size != 0 && bytes.len() as u64 != *size {
-            anyhow::bail!(
-                "{name}: dimensione inattesa ({} invece di {size} byte)",
-                bytes.len()
-            );
+        let seq = DL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!("{name}.part{seq}"));
+        let write_res: Result<u64> = async {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp).with_context(|| format!("creo {name}"))?;
+            let mut written: u64 = 0;
+            loop {
+                // Stall guard: a chunk must arrive within 60s (slow is fine, dead is not).
+                let chunk = tokio::time::timeout(std::time::Duration::from_secs(60), resp.chunk())
+                    .await
+                    .map_err(|_| anyhow!("scarico {name}: connessione interrotta (nessun dato per 60s)"))?
+                    .with_context(|| format!("leggo {name}"))?;
+                let Some(chunk) = chunk else { break };
+                file.write_all(&chunk).with_context(|| format!("salvo {name}"))?;
+                written += chunk.len() as u64;
+            }
+            file.flush().ok();
+            Ok(written)
         }
-        let tmp = dir.join(format!("{name}.part"));
-        std::fs::write(&tmp, &bytes).with_context(|| format!("salvo {name}"))?;
+        .await;
+        let written = match write_res {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        };
+        if *size != 0 && written != *size {
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::bail!("{name}: dimensione inattesa ({written} invece di {size} byte)");
+        }
         std::fs::rename(&tmp, &path).with_context(|| format!("rinomino {name}"))?;
     }
     Ok(())
@@ -125,12 +161,10 @@ pub async fn ensure_models(dir: &Path, client: &reqwest::Client) -> Result<()> {
 struct Engine {
     encoder: Session,
     decoder: Session,
-    resizer: Session,
     tokenizer: Tokenizer,
     enc_in: String,
-    res_in: String,
     /// decoder input names, discovered by dtype: ids (first int), mask (second
-    /// int, optional), context (the float input).
+    /// int, optional — MFR's decoder has none), context (the float input).
     dec_ids: String,
     dec_mask: Option<(String, TensorElementType)>,
     dec_ctx: String,
@@ -162,9 +196,8 @@ fn elem_ty(vt: &ValueType) -> Option<TensorElementType> {
 
 impl Engine {
     fn load(dir: &Path) -> Result<Engine> {
-        let encoder = build_session(&dir.join("encoder.onnx"))?;
-        let decoder = build_session(&dir.join("decoder.onnx"))?;
-        let resizer = build_session(&dir.join("image_resizer.onnx"))?;
+        let encoder = build_session(&dir.join("encoder_model.onnx"))?;
+        let decoder = build_session(&dir.join("decoder_model.onnx"))?;
         let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json"))
             .map_err(|e| anyhow!("tokenizer: {e}"))?;
 
@@ -172,12 +205,6 @@ impl Engine {
             .inputs()
             .first()
             .ok_or_else(|| anyhow!("encoder senza input"))?
-            .name()
-            .to_string();
-        let res_in = resizer
-            .inputs()
-            .first()
-            .ok_or_else(|| anyhow!("resizer senza input"))?
             .name()
             .to_string();
 
@@ -206,64 +233,20 @@ impl Engine {
         Ok(Engine {
             encoder,
             decoder,
-            resizer,
             tokenizer,
             enc_in,
-            res_in,
             dec_ids,
             dec_mask,
             dec_ctx,
         })
     }
 
-    /// Run the image_resizer on a normalized tensor; return the predicted
-    /// render width = (argmax + 1) * 32.
-    fn resize_width(&mut self, img: &[f32], h: usize, w: usize) -> Result<u32> {
-        let arr = Array::from_shape_vec((1usize, 1usize, h, w), img.to_vec())
-            .context("costruisco tensore resizer")?;
-        let inputs = ort::inputs![ self.res_in.as_str() => Value::from_array(arr)? ];
-        let outputs = self.resizer.run(inputs).map_err(|e| anyhow!(e.to_string()))?;
-        let (_shape, logits) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| anyhow!(e.to_string()))?;
-        let idx = argmax(logits) as u32;
-        Ok((idx + 1) * PATCH)
-    }
-
-    /// Reproduce pix2tex's `loop_image_resizer`: iteratively resize the base image
-    /// to the width the resizer predicts, until it stabilizes; return the final
-    /// normalized tensor (data, H, W) that then feeds the encoder.
-    fn resize_loop(&mut self, base: &GrayImage) -> Result<(Vec<f32>, usize, usize)> {
-        let mut r: f32 = 1.0;
-        let mut w: u32 = base.width().max(1);
-        let mut h: f32 = base.height() as f32;
-        let mut last: Option<(Vec<f32>, usize, usize)> = None;
-        for _ in 0..10 {
-            h = (h * r).floor();
-            let hh = (h as u32).max(1);
-            let filt = if r > 1.0 {
-                image::imageops::FilterType::Triangle // PIL BILINEAR
-            } else {
-                image::imageops::FilterType::Lanczos3
-            };
-            let resized = image::imageops::resize(base, w.max(1), hh, filt);
-            let pad_img = pad(&minmax_size(&resized));
-            let pw = pad_img.width();
-            let (data, th, tw) = to_tensor(&pad_img);
-            let w_new = self.resize_width(&data, th, tw)?;
-            last = Some((data, th, tw));
-            if w_new == pw {
-                break;
-            }
-            r = w_new as f32 / pw as f32;
-            w = w_new;
-        }
-        last.ok_or_else(|| anyhow!("resizer non ha prodotto output"))
-    }
-
-    /// Run the encoder; return the context tensor as (data, shape).
-    fn encode(&mut self, img: Vec<f32>, h: usize, w: usize) -> Result<(Vec<f32>, Vec<usize>)> {
-        let arr = Array::from_shape_vec((1usize, 1usize, h, w), img)
+    /// Run the encoder on a normalized [1,3,384,384] image; return the context
+    /// tensor (`last_hidden_state`) as (data, shape). The graph declares dynamic
+    /// dims, so the fixed size is enforced here, not by ONNX.
+    fn encode(&mut self, pixels: Vec<f32>) -> Result<(Vec<f32>, Vec<usize>)> {
+        let side = MFR_SIZE as usize;
+        let arr = Array::from_shape_vec((1usize, 3usize, side, side), pixels)
             .context("costruisco tensore immagine")?;
         let inputs = ort::inputs![ self.enc_in.as_str() => Value::from_array(arr)? ];
         let outputs = self.encoder.run(inputs).map_err(|e| anyhow!(e.to_string()))?;
@@ -395,17 +378,6 @@ fn topk_logsoftmax(row: &[f32], k: usize) -> Vec<(i64, f32)> {
     top.into_iter().map(|i| (i as i64, row[i] - lse)).collect()
 }
 
-fn argmax(row: &[f32]) -> i64 {
-    let mut best = 0usize;
-    let mut best_v = f32::NEG_INFINITY;
-    for (i, &v) in row.iter().enumerate() {
-        if v > best_v {
-            best_v = v;
-            best = i;
-        }
-    }
-    best as i64
-}
 
 // ---------------------------------------------------------------------------
 // Image preprocessing (port of pix2tex PreProcess)
@@ -430,10 +402,10 @@ fn to_gray_on_white(bytes: &[u8]) -> Result<GrayImage> {
     Ok(gray)
 }
 
-/// Faithful port of pix2tex `pad`: contrast-stretch to full range, orient so the
-/// text is dark on light, crop to the ink bounding box, then pad (top-left) to the
-/// next multiple of `PATCH` on a white canvas.
-fn pad(gray: &GrayImage) -> GrayImage {
+/// Contrast-stretch to full range, orient so the text is dark on light, and crop
+/// to the ink bounding box (with the polarity detected BEFORE any inversion, so
+/// night-mode selections come out right too).
+fn crop_ink(gray: &GrayImage) -> GrayImage {
     let (w, h) = gray.dimensions();
     let n = (w * h) as usize;
     // Contrast stretch: (v - min) / (max - min) * 255.
@@ -483,9 +455,7 @@ fn pad(gray: &GrayImage) -> GrayImage {
     } else {
         (0, 0, w, h)
     };
-    let pw = cw.div_ceil(PATCH).max(1) * PATCH;
-    let ph = ch.div_ceil(PATCH).max(1) * PATCH;
-    let mut canvas = GrayImage::from_pixel(pw, ph, Luma([255]));
+    let mut canvas = GrayImage::new(cw, ch);
     for yy in 0..ch {
         for xx in 0..cw {
             let v = data[((b + yy) * w + (a + xx)) as usize];
@@ -495,31 +465,39 @@ fn pad(gray: &GrayImage) -> GrayImage {
     canvas
 }
 
-/// Faithful port of pix2tex `minmax_size`: downscale (BILINEAR) so both sides fit
-/// within (MAX_W, MAX_H) preserving aspect; then pad up to the minimum size.
-fn minmax_size(img: &GrayImage) -> GrayImage {
-    let (w, h) = img.dimensions();
-    let ratio = (w as f32 / MAX_W as f32).max(h as f32 / MAX_H as f32);
-    let scaled = if ratio > 1.0 {
-        let nw = ((w as f32 / ratio).floor() as u32).max(1);
-        let nh = ((h as f32 / ratio).floor() as u32).max(1);
-        image::imageops::resize(img, nw, nh, image::imageops::FilterType::Triangle)
-    } else {
-        img.clone()
-    };
-    let (sw, sh) = scaled.dimensions();
-    let pw = sw.max(MIN_W);
-    let ph = sh.max(MIN_H);
-    if pw == sw && ph == sh {
-        return scaled;
+/// MFR preprocessing: ink-crop plus a small white margin, then resize STRAIGHT to
+/// the fixed 384×384 (aspect-destroying — that is what the model's own
+/// preprocessor does and was trained with; square-padding instead shrinks wide
+/// formulas and loses thin marks like `\bar{}`), replicate to 3 channels and
+/// normalize `(v/255 − 0.5)/0.5` per the preprocessor_config.
+fn preprocess_384(gray: &GrayImage) -> Vec<f32> {
+    let ink = crop_ink(gray);
+    let (w, h) = ink.dimensions();
+    // A margin ~4% of each side keeps strokes off the border after resizing.
+    let mx = (w / 25).max(4);
+    let my = (h / 25).max(4);
+    let mut framed = GrayImage::from_pixel(w + 2 * mx, h + 2 * my, Luma([255]));
+    image::imageops::overlay(&mut framed, &ink, mx as i64, my as i64);
+    let resized = image::imageops::resize(
+        &framed,
+        MFR_SIZE,
+        MFR_SIZE,
+        image::imageops::FilterType::Lanczos3,
+    );
+    // [1,3,384,384]: channel-major, grayscale replicated on the three channels.
+    let plane: Vec<f32> = resized
+        .pixels()
+        .map(|p| (p.0[0] as f32 / 255.0 - 0.5) / 0.5)
+        .collect();
+    let mut out = Vec::with_capacity(plane.len() * 3);
+    for _ in 0..3 {
+        out.extend_from_slice(&plane);
     }
-    let mut canvas = GrayImage::from_pixel(pw, ph, Luma([255]));
-    image::imageops::overlay(&mut canvas, &scaled, 0, 0);
-    canvas
+    out
 }
 
 /// Runs of consecutive non-blank rows ("ink bands"), via a contrast-relative ink
-/// test with background-polarity detection (like `pad()`), so dark-themed pages
+/// test with background-polarity detection (like `crop_ink()`), so dark-themed pages
 /// segment too. Shared by `segment_bands` and the bisection rescue.
 fn ink_bands(gray: &GrayImage) -> Vec<(u32, u32)> {
     let (w, h) = gray.dimensions();
@@ -666,21 +644,6 @@ fn latex_is_sane(s: &str) -> bool {
     depth == 0 && s.matches("\\begin").count() == s.matches("\\end").count()
 }
 
-/// Normalize a grayscale image to the model's (1,1,H,W) tensor.
-/// `(v/255 - MEAN)/STD` is identical to the reference's `(v - MEAN*255)/(STD*255)`.
-fn to_tensor(gray: &GrayImage) -> (Vec<f32>, usize, usize) {
-    let (w, h) = gray.dimensions();
-    let (w, h) = (w as usize, h as usize);
-    let mut data = Vec::with_capacity(w * h);
-    for y in 0..h {
-        for x in 0..w {
-            let v = gray.get_pixel(x as u32, y as u32).0[0] as f32 / 255.0;
-            data.push((v - MEAN) / STD);
-        }
-    }
-    (data, h, w)
-}
-
 // ---------------------------------------------------------------------------
 // Post-processing (collapse the tokenizer's spacing to compact LaTeX)
 // ---------------------------------------------------------------------------
@@ -778,9 +741,8 @@ fn post_process(s: &str) -> String {
 /// The boolean is the decoder's EOS flag: `false` means the transcription
 /// overflowed (typically a multi-line crop) and the text is unreliable.
 fn recognize_gray(eng: &mut Engine, gray: &GrayImage) -> Result<(String, bool)> {
-    let base = minmax_size(&pad(gray));
-    let (data, h, w) = eng.resize_loop(&base)?;
-    let (ctx, ctx_shape) = eng.encode(data, h, w)?;
+    let pixels = preprocess_384(gray);
+    let (ctx, ctx_shape) = eng.encode(pixels)?;
     let (ids, terminated) = eng.decode(&ctx, &ctx_shape)?;
     // Skip the leading BOS; the tokenizer drops the rest of the special tokens.
     let toks: Vec<u32> = ids.iter().skip(1).map(|&x| x as u32).collect();
@@ -1041,17 +1003,9 @@ mod tests {
         for o in eng.decoder.outputs() {
             eprintln!("[spike] DEC OUT {} : {:?}", o.name(), o.dtype());
         }
-        for i in eng.resizer.inputs() {
-            eprintln!("[spike] RES IN  {} : {:?}", i.name(), i.dtype());
-        }
-        for o in eng.resizer.outputs() {
-            eprintln!("[spike] RES OUT {} : {:?}", o.name(), o.dtype());
-        }
         let gray = to_gray_on_white(&bytes).expect("gray");
-        let base = minmax_size(&pad(&gray));
-        let (data, h, w) = eng.resize_loop(&base).expect("resize_loop");
-        eprintln!("[spike] resized to {w}x{h}");
-        let (ctx, shape) = eng.encode(data, h, w).expect("encode");
+        let pixels = preprocess_384(&gray);
+        let (ctx, shape) = eng.encode(pixels).expect("encode");
         eprintln!("[spike] context shape {:?}", shape);
         let (ids, terminated) = eng.decode(&ctx, &shape).expect("decode");
         let toks: Vec<u32> = ids.iter().skip(1).map(|&x| x as u32).collect();

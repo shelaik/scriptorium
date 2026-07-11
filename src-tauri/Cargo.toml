@@ -1,6 +1,6 @@
 [package]
 name = "pdfmanage"
-version = "0.8.37"
+version = "0.8.38"
 description = "Lean, fast, local-first PDF & reference manager"
 authors = ["you"]
 edition = "2021"
@@ -46,7 +46,7 @@ base64 = "0.22"
 # --- Metadata enrichment (Crossref/OpenAlex over HTTP) ---
 # native-tls => Windows SChannel, avoids the cmake/NASM build burden of rustls.
 reqwest = { version = "0.13", default-features = false, features = ["json", "gzip", "native-tls"] }
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "sync"] }
 regex = "1"
 
 # --- GitHub README rendering: Markdown -> sanitized HTML ---
