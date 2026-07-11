@@ -29,9 +29,11 @@
 
   const HUB = 46; // raggio del mozzo (px): dimensione visiva e zona di hit coincidono
   const MARGIN = 14;
-  const LABEL_W = 150; // deve combaciare con max-width di .label nel blocco di stile
+  const LABEL_W = 170; // deve combaciare con max-width di .label nel blocco di stile
   const PAD_X = 44 + LABEL_W + 8; // offset etichetta laterale + larghezza + respiro
-  const PAD_Y = 96; // le etichette sopra/sotto sporgono ~70px oltre il centro del petalo
+  const PAD_Y = 100; // etichette sopra/sotto + barra dell'hint sporgono oltre il centro del petalo
+  const MIN_ARC = 62; // distanza minima fra i centri di due petali adiacenti (i petali sono 54px)
+  const LABEL_GAP = 24; // distacco verticale minimo fra due etichette dello stesso lato
 
   let el = $state<HTMLDivElement | null>(null);
   let stack = $state.raw<RadialItem[][]>([]); // solo sotto-anelli; la radice è `items`
@@ -110,7 +112,14 @@
   const ring = $derived<Petal[]>(
     query ? matches : current.map((it) => ({ item: it, trail: path, label: it.label }))
   );
-  const R = $derived(ring.length <= 6 ? 118 : ring.length <= 8 ? 136 : 156);
+  // Il raggio cresce col numero di voci: i petali non si sovrappongono mai
+  // (con ~20 voci l'anello passa da 156 a ~200px), con poche resta compatto.
+  const R = $derived(
+    Math.max(
+      ring.length <= 6 ? 118 : ring.length <= 8 ? 136 : 156,
+      Math.ceil((ring.length * MIN_ARC) / (2 * Math.PI)),
+    ),
+  );
 
   function clampC(v: number, lo: number, hiV: number): number {
     return hiV < lo ? (lo + hiV) / 2 : Math.max(lo, Math.min(hiV, v));
@@ -118,9 +127,9 @@
   const cx = $derived(clampC(x, MARGIN + R + PAD_X, vw - MARGIN - R - PAD_X));
   const cy = $derived(clampC(y, MARGIN + R + PAD_Y, vh - MARGIN - R - PAD_Y));
 
-  type Geo = { p: Petal; tx: number; ty: number; hem: "r" | "l" | "t" | "b" };
-  const geo = $derived<Geo[]>(
-    ring.map((p, i) => {
+  type Geo = { p: Petal; tx: number; ty: number; hem: "r" | "l" | "t" | "b"; dy: number };
+  const geo = $derived.by<Geo[]>(() => {
+    const gs: Geo[] = ring.map((p, i) => {
       const rad = ((-90 + (i * 360) / Math.max(ring.length, 1)) * Math.PI) / 180;
       const cos = Math.cos(rad);
       const sin = Math.sin(rad);
@@ -128,11 +137,27 @@
         p,
         tx: R * cos,
         ty: R * sin,
-        // soglia stretta: quasi tutte le etichette si ancorano di lato (non collidono)
+        // soglia stretta: quasi tutte le etichette si ancorano di lato
         hem: Math.abs(cos) <= 0.16 ? (sin < 0 ? "t" : "b") : cos > 0 ? "r" : "l",
+        dy: 0,
       };
-    })
-  );
+    });
+    // Anti-collisione etichette (come nei grafici a torta): per ciascun lato,
+    // impila le etichette dall'alto imponendo un distacco minimo, poi ricentra
+    // il gruppo così lo scostamento medio è nullo. `dy` = spostamento verticale
+    // dell'etichetta rispetto al suo petalo (una lineetta la ricollega se serve).
+    for (const side of ["r", "l"] as const) {
+      const grp = gs.filter((g) => g.hem === side).sort((a, b) => a.ty - b.ty);
+      if (grp.length < 2) continue;
+      const pos: number[] = [];
+      for (let i = 0; i < grp.length; i++) {
+        pos.push(i === 0 ? grp[i].ty : Math.max(pos[i - 1] + LABEL_GAP, grp[i].ty));
+      }
+      const drift = pos.reduce((s, v, i) => s + (v - grp[i].ty), 0) / grp.length;
+      for (let i = 0; i < grp.length; i++) grp[i].dy = pos[i] - drift - grp[i].ty;
+    }
+    return gs;
+  });
 
   const hintText = $derived(hi >= 0 ? (ring[hi]?.item.hint ?? "") : "");
   const announce = $derived(hi >= 0 ? (ring[hi]?.label ?? "") : "");
@@ -429,7 +454,28 @@
                 </span>
               {/if}
             </div>
-            <div class="label" class:hi={hi === i} class:danger={g.p.item.danger}>
+            {#if Math.abs(g.dy) > 10 && (g.hem === "r" || g.hem === "l")}
+              <svg
+                class="leader {g.hem}"
+                width="12"
+                height={Math.abs(g.dy) + 4}
+                style="top:{Math.min(0, g.dy) - 2}px"
+                aria-hidden="true"
+              >
+                <line
+                  x1={g.hem === "r" ? 1 : 11}
+                  y1={g.dy > 0 ? 2 : Math.abs(g.dy) + 2}
+                  x2={g.hem === "r" ? 11 : 1}
+                  y2={g.dy > 0 ? Math.abs(g.dy) + 2 : 2}
+                />
+              </svg>
+            {/if}
+            <div
+              class="label"
+              class:hi={hi === i}
+              class:danger={g.p.item.danger}
+              style="--dy:{g.dy}px"
+            >
               {g.p.label}
             </div>
           </div>
@@ -450,10 +496,11 @@
       {:else}
         <span class="hubGlyph">{hubLetter}</span>
       {/if}
-      {#if hintText}
-        <div class="hint">{hintText}</div>
-      {/if}
     </div>
+
+    {#if hintText}
+      <div class="hintbar" style="top:{R + 44}px">{hintText}</div>
+    {/if}
 
     {#if query}
       <div class="qpill">{query}</div>
@@ -557,23 +604,31 @@
   .check.alt { right: auto; left: 1px; }
   .check svg { width: 5px; height: 5px; fill: none; stroke: var(--on-accent); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
 
-  /* etichette fuori dal petalo, per emisfero */
+  /* etichette fuori dal petalo, per emisfero; --dy = scostamento anti-collisione */
   .label {
-    position: absolute; font-size: 12.5px; line-height: 1.25; color: var(--text);
-    background: color-mix(in srgb, var(--bg) 60%, transparent);
-    backdrop-filter: blur(5px);
-    padding: 2.5px 9px; border-radius: var(--r-pill);
-    white-space: nowrap; max-width: 150px; /* combacia con LABEL_W nello script */
+    position: absolute; font-size: 13px; line-height: 1.25; color: var(--text);
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--border-soft);
+    box-shadow: var(--shadow-sm);
+    padding: 2.5px 10px; border-radius: var(--r-pill);
+    white-space: nowrap; max-width: 170px; /* combacia con LABEL_W nello script */
     overflow: hidden; text-overflow: ellipsis;
     pointer-events: auto; cursor: pointer;
     transition: color var(--ease);
   }
-  .wrap.r .label { left: 39px; top: 0; transform: translateY(-50%); }
-  .wrap.l .label { right: 39px; top: 0; transform: translateY(-50%); }
+  .wrap.r .label { left: 39px; top: var(--dy, 0px); transform: translateY(-50%); }
+  .wrap.l .label { right: 39px; top: var(--dy, 0px); transform: translateY(-50%); }
   .wrap.t .label { bottom: 39px; left: 0; transform: translateX(-50%); }
   .wrap.b .label { top: 39px; left: 0; transform: translateX(-50%); }
-  .label.hi { color: var(--accent); font-weight: 700; }
+  .label.hi { color: var(--accent); font-weight: 700; border-color: var(--accent-soft2); }
   .label.danger { color: var(--danger); }
+
+  /* lineetta che ricollega un'etichetta scostata al suo petalo */
+  .leader { position: absolute; pointer-events: none; overflow: visible; }
+  .leader.r { left: 27px; }
+  .leader.l { right: 27px; }
+  .leader line { stroke: var(--faint); stroke-width: 1; opacity: 0.55; }
 
   /* mozzo */
   .hub {
@@ -593,9 +648,18 @@
   .cover { width: 54px; height: 54px; border-radius: 12px; object-fit: cover; border: 1px solid var(--border-soft); }
   .hub.hasback .cover { width: 44px; height: 44px; }
   .hubGlyph { font-family: var(--serif); font-size: 26px; font-weight: 600; line-height: 1; color: var(--accent); }
-  .hint {
-    font-size: 10.5px; line-height: 1.25; color: var(--dim); max-width: 74px;
+
+  /* descrizione della voce evidenziata: barra leggibile sotto l'anello */
+  .hintbar {
+    position: absolute; left: 0; transform: translateX(-50%);
+    font-size: 12px; line-height: 1.35; color: var(--dim); text-align: center;
+    background: color-mix(in srgb, var(--surface) 90%, transparent);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border-soft); border-radius: var(--r-md);
+    box-shadow: var(--shadow-sm);
+    padding: 5px 14px; max-width: min(380px, calc(100vw - 28px));
     display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    pointer-events: none; animation: fade 120ms ease-out both;
   }
 
   /* eco della ricerca (type-to-filter) */
@@ -616,7 +680,7 @@
   @keyframes blink { 50% { opacity: 0; } }
 
   @media (prefers-reduced-motion: reduce) {
-    .overlay, .wrap, .hub, .chip { animation: none !important; }
+    .overlay, .wrap, .hub, .chip, .hintbar { animation: none !important; }
     .qpill::after { animation: none; }
     .stage, .chip, .petal, .label, .guide circle { transition: none; }
     .petal.hi { transform: none; }
