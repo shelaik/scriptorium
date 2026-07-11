@@ -261,6 +261,7 @@
       schedule();
       return;
     }
+    tuneOpen = false; // the card and the tune panel share the top-right corner
     const n = nodes[idToIdx.get(id)!];
     const neighbors: PanelNeighbor[] = (adjW.get(id) ?? [])
       .map((e) => {
@@ -504,13 +505,22 @@
         r: 4.5 + Math.min(gn.degree, 9) * 1.1,
       });
     }
+    const degOf = new Map(g.nodes.map((n) => [n.id, n.degree]));
     for (const ge of g.edges) {
       const ai = idToIdx.get(ge.a);
       const bi = idToIdx.get(ge.b);
       if (ai === undefined || bi === undefined || ai === bi) continue;
-      // Longer rest lengths + softer springs than the original: repulsion wins at
-      // short range, so linked stars keep readable air between them.
-      edges.push({ ai, bi, w: ge.w, rest: 100 + (1 - ge.w) * 120, k: 0.032 * ge.w });
+      // Longer rest lengths + degree-normalized soft springs: a hub with many
+      // ties would otherwise sum their pulls and crush its neighbourhood into a
+      // clump — dividing by √(min degree) keeps dense stars breathable.
+      const dmin = Math.max(1, Math.min(degOf.get(ge.a) ?? 1, degOf.get(ge.b) ?? 1));
+      edges.push({
+        ai,
+        bi,
+        w: ge.w,
+        rest: 125 + (1 - ge.w) * 140,
+        k: (0.032 * ge.w) / Math.sqrt(dmin),
+      });
       let la = adj.get(ge.a);
       if (!la) adj.set(ge.a, (la = []));
       la.push(ge.b);
@@ -590,8 +600,8 @@
     let f = Math.min(14, REPEL / d2);
     // Collision guard: below the "personal space" of the pair (their radii plus
     // breathing room) the push grows linearly, so stars never sit on each other.
-    const minD = (a.r + b.r) * 1.7 + 10;
-    if (d < minD) f += (minD - d) * 0.4;
+    const minD = (a.r + b.r) * 2.1 + 14;
+    if (d < minD) f += (minD - d) * 0.65;
     const ux = (dx / d) * f;
     const uy = (dy / d) * f;
     fx[i] += ux;
@@ -1191,6 +1201,7 @@
         else setFocus(id); // single click = info card; double click opens the paper
       } else if (ghost) {
         setFocus(null);
+        tuneOpen = false;
         ghostCard = ghost; // ghost card replaces the doc card (same corner)
       } else if (ptr.mode === "pan") {
         setFocus(null); // click on empty sky dismisses the cards
@@ -1497,7 +1508,7 @@
   .hud {
     position: absolute;
     right: 12px;
-    bottom: 12px;
+    top: 12px;
     z-index: 3;
     display: flex;
     gap: 6px;
@@ -1537,11 +1548,11 @@
     cursor: pointer;
   }
   .hudsel:hover { color: var(--accent); border-color: var(--accent-soft2); }
-  /* Density tuning panel, anchored above the HUD. */
+  /* Density tuning panel, anchored below the HUD (top-right). */
   .tune {
     position: absolute;
     right: 12px;
-    bottom: 48px;
+    top: 50px;
     z-index: 4;
     width: 220px;
     display: flex;
@@ -1570,14 +1581,14 @@
     color: var(--dim); border-radius: var(--r-pill, 999px); padding: 5px 12px; font-size: 11.5px;
   }
   .card-peer { color: #2e9e63; }
-  /* Pinned info card: paper details + its similarity links. */
+  /* Pinned info card: paper details + its similarity links (below the HUD). */
   .card {
     position: absolute;
-    top: 12px;
+    top: 50px;
     right: 12px;
     z-index: 5;
     width: min(300px, calc(100% - 24px));
-    max-height: calc(100% - 60px);
+    max-height: calc(100% - 100px);
     display: flex;
     flex-direction: column;
     padding: 12px 14px;
