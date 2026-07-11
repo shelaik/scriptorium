@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
 
   // ----- Data contract (local structural copy of $lib/api's SimilarityGraph: no coupling) -----
   interface GraphNode {
@@ -23,6 +23,14 @@
     total: number;
   }
 
+  /** Extra card details the graph itself doesn't carry, resolved by the parent
+   *  from its loaded documents (best-effort: undefined is fine). */
+  interface DocExtra {
+    authors?: string[];
+    venue?: string | null;
+    tags?: { name: string; color: string | null }[];
+  }
+
   let {
     graph,
     loading,
@@ -32,6 +40,7 @@
     onToggleSelect,
     onGenerate,
     onRefresh,
+    resolve,
   }: {
     graph: SimilarityGraph | null;
     loading: boolean;
@@ -41,6 +50,7 @@
     onToggleSelect: (id: number) => void;
     onGenerate: () => void;
     onRefresh: () => void;
+    resolve?: (id: number) => DocExtra | undefined;
   } = $props();
 
   // ----- Simulation state (plain, non-reactive: the canvas is redrawn manually) -----
@@ -87,6 +97,7 @@
   let edges: SimEdge[] = [];
   let idToIdx = new Map<number, number>();
   let adj = new Map<number, number[]>();
+  let adjW = new Map<number, { id: number; w: number }[]>(); // neighbors with similarity, for the info card
   let topLabelIds = new Set<number>();
   let fx = new Float32Array(0);
   let fy = new Float32Array(0);
@@ -108,6 +119,69 @@
 
   let tip = $state<{ x: number; y: number; title: string; meta: string } | null>(null);
   let generating = $state(false); // local guard: the "Genera indice" CTA must not double-fire
+
+  // ----- Focused node ("scheda"): single click pins a paper card with its
+  //       connections; double click opens the paper. -----
+  interface PanelNeighbor {
+    id: number;
+    title: string;
+    year: number | null;
+    w: number;
+  }
+  interface PanelData {
+    id: number;
+    title: string;
+    year: number | null;
+    degree: number;
+    unread: boolean;
+    favorite: boolean;
+    extra: DocExtra | undefined;
+    neighbors: PanelNeighbor[];
+  }
+  let panel = $state<PanelData | null>(null);
+  let pinnedSet: Set<number> | null = null; // node + neighbors kept at full alpha while the card is open
+
+  /** Pin (or clear) the info card for a node id; keeps the neighborhood lit. */
+  function setFocus(id: number | null) {
+    if (id === null || !idToIdx.has(id)) {
+      panel = null;
+      pinnedSet = null;
+      schedule();
+      return;
+    }
+    const n = nodes[idToIdx.get(id)!];
+    const neighbors: PanelNeighbor[] = (adjW.get(id) ?? [])
+      .map((e) => {
+        const i = idToIdx.get(e.id);
+        const m = i !== undefined ? nodes[i] : undefined;
+        return { id: e.id, title: m?.title || "Senza titolo", year: m?.year ?? null, w: e.w };
+      })
+      .sort((a, b) => b.w - a.w);
+    panel = {
+      id,
+      title: n.title || "Senza titolo",
+      year: n.year,
+      degree: n.degree,
+      unread: n.unread,
+      favorite: n.favorite,
+      extra: resolve?.(id),
+      neighbors,
+    };
+    pinnedSet = new Set<number>([id, ...neighbors.map((x) => x.id)]);
+    schedule();
+  }
+  /** Glide the camera so the node is centered (zoom unchanged). */
+  function panToNode(id: number) {
+    const i = idToIdx.get(id);
+    if (i === undefined) return;
+    const n = nodes[i];
+    camAnim = {
+      t0: performance.now(),
+      from: [zoom, tx, ty],
+      to: [zoom, vw / 2 - n.x * zoom, vh / 2 - n.y * zoom],
+    };
+    schedule();
+  }
 
   const showMap = $derived(graph !== null && graph.embedded >= 2 && graph.nodes.length > 0);
   const countsText = $derived(
@@ -193,6 +267,7 @@
     edges = [];
     idToIdx.clear();
     adj.clear();
+    adjW.clear();
     topLabelIds.clear();
     hoverIdx = -1;
     hoverSet = null;
@@ -201,6 +276,7 @@
     tip = null;
     if (!g || g.embedded < 2 || g.nodes.length === 0) {
       alpha = 0;
+      untrack(() => setFocus(null));
       schedule();
       return;
     }
@@ -258,12 +334,24 @@
       let lb = adj.get(ge.b);
       if (!lb) adj.set(ge.b, (lb = []));
       lb.push(ge.a);
+      let wa = adjW.get(ge.a);
+      if (!wa) adjW.set(ge.a, (wa = []));
+      wa.push({ id: ge.b, w: ge.w });
+      let wb = adjW.get(ge.b);
+      if (!wb) adjW.set(ge.b, (wb = []));
+      wb.push({ id: ge.a, w: ge.w });
     }
     for (const gn of [...g.nodes].sort((a, b) => b.degree - a.degree).slice(0, 12)) topLabelIds.add(gn.id);
     fx = new Float32Array(nodes.length);
     fy = new Float32Array(nodes.length);
     alpha = hadNodes ? 0.25 : 1; // re-heat gently on refresh, fully on first build
     needFit = !hadNodes;
+    // Refresh (or drop) the pinned card against the fresh graph data. `untrack`
+    // is essential: rebuild() runs inside an $effect, and without it the `panel`
+    // read + write (and the parent state read by resolve()) would register as
+    // effect dependencies — every click would then re-trigger the rebuild in an
+    // unbounded self-invalidation loop (effect_update_depth_exceeded).
+    untrack(() => setFocus(panel && idToIdx.has(panel.id) ? panel.id : null));
     schedule();
   }
 
@@ -466,8 +554,10 @@
     c.clearRect(0, 0, vw, vh);
     if (nodes.length === 0) return;
 
-    const hovId = hoverIdx >= 0 && hoverIdx < nodes.length ? nodes[hoverIdx].id : -1;
-    const focus = hovId >= 0 ? hoverSet : null;
+    // Focus: the hovered neighborhood wins while the pointer is on a node;
+    // otherwise the pinned card's neighborhood (if any) stays lit.
+    const hovId = hoverIdx >= 0 && hoverIdx < nodes.length ? nodes[hoverIdx].id : (panel?.id ?? -1);
+    const focus = hoverIdx >= 0 ? hoverSet : pinnedSet;
 
     // Edges
     c.strokeStyle = paint.edge;
@@ -656,10 +746,14 @@
     dragIdx = -1; // release unpins: the sim takes the node back
     canvas.style.cursor = hoverIdx >= 0 ? "pointer" : "default";
     if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
-    if (wasClick && idx >= 0 && idx < nodes.length) {
-      const id = nodes[idx].id;
-      if (e.ctrlKey || e.metaKey) onToggleSelect(id);
-      else onOpen(id);
+    if (wasClick) {
+      if (idx >= 0 && idx < nodes.length) {
+        const id = nodes[idx].id;
+        if (e.ctrlKey || e.metaKey) onToggleSelect(id);
+        else setFocus(id); // single click = info card; double click opens the paper
+      } else if (ptr.mode === "pan") {
+        setFocus(null); // click on empty sky dismisses the card
+      }
     }
   }
   function onPointerLeave() {
@@ -675,7 +769,9 @@
     // Empty space: neither preventDefault nor stop — the parent's global radial menu takes over.
   }
   function onDblClick(e: MouseEvent) {
-    if (hitTest(e.offsetX, e.offsetY) < 0) fitToView(true);
+    const i = hitTest(e.offsetX, e.offsetY);
+    if (i >= 0) onOpen(nodes[i].id); // double click on a star opens the paper
+    else fitToView(true);
   }
   function onWheel(e: WheelEvent) {
     e.preventDefault();
@@ -767,13 +863,53 @@
 
   {#if showMap}
     <div class="chip counts">{countsText}</div>
-    <div class="chip legend">◦ da leggere (alone acceso) · ✦ preferito · colore = tag dominante</div>
+    <div class="chip legend">clic = scheda · doppio clic = apri · ◦ da leggere · ✦ preferito · colore = tag dominante</div>
     <div class="hud">
       <button title="Adatta alla vista" onclick={() => fitToView(true)}>⤢</button>
       <button title="Ingrandisci" onclick={() => zoomAt(vw / 2, vh / 2, 1.3)}>+</button>
       <button title="Riduci" onclick={() => zoomAt(vw / 2, vh / 2, 1 / 1.3)}>−</button>
       <button title="Ricarica il grafo" onclick={onRefresh}>↻</button>
     </div>
+  {/if}
+
+  {#if panel}
+    <aside class="card" aria-label="Scheda del paper">
+      <button class="card-x" title="Chiudi la scheda" onclick={() => setFocus(null)}>×</button>
+      <div class="card-title">{panel.title}</div>
+      <div class="card-meta">
+        {panel.year ?? "s.d."}
+        {#if panel.favorite}· ✦ preferito{/if}
+        {#if panel.unread}· da leggere{/if}
+      </div>
+      {#if panel.extra?.authors?.length}
+        <div class="card-authors">{panel.extra.authors.slice(0, 4).join(", ")}{panel.extra.authors.length > 4 ? " e altri" : ""}</div>
+      {/if}
+      {#if panel.extra?.venue}
+        <div class="card-venue">{panel.extra.venue}</div>
+      {/if}
+      {#if panel.extra?.tags?.length}
+        <div class="card-tags">
+          {#each panel.extra.tags.slice(0, 6) as t (t.name)}
+            <span class="card-tag" style:border-color={t.color || "var(--border)"}>{t.name}</span>
+          {/each}
+        </div>
+      {/if}
+      <div class="card-sec">{panel.neighbors.length === 1 ? "1 legame" : `${panel.neighbors.length} legami`} per somiglianza</div>
+      <div class="card-links">
+        {#each panel.neighbors as nb (nb.id)}
+          <button class="card-link" title="Mostra la scheda di questo paper" onclick={() => { setFocus(nb.id); panToNode(nb.id); }}>
+            <span class="card-link-w">{Math.round(nb.w * 100)}%</span>
+            <span class="card-link-t">{nb.title}{nb.year !== null ? ` (${nb.year})` : ""}</span>
+          </button>
+        {:else}
+          <p class="card-none">Nessun legame sopra la soglia.</p>
+        {/each}
+      </div>
+      <div class="card-actions">
+        <button class="card-open" onclick={() => onOpen(panel!.id)}>Apri il paper</button>
+        <span class="card-hint">o doppio clic sulla stella</span>
+      </div>
+    </aside>
   {/if}
 
   {#if tip}
@@ -875,6 +1011,109 @@
     color: var(--accent);
     border-color: var(--accent-soft2);
   }
+  /* Pinned info card: paper details + its similarity links. */
+  .card {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 5;
+    width: min(300px, calc(100% - 24px));
+    max-height: calc(100% - 60px);
+    display: flex;
+    flex-direction: column;
+    padding: 12px 14px;
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md, 11px);
+    box-shadow: var(--shadow-md, 0 4px 16px rgba(20, 22, 28, 0.09));
+  }
+  .card-x {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    border: none;
+    background: none;
+    color: var(--faint);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 2px 4px;
+  }
+  .card-x:hover { color: var(--danger); }
+  .card-title {
+    font-family: var(--serif, Georgia, serif);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.35;
+    padding-right: 16px;
+  }
+  .card-meta { margin-top: 3px; font-size: 11px; color: var(--dim); }
+  .card-authors { margin-top: 5px; font-size: 11.5px; color: var(--text); opacity: 0.85; line-height: 1.35; }
+  .card-venue { margin-top: 2px; font-size: 11px; font-style: italic; color: var(--dim); }
+  .card-tags { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+  .card-tag {
+    font-size: 10px;
+    color: var(--dim);
+    border: 1px solid var(--border);
+    border-radius: var(--r-pill, 999px);
+    padding: 1px 7px;
+  }
+  .card-sec {
+    margin-top: 10px;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--faint);
+  }
+  .card-links { margin-top: 4px; overflow-y: auto; min-height: 0; }
+  .card-link {
+    display: flex;
+    gap: 7px;
+    align-items: baseline;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: none;
+    cursor: pointer;
+    padding: 4px 2px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .card-link:hover { background: var(--accent-soft, rgba(43, 74, 120, 0.08)); }
+  .card-link-w {
+    flex: none;
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    font-weight: 600;
+    min-width: 32px;
+  }
+  .card-link-t {
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .card-none { margin: 4px 2px; font-size: 11.5px; color: var(--faint); }
+  .card-actions { margin-top: 10px; display: flex; align-items: center; gap: 8px; }
+  .card-open {
+    border: none;
+    cursor: pointer;
+    background: var(--accent);
+    color: var(--on-accent, #fff);
+    border-radius: var(--r-pill, 999px);
+    padding: 6px 16px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .card-open:hover { background: var(--accent-strong, var(--accent)); }
+  .card-hint { font-size: 10.5px; color: var(--faint); }
   .tip {
     position: absolute;
     z-index: 4;

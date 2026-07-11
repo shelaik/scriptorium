@@ -7066,6 +7066,7 @@ pub fn reveal_notes_dir(app: AppHandle) -> Result<(), String> {
 /// install location) into `$lms`, throwing a helpful error if it's missing.
 const LMS_RESOLVE: &str = "$lms = (Get-Command lms -ErrorAction SilentlyContinue).Source; \
      if (-not $lms) { $p = Join-Path $env:USERPROFILE '.lmstudio\\bin\\lms.exe'; if (Test-Path $p) { $lms = $p } } \
+     if (-not $lms) { $p = Join-Path $env:USERPROFILE '.cache\\lm-studio\\bin\\lms.exe'; if (Test-Path $p) { $lms = $p } } \
      if (-not $lms) { throw 'CLI di LM Studio (lms) non trovata: avvia LM Studio una volta, oppure esegui ''lms bootstrap''' } ";
 
 /// Start the local server for the given provider.
@@ -7096,8 +7097,15 @@ pub fn ai_server_stop(provider: String) -> Result<(), String> {
         // Best-effort kill; never fail just because nothing was running. `/T` kills
         // the model-runner child process too — without it the runner is orphaned and
         // keeps the model resident in VRAM (the GPU memory would never be freed).
+        // A runner ALREADY orphaned (its ollama.exe died without /T) has image name
+        // `llama-server.exe` (verified on Ollama 0.30) and no matching parent, so the
+        // taskkill lines miss it: sweep it by executable PATH — only processes under
+        // an Ollama install dir, never a user's own llama.cpp server.
         run_powershell(
-            "taskkill /F /T /IM 'ollama app.exe' 2>$null; taskkill /F /T /IM ollama.exe 2>$null; exit 0",
+            "taskkill /F /T /IM 'ollama app.exe' 2>$null; taskkill /F /T /IM ollama.exe 2>$null; \
+             Get-Process llama-server -ErrorAction SilentlyContinue | \
+             Where-Object { $_.Path -like '*\\Ollama\\*' } | \
+             Stop-Process -Force -ErrorAction SilentlyContinue; exit 0",
         )
     }
 }

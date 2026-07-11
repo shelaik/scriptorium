@@ -514,7 +514,7 @@
   let settingsModal = $state(false);
   let helpModal = $state(false);
   let aboutModal = $state(false);
-  const APP_VERSION = "0.8.38";
+  const APP_VERSION = "0.8.39";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1620,18 +1620,29 @@
     verifyProvider("lmstudio");
   }
   async function saveSettings() {
-    await setDiscoverySettings(discEnabled, discEmail);
-    await setAiSettings({
-      enabled: aiEnabled,
-      provider: aiProvider,
-      ollama_url: ollamaUrl,
-      lmstudio_url: lmstudioUrl,
-      model: aiModel,
-      embed_gpu: aiEmbedGpu,
-      embed_batch: aiEmbedBatch,
-    });
+    // Save independently: a discovery hiccup must not silently block the AI save
+    // (or vice versa) — that would leave the user thinking they enabled the AI.
+    let err = "";
+    try {
+      await setDiscoverySettings(discEnabled, discEmail);
+    } catch (e) {
+      err = "ricerca online: " + e;
+    }
+    try {
+      await setAiSettings({
+        enabled: aiEnabled,
+        provider: aiProvider,
+        ollama_url: ollamaUrl,
+        lmstudio_url: lmstudioUrl,
+        model: aiModel,
+        embed_gpu: aiEmbedGpu,
+        embed_batch: aiEmbedBatch,
+      });
+    } catch (e) {
+      err = err ? `${err}; AI: ${e}` : "AI: " + e;
+    }
     settingsModal = false;
-    status = "Impostazioni salvate";
+    status = err ? "Impostazioni salvate con errori — " + err : "Impostazioni salvate";
     refreshAiStatus();
   }
   async function saveKey(name: string) {
@@ -1773,8 +1784,30 @@
     try {
       await persistAi();
     } catch { /* ignore */ }
-    status = "AI fermata: modelli scaricati, server arrestato, AI disattivata";
+    status = "AI fermata: modelli scaricati, server arrestato, AI disattivata — il chip «AI off» in alto la riattiva";
     setTimeout(() => refreshAiStatus(), 800);
+  }
+  /** One-click re-enable from the header chip / radial: flip the saved switch back
+   *  on (provider/model/URLs untouched) and refresh the gates that hide the AI
+   *  features. If the server is down the chip turns gray and its tooltip guides to
+   *  Impostazioni to start it. */
+  async function quickEnableAi() {
+    aiEnabled = true;
+    try {
+      await persistAi();
+      await refreshAiStatus();
+      // persistAi swallows its own errors — trust the LIVE state, not the absence
+      // of an exception, before claiming success.
+      if (!aiStat?.enabled) {
+        status = "Impossibile attivare l'AI: il salvataggio non è riuscito — riprova dalle Impostazioni";
+        return;
+      }
+      status = aiStat.reachable
+        ? "AI attivata ✓"
+        : "AI attivata — il server non risponde: avvialo dalle Impostazioni (clic sul chip AI)";
+    } catch (e) {
+      status = "Impossibile attivare l'AI: " + e;
+    }
   }
   async function summarizeDoc(doc: DocumentItem) {
     aiBusy = doc.id;
@@ -2968,7 +3001,9 @@
       { id: "s-print", label: "Stampa", icon: I.print, disabled: printing, hint: "Un unico lavoro di stampa", action: () => printSelected() },
       { id: "s-share", label: "Condividi", icon: I.share, children: shareKids },
     ];
-    if (aiEnabled) {
+    // Gate on the LIVE saved state (aiStat), not the Settings-form variable: the
+    // form state can lag what's persisted and silently hide these items.
+    if (aiStat?.enabled) {
       items.push({ id: "s-sum", label: "Riassumi (AI)", icon: I.ai, disabled: aiBusyAny, hint: "Un riassunto per ogni selezionato", action: () => runBatchAi("summary") });
       items.push({ id: "s-tags", label: "Tag automatici (AI)", icon: I.tag, disabled: aiBusyAny, action: () => runBatchAi("tags") });
       if (ids.length >= 2 && ids.length <= 3)
@@ -3001,6 +3036,16 @@
   /** Global radial: the whole app, one flick away. */
   function buildGlobalRadial(): RadialItem[] {
     return [
+      {
+        id: "g-home",
+        label: "I miei paper",
+        icon: I.grid,
+        hint: "Torna alla griglia dei paper (tutta la libreria)",
+        action: () => {
+          setFilter({ kind: "all" });
+          view = "grid";
+        },
+      },
       {
         id: "g-imp",
         label: "Importa",
@@ -3095,7 +3140,13 @@
               { id: "am-stop", label: "Ferma AI — server e spegni", hint: "Scarica i modelli, ferma il server locale e disattiva l'AI", action: () => stopAiFully() },
             ],
           }]
-        : []),
+        : [{
+            id: "g-aion",
+            label: "Attiva AI",
+            icon: I.ai,
+            hint: "Riaccendi l'AI locale (riassunti, tag automatici, domande, wiki…)",
+            action: () => quickEnableAi(),
+          }]),
       { id: "g-backup", label: "Backup libreria", icon: I.backup, hint: "Copia completa della libreria (PDF + database) in una cartella", action: () => doBackup() },
       { id: "g-trash", label: "Cestino", icon: I.trash, hint: "I documenti eliminati (ripristinabili)", action: () => setFilter({ kind: "trash" }) },
       { id: "g-term", label: "Terminale", icon: I.term, hint: "PowerShell integrato nella cartella dei PDF", action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
@@ -3352,6 +3403,9 @@
       /* ignore */
     }
   });
+  // Compact Italian date for the notes list ("10 lug 2026"); null-safe.
+  const noteDateFmt = new Intl.DateTimeFormat("it-IT", { day: "numeric", month: "short", year: "numeric" });
+  const fmtNoteDateShort = (ms: number | null) => (ms ? noteDateFmt.format(new Date(ms)) : "—");
   // The rendered order. Derived (not a mutation of notesList) so any refresh —
   // list reload, autosave prepend, append — re-sorts consistently.
   const notesSorted = $derived.by(() => {
@@ -4332,6 +4386,18 @@
         >
           <span class="aidot"></span>AI
         </button>
+      {:else}
+        <!-- AI off: the chip stays visible so one click brings everything back
+             (after «Ferma AI» the features would otherwise vanish with no way back
+             in sight — the #1 "the AI won't activate" confusion). -->
+        <button
+          class="aichip off"
+          title="AI locale disattivata — clic per riattivarla (riassunti, tag automatici, domande…)"
+          onclick={quickEnableAi}
+          aria-label="AI locale disattivata — clic per riattivarla"
+        >
+          <span class="aidot"></span>AI off
+        </button>
       {/if}
       <button
         class="aichip idxchip"
@@ -4820,6 +4886,7 @@
                   <button class="navitem noteitem" class:active={noteView?.slug === n.slug} onclick={() => openNote(n.slug)} title={n.excerpt || n.title}>
                     <span class="notetitle">{n.title}</span>
                     {#if n.excerpt}<span class="noteexc">{n.excerpt}</span>{/if}
+                    <span class="notedates" title="Ultima modifica · creazione">mod. {fmtNoteDateShort(n.updated_at)} · creato {fmtNoteDateShort(n.created_at)}</span>
                   </button>
                   <button class="x" title="Elimina questo appunto" onclick={() => removeNote(n.slug)}>×</button>
                 </div>
@@ -5199,7 +5266,7 @@
               compact
               onstatus={(s) => (status = s)}
             />
-            {#if aiEnabled}
+            {#if aiStat?.enabled}
               <button onclick={() => runBatchAi("summary")} disabled={aiBusyAny} title="Genera un riassunto AI per ogni documento selezionato">{aiBatch?.kind === "summary" ? `Riassunto ${aiBatch.done}/${aiBatch.total}…` : "Riassumi (AI)"}</button>
               <button onclick={() => runBatchAi("tags")} disabled={aiBusyAny} title="Genera tag automatici AI per ogni documento selezionato">{aiBatch?.kind === "tags" ? `Tag ${aiBatch.done}/${aiBatch.total}…` : "Tag automatici (AI)"}</button>
             {/if}
@@ -5309,6 +5376,10 @@
               onToggleSelect={(id) => toggleSelect(id)}
               onGenerate={() => generateIndex()}
               onRefresh={() => loadGraph(true)}
+              resolve={(id) => {
+                const d = displayed.find((x) => x.id === id) ?? docs.find((x) => x.id === id) ?? recentDocs.find((x) => x.id === id);
+                return d ? { authors: d.authors, venue: d.venue, tags: d.tags.map((t) => ({ name: t.name, color: t.color })) } : undefined;
+              }}
             />
           </div>
         {:else if displayed.length === 0}
@@ -6270,7 +6341,7 @@
             <li><strong>Filtri</strong> rapidi nella sidebar: Tutti, Preferiti, Da leggere, <strong>Con codice (GitHub)</strong>, <strong>Peer-reviewed</strong>.</li>
             <li><strong>Badge</strong> su card/lista/risultati: <em>preprint</em> / <em>peer-reviewed</em> (e se per un preprint esiste la versione pubblicata, link diretto al DOI).</li>
             <li><strong>Ordinamento</strong> combinabile (chip «Ordina ▾» sopra la griglia): clic per attivare/invertire/togliere, i numeri indicano la priorità.</li>
-            <li><strong>Viste</strong>: griglia (copertine ridimensionabili con − ▭ +), lista a colonne, e <strong>Costellazione</strong> — la libreria come mappa semantica: ogni stella un documento, i legami sono la somiglianza di significato. Clic per aprire, tasto destro per il menu, Ctrl+clic per selezionare.</li>
+            <li><strong>Viste</strong>: griglia (copertine ridimensionabili con − ▭ +), lista a colonne, e <strong>Costellazione</strong> — la libreria come mappa semantica: ogni stella un documento, i legami sono la somiglianza di significato. Clic per la scheda del paper (info e legami), doppio clic per aprirlo, tasto destro per il menu, Ctrl+clic per selezionare.</li>
             <li><strong>Continua a leggere</strong>: in “Tutti” trovi in alto gli ultimi PDF aperti. Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
             <li><strong>Riscopri</strong> (barra <em>Riscopri</em>, radiale o palette): ti ripesca un documento dimenticato o mai letto.</li>
             <li><strong>Cura della libreria</strong> (icona propria sulla barra in alto o dal radiale) raccoglie in un pannello a schede: <strong>Salute</strong> (file mancanti, PDF senza testo, metadati incompleti, OCR delle scansioni), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi; il pulsante <strong>«Risolvi DOI dei riferimenti»</strong> recupera online — precision-first, mai un abbinamento incerto — i DOI mancanti dei riferimenti già importati, così entrano nel conteggio) e <strong>Duplicati</strong> (unione); nel suo menu c'è anche <strong>Rigenera anteprime</strong>. L'<strong>Indice semantico</strong>, il <strong>Cestino</strong> e il <strong>Backup</strong> hanno la loro icona dedicata sulla barra.</li>
@@ -6764,6 +6835,9 @@
   .aichip.active .aidot { background: #1f9d57; box-shadow: 0 0 0 2px rgba(31, 157, 87, 0.18); }
   .aichip.warn { color: #b5821a; border-color: #e3c485; }
   .aichip.warn .aidot { background: #e0a93b; box-shadow: 0 0 0 2px rgba(224, 169, 59, 0.18); }
+  /* AI switched off: muted but clearly clickable (one click re-enables). */
+  .aichip.off { color: var(--faint); border-style: dashed; }
+  .aichip.off:hover { color: var(--accent); border-color: var(--accent); border-style: solid; }
   .search {
     flex: 1; max-width: 520px; background: var(--field); border: 1px solid var(--border);
     color: var(--text); border-radius: 8px; padding: 9px 12px; font-size: 14px; outline: none;
@@ -7770,6 +7844,7 @@
   .noteitem { flex-direction: column; align-items: flex-start; gap: 1px; height: auto; padding: 6px 10px; }
   .notetitle { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
   .noteexc { font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  .notedates { font-size: 10px; color: var(--faint); opacity: 0.85; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
   .notehead .notesaved { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
   .notehead .notesaved.pending { color: var(--accent); }
   .notemodes { display: inline-flex; gap: 4px; }
