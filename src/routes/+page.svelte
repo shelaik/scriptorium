@@ -284,6 +284,7 @@
   // Which tool-bar group owns the current view, so its icon shows a "you are here"
   // mark (replaces the active highlight the moved sidebar buttons used to give).
   let activeToolGroup = $derived.by(() => {
+    if (helpModal) return "g-help";
     if (careModal) return "g-tools";
     switch (filter.kind) {
       case "novita": return "g-novita";
@@ -515,15 +516,71 @@
   let addingExt = $state<string | null>(null);
   let settingsModal = $state(false);
   let helpModal = $state(false);
-  // Guida a schede: si riapre sempre da «Inizia qui».
+  // Guida a schede: si riapre sempre da «Inizia qui». È una finestra flottante
+  // NON modale: si trascina, resta aperta mentre si lavora e — a scelta — resta
+  // in primo piano sopra ogni vista (lettore incluso).
   type HelpTab = "inizia" | "libreria" | "lettura" | "scrittura" | "scoperta" | "ai" | "faq";
   let helpTab = $state<HelpTab>("inizia");
+  let helpPos = $state({ x: 80, y: 80 });
+  let helpPin = $state(false);
+  try {
+    helpPin = localStorage.getItem("scriptorium-help-pin") === "1";
+  } catch {
+    /* localStorage assente */
+  }
+  $effect(() => {
+    try {
+      localStorage.setItem("scriptorium-help-pin", helpPin ? "1" : "0");
+    } catch {
+      /* ignora */
+    }
+  });
   function openHelp() {
     helpTab = "inizia";
+    if (!helpModal) {
+      // Riapri dov'era l'ultima volta; al primo uso, in alto a destra.
+      let saved: { x: number; y: number } | null = null;
+      try {
+        saved = JSON.parse(localStorage.getItem("scriptorium-help-pos") ?? "null");
+      } catch {
+        /* posizione corrotta: usa il default */
+      }
+      const x = saved?.x ?? window.innerWidth - 660 - 28;
+      const y = saved?.y ?? 64;
+      helpPos = {
+        x: Math.min(Math.max(12, x), Math.max(12, window.innerWidth - 200)),
+        y: Math.min(Math.max(0, y), Math.max(0, window.innerHeight - 120)),
+      };
+    }
     helpModal = true;
   }
+  /** Trascina la guida dalla barra del titolo (i controlli restano cliccabili). */
+  function startHelpDrag(e: MouseEvent) {
+    if ((e.target as HTMLElement | null)?.closest("button, input, label")) return;
+    e.preventDefault();
+    const sx = e.clientX - helpPos.x;
+    const sy = e.clientY - helpPos.y;
+    const move = (ev: MouseEvent) => {
+      if (!(ev.buttons & 1)) return up(); // mouseup perso (Alt+Tab): sgancia
+      helpPos = {
+        x: Math.min(Math.max(ev.clientX - sx, -460), window.innerWidth - 160),
+        y: Math.min(Math.max(ev.clientY - sy, 0), window.innerHeight - 44),
+      };
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      try {
+        localStorage.setItem("scriptorium-help-pos", JSON.stringify(helpPos));
+      } catch {
+        /* ignora */
+      }
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.9";
+  const APP_VERSION = "0.9.10";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -2759,6 +2816,8 @@
     backup: "M22 12H2M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01",
     layers: "M12 2l9 5-9 5-9-5zM3 12l9 5 9-5M3 17l9 5 9-5",
     bookmark: "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z",
+    // salvagente (life-buoy): inconfondibile col «?» di Chiedi alla libreria
+    help: "M12 2a10 10 0 1 0 .01 0M12 8a4 4 0 1 0 .01 0M4.93 4.93l4.24 4.24M14.83 14.83l4.24 4.24M14.83 9.17l4.24-4.24M4.93 19.07l4.24-4.24",
     x: "M18 6L6 18M6 6l12 12",
   };
 
@@ -3154,6 +3213,13 @@
       { id: "g-trash", label: "Cestino", icon: I.trash, hint: "I documenti eliminati (ripristinabili)", action: () => setFilter({ kind: "trash" }) },
       { id: "g-term", label: "Terminale", icon: I.term, hint: "PowerShell integrato nella cartella dei PDF", action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
       {
+        id: "g-help",
+        label: "Guida",
+        icon: I.help,
+        hint: "La guida di Scriptorium: si sposta e resta aperta (anche in primo piano) mentre lavori",
+        action: () => openHelp(),
+      },
+      {
         id: "g-theme",
         label: "Aspetto",
         icon: I.theme,
@@ -3172,7 +3238,6 @@
         icon: I.gear,
         children: [
           { id: "gy-set", label: "Impostazioni", icon: I.gear, action: () => openSettings() },
-          { id: "gy-help", label: "Aiuto", icon: I.ask, action: () => openHelp() },
           { id: "gy-about", label: "Informazioni", action: () => (aboutModal = true) },
         ],
       },
@@ -6447,21 +6512,28 @@
   {/if}
 
   {#if helpModal}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) helpModal = false; }} role="presentation">
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-      <div class="idmodal helpmodal" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+    <!-- Finestra flottante NON modale: l'app resta usabile, la guida si trascina
+         dalla barra del titolo e (a scelta) resta in primo piano sopra il lettore. -->
+    <div class="helpwin" class:pinned={helpPin} style="left:{helpPos.x}px; top:{helpPos.y}px" role="dialog" aria-label="Guida a Scriptorium">
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="helpdrag" onmousedown={startHelpDrag} title="Trascina per spostare la guida">
         <h2>Guida a Scriptorium</h2>
+        <label class="helppinlbl" title="Tieni la guida sopra ogni altra vista, anche il lettore">
+          <input type="checkbox" bind:checked={helpPin} /> in primo piano
+        </label>
+        <button class="helpx" title="Chiudi la guida" onclick={() => (helpModal = false)}>×</button>
+      </div>
+      <div class="helpbody">
         <p class="dimtext">Gestore locale di PDF, riferimenti e appunti: tutto resta sul tuo computer, le funzioni di rete e AI sono opzionali. <strong>Regola d'oro</strong>: qualunque cosa cerchi, premi <kbd>Ctrl</kbd>+<kbd>K</kbd> e digitala.</p>
 
         <div class="helptabs">
-          <button class="segbtn wide" class:active={helpTab === "inizia"} onclick={() => (helpTab = "inizia")}>Inizia qui</button>
-          <button class="segbtn wide" class:active={helpTab === "libreria"} onclick={() => (helpTab = "libreria")}>Libreria</button>
-          <button class="segbtn wide" class:active={helpTab === "lettura"} onclick={() => (helpTab = "lettura")}>Lettura</button>
-          <button class="segbtn wide" class:active={helpTab === "scrittura"} onclick={() => (helpTab = "scrittura")}>Scrittura</button>
-          <button class="segbtn wide" class:active={helpTab === "scoperta"} onclick={() => (helpTab = "scoperta")}>Scoperta</button>
-          <button class="segbtn wide" class:active={helpTab === "ai"} onclick={() => (helpTab = "ai")}>AI &amp; dati</button>
-          <button class="segbtn wide" class:active={helpTab === "faq"} onclick={() => (helpTab = "faq")}>FAQ</button>
+          <button class:active={helpTab === "inizia"} onclick={() => (helpTab = "inizia")}>Inizia qui</button>
+          <button class:active={helpTab === "libreria"} onclick={() => (helpTab = "libreria")}>Libreria</button>
+          <button class:active={helpTab === "lettura"} onclick={() => (helpTab = "lettura")}>Lettura</button>
+          <button class:active={helpTab === "scrittura"} onclick={() => (helpTab = "scrittura")}>Scrittura</button>
+          <button class:active={helpTab === "scoperta"} onclick={() => (helpTab = "scoperta")}>Scoperta</button>
+          <button class:active={helpTab === "ai"} onclick={() => (helpTab = "ai")}>AI &amp; dati</button>
+          <button class:active={helpTab === "faq"} onclick={() => (helpTab = "faq")}>FAQ</button>
         </div>
 
         {#if helpTab === "inizia"}
@@ -6713,7 +6785,6 @@
         </div>
         {/if}
 
-        <div class="modactions"><button class="primary" onclick={() => (helpModal = false)}>Chiudi</button></div>
       </div>
     </div>
   {/if}
@@ -7480,13 +7551,38 @@
   .novact { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
   .ghost.primary { border-color: var(--accent); color: var(--accent); }
   .ghost.primary:hover:not(:disabled) { background: var(--accent-soft); }
-  /* Help modal */
-  .helpmodal { width: 760px; max-height: 86vh; overflow-y: auto; }
-  .helptabs {
-    display: flex; flex-wrap: wrap; gap: 2px; margin-top: 12px;
-    background: var(--panel); border: 1px solid var(--border-soft);
-    border-radius: var(--r-pill); padding: 3px; width: fit-content;
+  /* Guida: finestra flottante non modale — trascinabile, ridimensionabile,
+     opzionalmente in primo piano (sopra lettore e modali, sotto radiale/conferme) */
+  .helpwin {
+    position: fixed; z-index: 45; width: 660px; height: min(78vh, 800px);
+    min-width: 380px; min-height: 260px; max-width: calc(100vw - 24px); max-height: calc(100vh - 24px);
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+    box-shadow: var(--shadow-lg);
+    display: flex; flex-direction: column; overflow: hidden; resize: both;
   }
+  .helpwin.pinned { z-index: 85; }
+  .helpdrag {
+    display: flex; align-items: center; gap: 12px; padding: 9px 14px;
+    background: var(--panel); border-bottom: 1px solid var(--border-soft);
+    cursor: grab; user-select: none; flex: 0 0 auto;
+  }
+  .helpdrag:active { cursor: grabbing; }
+  .helpdrag h2 { margin: 0; flex: 1; font-size: 15px; font-family: var(--serif); font-weight: 600; color: var(--text); }
+  .helppinlbl { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--dim); cursor: pointer; white-space: nowrap; }
+  .helpx { background: none; border: none; color: var(--dim); font-size: 18px; line-height: 1; cursor: pointer; padding: 0 2px; }
+  .helpx:hover { color: var(--danger); }
+  .helpbody { flex: 1; overflow-y: auto; padding: 12px 20px 20px; }
+  .helpbody > .dimtext { color: var(--dim); font-size: 13px; margin: 0 0 10px; }
+  /* linguette come semplici tab sottolineate, senza riquadro */
+  .helptabs { display: flex; flex-wrap: wrap; gap: 2px 16px; border-bottom: 1px solid var(--border); }
+  .helptabs button {
+    background: none; border: none; padding: 5px 2px 7px; margin-bottom: -1px;
+    font-size: 13px; color: var(--dim); cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color var(--ease), border-color var(--ease);
+  }
+  .helptabs button:hover { color: var(--accent); }
+  .helptabs button.active { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent); }
   .faq { margin: 0; }
   .faq dt { font-size: 13px; font-weight: 600; color: var(--text); margin-top: 10px; }
   .faq dd { margin: 2px 0 0; font-size: 13px; line-height: 1.5; color: var(--dim); }
@@ -7497,7 +7593,7 @@
   .kbdtable { width: 100%; border-collapse: collapse; margin-top: 10px; }
   .kbdtable td { padding: 4px 8px; font-size: 12.5px; border-bottom: 1px solid var(--border-soft); color: var(--dim); }
   .kbdtable td:first-child { white-space: nowrap; width: 1%; }
-  .helpmodal kbd {
+  .helpwin kbd {
     background: var(--panel); border: 1px solid var(--border); border-radius: 5px;
     padding: 1px 6px; font-family: ui-monospace, monospace; font-size: 12px; color: var(--text);
   }
