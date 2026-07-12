@@ -4,7 +4,7 @@
   // pulled from the library ("Cita" -> \cite{citekey}), refs.bib synced from
   // the whole library, and compilation via the system toolchain (Tectonic or
   // latexmk) with an in-app pdf.js preview of main.pdf.
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import * as pdfjsLib from "pdfjs-dist";
   import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -28,6 +28,17 @@
   } from "$lib/api";
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+
+  // Slug che il genitore chiede di aprire (es. dalla palette comandi).
+  let { openSlug = null }: { openSlug?: string | null } = $props();
+  let handledSlug: string | null = null; // non-reattivo: evita loop nell'effetto
+  $effect(() => {
+    const s = openSlug;
+    if (s && s !== handledSlug) {
+      handledSlug = s;
+      untrack(() => void openProject(s));
+    }
+  });
 
   /** Extensions we can open in the text editor (the rest is preview-only). */
   const TEXT_EXT = ["tex", "bib", "sty", "cls", "bst", "txt", "md"];

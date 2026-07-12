@@ -153,6 +153,8 @@
     type WikiPage,
     type AiDocResult,
     type PathStep,
+    listProjects,
+    type ProjectMeta,
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
   import MetaEditor from "$lib/MetaEditor.svelte";
@@ -580,7 +582,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.10";
+  const APP_VERSION = "0.9.11";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3266,8 +3268,44 @@
   }
 
   // ----- Command palette entries: actions + navigation + themes + documents -----
+  // ----- Palette: contenuti raggiungibili per nome (oltre ai documenti) -----
+  // I progetti LaTeX vivono nel componente TexProjects; per la palette teniamo
+  // una copia leggera dell'elenco, aggiornata a ogni apertura della palette.
+  let palProjects = $state<ProjectMeta[]>([]);
+  // Slug che TexProjects deve aprire quando viene montato/quando cambia
+  // (impostato dalla palette: «Progetto LaTeX: …»).
+  let projectsOpenSlug = $state<string | null>(null);
+  $effect(() => {
+    if (!paletteOpen) return;
+    // Richieste locali economiche: ad ogni apertura la palette vede appunti,
+    // pagine wiki e progetti freschi anche se le loro viste non sono mai state aperte.
+    void (async () => {
+      try {
+        notesList = await listNotes();
+      } catch {
+        /* vault non leggibile: la palette resta senza appunti */
+      }
+      try {
+        wikiPages = await wikiList();
+      } catch {
+        /* ignora */
+      }
+      try {
+        palProjects = await listProjects();
+      } catch {
+        /* ignora */
+      }
+    })();
+  });
+
   function paletteEntries(): PaletteEntry[] {
     const out: PaletteEntry[] = [];
+    // Le voci di navigazione chiudono il lettore se aperto (la palette ora
+    // funziona anche lì): senza questo, la vista cambierebbe dietro il PDF.
+    const leaveReader = () => {
+      openDoc = null;
+      openDocPage = null;
+    };
     const walk = (items: RadialItem[], trail: string) => {
       for (const it of items) {
         if (it.disabled) continue;
@@ -3295,13 +3333,32 @@
       ...(facets.own ? [["Il mio lavoro", "", () => setFilter({ kind: "mywork" })] as [string, string, () => void]] : []),
       ["Cestino", "", () => setFilter({ kind: "trash" })],
     ];
-    for (const [label, hint, run] of nav) out.push({ id: "nav-" + label, title: label, hint, section: "Vai a", run });
+    for (const [label, hint, run] of nav) out.push({ id: "nav-" + label, title: label, hint, section: "Vai a", run: () => { leaveReader(); run(); } });
     for (const c of collections)
-      out.push({ id: "nav-c" + c.id, title: `Collezione: ${c.name}`, section: "Vai a", run: () => setFilter({ kind: "collection", id: c.id, label: c.name }) });
+      out.push({ id: "nav-c" + c.id, title: `Collezione: ${c.name}`, section: "Vai a", run: () => { leaveReader(); setFilter({ kind: "collection", id: c.id, label: c.name }); } });
     for (const t of tags)
-      out.push({ id: "nav-t" + t.id, title: `Tag: ${t.name}`, hint: `${t.count} documenti`, section: "Vai a", run: () => toggleTagFilter(t.id) });
+      out.push({ id: "nav-t" + t.id, title: `Tag: ${t.name}`, hint: `${t.count} documenti`, section: "Vai a", run: () => { leaveReader(); toggleTagFilter(t.id); } });
     for (const s of savedSearches)
-      out.push({ id: "nav-s" + s.id, title: `Ricerca salvata: ${s.name}`, hint: "rilancia e mostra le novità", section: "Vai a", run: () => runSaved(s) });
+      out.push({ id: "nav-s" + s.id, title: `Ricerca salvata: ${s.name}`, hint: "rilancia e mostra le novità", section: "Vai a", run: () => { leaveReader(); runSaved(s); } });
+    // Appunti, pagine wiki e progetti LaTeX: raggiungibili per nome, come i documenti.
+    for (const n of notesList.slice(0, 300))
+      out.push({ id: "note-" + n.slug, title: `Appunto: ${n.title}`, hint: n.excerpt || undefined, section: "Appunti", keywords: "appunto nota md", run: () => { leaveReader(); void openNoteHit(n.slug); } });
+    for (const w of wikiPages.slice(0, 300))
+      out.push({ id: "wiki-" + w.slug, title: `Wiki: ${w.title}`, section: "Wiki", keywords: "wiki pagina concetto", run: () => { leaveReader(); openWikiView(); void openWikiPage(w.slug); } });
+    for (const p of palProjects.slice(0, 100))
+      out.push({ id: "proj-" + p.slug, title: `Progetto LaTeX: ${p.name}`, section: "Progetti", keywords: "latex progetto tex overleaf", run: () => { leaveReader(); projectsOpenSlug = p.slug; setFilter({ kind: "projects" }); } });
+    // La guida, scheda per scheda.
+    const helpTabs: [HelpTab, string][] = [
+      ["inizia", "Inizia qui"],
+      ["libreria", "Libreria"],
+      ["lettura", "Lettura"],
+      ["scrittura", "Scrittura"],
+      ["scoperta", "Scoperta"],
+      ["ai", "AI & dati"],
+      ["faq", "FAQ — Come faccio a…"],
+    ];
+    for (const [tab, label] of helpTabs)
+      out.push({ id: "help-" + tab, title: `Guida: ${label}`, section: "Guida", keywords: "aiuto help manuale documentazione faq", run: () => { openHelp(); helpTab = tab; } });
     for (const t of THEMES)
       out.push({ id: "th-" + t.value, title: `Tema: ${t.label}`, hint: t.dark ? "scuro" : "chiaro", section: "Aspetto", keywords: "tema aspetto colori", run: () => (theme = t.value) });
     // Documents (open directly) — not in the trash view, where `docs` holds deleted items
@@ -3322,7 +3379,9 @@
   function onGlobalKey(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
-      if (!openDoc) paletteOpen = !paletteOpen;
+      // Disponibile anche nel lettore: la palette (z-95) sta sopra e gestisce
+      // i suoi tasti; le voci di navigazione chiudono il lettore da sole.
+      paletteOpen = !paletteOpen;
       return;
     }
     if (openDoc) return;
@@ -5186,7 +5245,7 @@
           </section>
         </div>
       {:else if filter.kind === "projects"}
-        <TexProjects />
+        <TexProjects openSlug={projectsOpenSlug} />
       {:else if filter.kind === "novita"}
         <div class="novhead">
           <div class="novtitle">
@@ -6542,7 +6601,7 @@
           <ul>
             <li><strong>Barra strumenti</strong> (in alto): un'icona per ogni strumento — passaci sopra col mouse per il nome. Nell'ordine: <strong>I miei paper</strong> (torna alla griglia), <strong>Importa</strong>, <strong>Vista</strong>, <strong>Riprendi lettura</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Appunti</strong>, <strong>Progetti (LaTeX)</strong>, <strong>Riscopri</strong>, <strong>Novità</strong> (🔔 col conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong>, <strong>Indice semantico</strong>, <strong>Memoria AI</strong> (o <em>Attiva AI</em> quando è spenta), <strong>Backup</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Aspetto</strong>, <strong>Sistema</strong> (Impostazioni · Aiuto · Informazioni). Le voci con un menu si aprono al clic, le altre eseguono; l'icona è evidenziata quando sei nella vista corrispondente. In alto trovi anche il chip <strong>AI</strong> (stato dell'AI locale), «✦ N senza metadati» quando serve, e l'icona della <strong>palette</strong>.</li>
             <li><strong>Menu radiale</strong> (tasto destro): su un <strong>documento</strong> → le azioni su quel documento; sullo <strong>spazio vuoto</strong> → il menu globale (gli stessi gruppi della barra); su una <strong>selezione multipla</strong> → le azioni in blocco. Muovi verso un petalo e clicca (basta la direzione); <strong>rotella</strong> per ruotare; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; il centro torna indietro, <kbd>Esc</kbd> chiude. La <strong>descrizione</strong> della voce evidenziata compare sotto l'anello.</li>
-            <li><strong>Palette comandi</strong> (<kbd>Ctrl</kbd>+<kbd>K</kbd>): ogni azione, documento, filtro e tema, digitando. Barra, radiale e palette pescano dallo <strong>stesso registro</strong>: nessuna funzione è esclusiva di una sola — se non trovi un comando, è comunque lì.</li>
+            <li><strong>Palette comandi</strong> (<kbd>Ctrl</kbd>+<kbd>K</kbd>): ogni azione, documento, <strong>appunto</strong>, <strong>pagina wiki</strong>, <strong>progetto LaTeX</strong>, filtro, sezione della guida e tema — digitando. Funziona <strong>anche dentro il lettore</strong>. Barra, radiale e palette pescano dallo <strong>stesso registro</strong>: se non trovi un comando, è comunque lì.</li>
           </ul>
         </div>
 
@@ -6552,6 +6611,7 @@
             <li><strong>Un clic</strong> su una scheda apre il <strong>pannello di dettaglio</strong> a destra (abstract, riassunto AI, tag modificabili, citazioni, note); <strong>doppio clic</strong> o <kbd>Invio</kbd> aprono il lettore.</li>
             <li>La <strong>barra laterale</strong> è la navigazione: filtri rapidi (Preferiti, Da leggere, Con codice, Peer-reviewed, Il mio lavoro), tag, collezioni, ricerche salvate, cartella sorvegliata. <kbd>Ctrl</kbd>+<kbd>B</kbd> la mostra/nasconde.</li>
             <li>Nella vista «Tutti»: la <strong>Panoramica</strong> (da leggere, in lettura, aggiunti questo mese + un paper da riscoprire al giorno) e <strong>Continua a leggere</strong> (gli ultimi PDF aperti). Nel lettore la barra svanisce mentre leggi e lo zoom è ricordato per documento.</li>
+            <li><strong>Questa guida è una finestra</strong>: trascinala dalla barra del titolo, ridimensionala dall'angolo in basso a destra (come quasi tutte le finestre di dialogo) e spunta <strong>«in primo piano»</strong> per tenerla visibile — anche sopra il lettore — mentre segui i passaggi.</li>
           </ul>
           <table class="kbdtable">
             <tbody>
@@ -6582,6 +6642,14 @@
             <li><strong>Tag</strong> colorati (la <strong>✎</strong> in sidebar rinomina/ricolora, la <strong>×</strong> elimina; dal pannello dettagli li applichi al volo) e <strong>Collezioni</strong>, anche <em>smart</em> (si popolano da sole con una regola).</li>
             <li><strong>Filtri</strong> in sidebar (Preferiti, Da leggere, Con codice, Peer-reviewed, Il mio lavoro), <strong>ordinamento combinabile</strong> (chip «Ordina ▾»: un clic attiva, un altro inverte, un terzo toglie), badge <em>preprint / peer-reviewed</em> sulle schede.</li>
             <li><strong>Viste</strong> (barra → Vista): griglia (copertine ridimensionabili con − ▭ +), lista a colonne, <strong>Costellazione</strong> (la mappa semantica — vedi la scheda <em>Scoperta</em>). Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
+          </ul>
+        </div>
+
+        <div class="helpsec">
+          <h3>Condividere e stampare</h3>
+          <ul>
+            <li>Tasto destro → <strong>Condividi</strong>: <strong>WhatsApp / Teams / Gmail</strong> aprono la bozza col messaggio pronto e il <strong>PDF è già copiato negli appunti di sistema</strong> — incollalo con <kbd>Ctrl</kbd>+<kbd>V</kbd>; <strong>Outlook desktop</strong> allega il file da solo. Funziona anche sulla <strong>selezione multipla</strong>.</li>
+            <li><strong>Stampa</strong>: dal lettore (menu <strong>⋯ Altro</strong> o radiale) per il documento aperto, o dal radiale della selezione per stamparne più d'uno.</li>
           </ul>
         </div>
 
@@ -6751,6 +6819,8 @@
             <dd>Clic su «✦ N senza metadati» in alto; per un caso singolo: tasto destro → Modifica metadati. Per tutta la libreria: Impostazioni → Manutenzione → «Ripara metadati errati».</dd>
             <dt>…copiare una citazione pronta?</dt>
             <dd>Tasto destro sul paper → Cita: APA, IEEE, BibTeX, citekey, <code>\cite</code>, <code>[@…]</code>. Con più paper selezionati ottieni <code>\cite&#123;k1,k2&#125;</code> o tutte le voci BibTeX insieme.</dd>
+            <dt>…mandare un paper a un collega?</dt>
+            <dd>Tasto destro → Condividi: WhatsApp/Teams/Gmail aprono il messaggio pronto e il PDF è già negli appunti di sistema (incollalo con <kbd>Ctrl</kbd>+<kbd>V</kbd>); Outlook desktop lo allega da solo.</dd>
             <dt>…estrarre una tabella che viene male?</dt>
             <dd>Nella finestra della tabella cambia motore: <strong>Modello</strong> per le tabelle dei paper (anche senza bordi), <strong>Ollama</strong> per le scansioni. Il rettangolo deve coprire tutta la tabella.</dd>
             <dt>…correggere una formula riconosciuta male?</dt>
@@ -6780,7 +6850,7 @@
             <dt>…liberare la memoria della GPU senza spegnere tutto?</dt>
             <dd>Barra → Memoria AI → «Libera GPU». «Ferma AI» invece chiude anche il server e disattiva l'AI.</dd>
             <dt>…trovare un comando che non ricordo dove sta?</dt>
-            <dd><kbd>Ctrl</kbd>+<kbd>K</kbd> e digitalo. Funziona anche nel menu radiale: apri e digita per filtrare.</dd>
+            <dd><kbd>Ctrl</kbd>+<kbd>K</kbd> e digitalo: trovi azioni, documenti, appunti, pagine wiki, progetti e le sezioni di questa guida — anche mentre leggi un PDF. Funziona pure nel menu radiale: apri e digita per filtrare.</dd>
           </dl>
         </div>
         {/if}
