@@ -227,6 +227,13 @@ CREATE TABLE IF NOT EXISTS graph_positions (
   x REAL NOT NULL,
   y REAL NOT NULL
 );
+-- Posizioni degli APPUNTI nella Costellazione (id nodo = -note_id): tabella
+-- separata perché graph_positions ha la FK sui documents.
+CREATE TABLE IF NOT EXISTS note_graph_positions (
+  note_id INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+  x REAL NOT NULL,
+  y REAL NOT NULL
+);
 
 -- ===== RAG: passage chunks + their embeddings ("ask your library") =====
 -- Document-level vectors above are great for "find similar docs"; the engine

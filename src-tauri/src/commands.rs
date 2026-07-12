@@ -1515,10 +1515,24 @@ pub async fn similarity_graph(
         }
     }
 
-    // Note nodes (diamonds in the map). No PCA seed: the frontend places them
-    // next to their strongest paper; positions aren't persisted (FK on docs).
+    // Note nodes (diamonds in the map). No PCA seed: with no saved position the
+    // frontend places them next to their strongest paper; saved positions live
+    // in note_graph_positions (id = -note_id, FK sulle note).
+    let saved_notes: std::collections::HashMap<i64, (f32, f32)> = {
+        let conn = state.db.lock();
+        let mut stmt = conn
+            .prepare("SELECT note_id, x, y FROM note_graph_positions")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, (r.get::<_, f64>(1)? as f32, r.get::<_, f64>(2)? as f32)))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
     for (nid, slug, title) in &notes {
         let id = -nid;
+        let pos = saved_notes.get(nid);
         nodes.push(GraphNode {
             id,
             title: title.clone(),
@@ -1531,8 +1545,8 @@ pub async fn similarity_graph(
             has_github: false,
             px: 0.0,
             py: 0.0,
-            sx: None,
-            sy: None,
+            sx: pos.map(|p| p.0),
+            sy: pos.map(|p| p.1),
             community: community_of.get(&id).copied().unwrap_or(-1),
             kind: "note".to_string(),
             slug: Some(slug.clone()),
@@ -1560,14 +1574,22 @@ pub fn save_graph_positions(
     let mut conn = state.db.lock();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     {
-        let mut stmt = tx
+        let mut doc_stmt = tx
             .prepare("INSERT OR REPLACE INTO graph_positions (document_id, x, y) VALUES (?1, ?2, ?3)")
+            .map_err(|e| e.to_string())?;
+        // id negativi = appunti (id nodo = -note_id), su una tabella dedicata.
+        let mut note_stmt = tx
+            .prepare("INSERT OR REPLACE INTO note_graph_positions (note_id, x, y) VALUES (?1, ?2, ?3)")
             .map_err(|e| e.to_string())?;
         for p in positions.iter().take(4000) {
             if !p.x.is_finite() || !p.y.is_finite() {
                 continue;
             }
-            let _ = stmt.execute(params![p.id, p.x as f64, p.y as f64]);
+            if p.id < 0 {
+                let _ = note_stmt.execute(params![-p.id, p.x as f64, p.y as f64]);
+            } else {
+                let _ = doc_stmt.execute(params![p.id, p.x as f64, p.y as f64]);
+            }
         }
     }
     tx.commit().map_err(|e| e.to_string())

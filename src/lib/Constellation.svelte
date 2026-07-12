@@ -192,6 +192,20 @@
     localStorage.setItem("scriptorium-map-color", colorMode);
     schedule();
   });
+  // Nebulose delle comunità: aloni + nomi, solo aloni, o niente (persistito).
+  type NebulaMode = "full" | "tint" | "off";
+  const NEBULA_MODES: { value: NebulaMode; label: string }[] = [
+    { value: "full", label: "Nebulose + nomi" },
+    { value: "tint", label: "Solo nebulose" },
+    { value: "off", label: "Senza nebulose" },
+  ];
+  let nebulaMode = $state<NebulaMode>(
+    (localStorage.getItem("scriptorium-map-nebula") as NebulaMode) || "full",
+  );
+  $effect(() => {
+    localStorage.setItem("scriptorium-map-nebula", nebulaMode);
+    schedule();
+  });
   /** Stable, well-spread hue per community (golden-angle walk). */
   function commColor(i: number, alpha = 1): string {
     return `hsla(${(i * 137.508) % 360}, 55%, 52%, ${alpha})`;
@@ -869,8 +883,10 @@
 
     // Nebulae: soft halos over each semantic community, at EVERY zoom — strong
     // from afar (the map reads as thematic areas), a subtle tint up close.
-    // Cluster labels only from afar, where node labels aren't legible yet.
-    if (clusterMeta.length > 0) {
+    // I NOMI dei cluster vengono raccolti qui ma disegnati in coda al frame,
+    // SOPRA nodi ed etichette, su targhette leggibili (vedi fine di draw()).
+    const nebLabels: { title: string; sub: string; cx: number; cy: number; color: string }[] = [];
+    if (clusterMeta.length > 0 && nebulaMode !== "off") {
       const nebAlpha = zoom < NEBULA_ZOOM ? 0.16 : Math.max(0.06, 0.16 - (zoom - NEBULA_ZOOM) * 0.08);
       const acc: Map<number, { sx: number; sy: number; n: number; r2: number }> = new Map();
       for (const n of nodes) {
@@ -888,8 +904,6 @@
         const dy = n.y - a.sy / a.n;
         a.r2 = Math.max(a.r2, dx * dx + dy * dy);
       }
-      c.textAlign = "center";
-      c.textBaseline = "middle";
       for (const meta of clusterMeta) {
         const a = acc.get(meta.id);
         if (!a || a.n < 3) continue;
@@ -904,16 +918,16 @@
         c.beginPath();
         c.arc(cx, cy, rr, 0, TAU);
         c.fill();
-        if (zoom < NEBULA_ZOOM) {
-          c.font = '600 13px Georgia, "Times New Roman", serif';
-          c.fillStyle = withAlpha(theme.text, 0.75);
-          c.fillText(ellipsize(meta.label, 34), cx, cy - rr * 0.1);
-          c.font = LABEL_FONT;
-          c.fillStyle = withAlpha(theme.dim, 0.7);
-          c.fillText(`${a.n} paper`, cx, cy - rr * 0.1 + 16);
+        if (nebulaMode === "full" && zoom < 0.9) {
+          nebLabels.push({
+            title: ellipsize(meta.label, 34),
+            sub: `${a.n} paper`,
+            cx,
+            cy,
+            color: commColor(meta.id, 0.85),
+          });
         }
       }
-      c.textAlign = "left";
     }
 
     // Edges
@@ -1087,6 +1101,54 @@
         c.fillText(label, lx, ly);
       }
       c.globalAlpha = 1;
+    }
+
+    // Nomi delle nebulose: per ULTIMI, sopra nodi/archi/etichette, su una
+    // targhetta col bordo nel colore della comunità. Visibili da lontano e in
+    // dissolvenza fino a zoom 0.9 (da vicino parlano i singoli nodi); una
+    // targhetta che coprirebbe la precedente scivola sotto di essa.
+    if (nebLabels.length > 0) {
+      const la = zoom < 0.7 ? 1 : Math.max(0, 1 - (zoom - 0.7) / 0.2);
+      if (la > 0.02) {
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        const placed: { x: number; y: number; w: number; h: number }[] = [];
+        for (const nl of nebLabels) {
+          c.font = '600 13px Georgia, "Times New Roman", serif';
+          const w1 = c.measureText(nl.title).width;
+          c.font = LABEL_FONT;
+          const w2 = c.measureText(nl.sub).width;
+          const bw = Math.max(w1, w2) + 26;
+          const bh = 40;
+          const bx = nl.cx - bw / 2;
+          let by = nl.cy - bh / 2;
+          for (let guard = 0; guard < 6; guard++) {
+            const hit = placed.find(
+              (p) => bx < p.x + p.w && bx + bw > p.x && by < p.y + p.h && by + bh > p.y,
+            );
+            if (!hit) break;
+            by = hit.y + hit.h + 6;
+          }
+          placed.push({ x: bx, y: by, w: bw, h: bh });
+          c.globalAlpha = 0.86 * la;
+          c.fillStyle = theme.bg;
+          chipPath(c, bx, by, bw, bh, 11);
+          c.fill();
+          c.globalAlpha = la;
+          c.strokeStyle = nl.color;
+          c.lineWidth = 1.2;
+          chipPath(c, bx, by, bw, bh, 11);
+          c.stroke();
+          c.font = '600 13px Georgia, "Times New Roman", serif';
+          c.fillStyle = theme.text;
+          c.fillText(nl.title, bx + bw / 2, by + 14);
+          c.font = LABEL_FONT;
+          c.fillStyle = theme.dim;
+          c.fillText(nl.sub, bx + bw / 2, by + 29);
+        }
+        c.globalAlpha = 1;
+        c.textAlign = "left";
+      }
     }
   }
 
@@ -1334,6 +1396,9 @@
     <div class="hud">
       <select class="hudsel" bind:value={colorMode} title="Colora le stelle per…">
         {#each COLOR_MODES as m (m.value)}<option value={m.value}>{m.label}</option>{/each}
+      </select>
+      <select class="hudsel" bind:value={nebulaMode} title="Nebulose delle comunità: aloni con i nomi, solo gli aloni, oppure niente">
+        {#each NEBULA_MODES as m (m.value)}<option value={m.value}>{m.label}</option>{/each}
       </select>
       {#if onParams}
         <button title="Densità del grafo (vicini e soglia di somiglianza)" class:on={tuneOpen} onclick={toggleTune}>⚙</button>
