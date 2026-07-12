@@ -155,6 +155,7 @@
     type PathStep,
     listProjects,
     type ProjectMeta,
+    checkUpdate,
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
   import MetaEditor from "$lib/MetaEditor.svelte";
@@ -517,6 +518,30 @@
   }
   let addingExt = $state<string | null>(null);
   let settingsModal = $state(false);
+  // ----- Controllo aggiornamenti: solo un avviso (nessun download automatico) -----
+  let updateLatest = $state<string | null>(null); // versione più nuova trovata
+  let updateUrl = $state("https://github.com/shelaik/scriptorium");
+  /** Confronta la versione con GitHub. `manual` = lanciato dall'utente (parla
+   *  sempre); all'avvio è silenzioso, gira solo con la scoperta online attiva
+   *  e al più una volta al giorno. */
+  async function checkUpdatesNow(manual: boolean) {
+    if (manual) status = "Controllo aggiornamenti…";
+    try {
+      const u = await checkUpdate();
+      updateUrl = u.url;
+      if (u.newer && u.latest) {
+        updateLatest = u.latest;
+        status = `È disponibile Scriptorium ${u.latest} (hai la ${u.current}) — clic sul segnalino in alto per aprire GitHub`;
+      } else if (manual) {
+        status = u.latest
+          ? `Sei aggiornato: ${u.current} è l'ultima versione`
+          : "Controllo non riuscito: repository non raggiungibile (privato oppure offline)";
+      }
+    } catch (e) {
+      if (manual) status = "Controllo aggiornamenti: " + e;
+    }
+  }
+
   let helpModal = $state(false);
   // Guida a schede: si riapre sempre da «Inizia qui». È una finestra flottante
   // NON modale: si trascina, resta aperta mentre si lavora e — a scelta — resta
@@ -582,7 +607,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.11";
+  const APP_VERSION = "0.9.12";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -849,6 +874,9 @@
 
   function setFilter(f: Filter) {
     filter = f;
+    // Lasciando la vista Progetti, la richiesta "apri questo progetto" decade:
+    // al prossimo ingresso il componente riparte dal progetto più recente.
+    if (f.kind !== "projects") projectsOpenSlug = null;
     query = "";
     selected = [];
     tagFilter = []; // base-filter change starts a fresh tag selection
@@ -2641,6 +2669,20 @@
     loadSidebar();
     loadConnector();
     checkClipboard(); // magari l'app è stata aperta subito dopo aver copiato un link
+    // Avviso-versione all'avvio: silenzioso, opt-in (solo con la scoperta online
+    // attiva) e al più una volta al giorno.
+    void (async () => {
+      try {
+        const last = Number(localStorage.getItem("scriptorium-update-check") || 0);
+        if (Date.now() - last < 24 * 3600 * 1000) return;
+        const s = await getDiscoverySettings();
+        if (!s.enabled) return;
+        localStorage.setItem("scriptorium-update-check", String(Date.now()));
+        await checkUpdatesNow(false);
+      } catch {
+        /* offline o impostazioni non leggibili: nessun avviso */
+      }
+    })();
     getWatchedFolder()
       .then((w) => (watchedFolder = w))
       .catch(() => {});
@@ -3240,6 +3282,7 @@
         icon: I.gear,
         children: [
           { id: "gy-set", label: "Impostazioni", icon: I.gear, action: () => openSettings() },
+          { id: "gy-upd", label: "Controlla aggiornamenti", hint: "Confronta la tua versione con GitHub — solo un avviso, niente installazioni automatiche", action: () => void checkUpdatesNow(true) },
           { id: "gy-about", label: "Informazioni", action: () => (aboutModal = true) },
         ],
       },
@@ -3346,7 +3389,22 @@
     for (const w of wikiPages.slice(0, 300))
       out.push({ id: "wiki-" + w.slug, title: `Wiki: ${w.title}`, section: "Wiki", keywords: "wiki pagina concetto", run: () => { leaveReader(); openWikiView(); void openWikiPage(w.slug); } });
     for (const p of palProjects.slice(0, 100))
-      out.push({ id: "proj-" + p.slug, title: `Progetto LaTeX: ${p.name}`, section: "Progetti", keywords: "latex progetto tex overleaf", run: () => { leaveReader(); projectsOpenSlug = p.slug; setFilter({ kind: "projects" }); } });
+      out.push({
+        id: "proj-" + p.slug,
+        title: `Progetto LaTeX: ${p.name}`,
+        section: "Progetti",
+        keywords: "latex progetto tex overleaf",
+        // null → tick → slug: forza il cambiamento della prop anche quando si
+        // richiede lo stesso progetto due volte (nel frattempo l'utente può
+        // essere passato a mano su un altro).
+        run: async () => {
+          leaveReader();
+          setFilter({ kind: "projects" });
+          projectsOpenSlug = null;
+          await tick();
+          projectsOpenSlug = p.slug;
+        },
+      });
     // La guida, scheda per scheda.
     const helpTabs: [HelpTab, string][] = [
       ["inizia", "Inizia qui"],
@@ -4659,6 +4717,16 @@
       >
         <span class="aidot"></span>◈ {emb.embedded}/{emb.total}
       </button>
+      {#if updateLatest}
+        <button
+          class="aichip active"
+          title={`È disponibile Scriptorium ${updateLatest} — apri GitHub`}
+          aria-label={`Nuova versione ${updateLatest} disponibile`}
+          onclick={() => openInBrowser(updateUrl)}
+        >
+          <span class="aidot"></span>↑ {updateLatest}
+        </button>
+      {/if}
     </div>
     <div class="searchgroup">
       <input
@@ -5804,6 +5872,9 @@
   {/if}
 
   {#if openDoc}
+    <!-- keyed: scegliendo un ALTRO documento (es. dalla palette) mentre il
+         lettore è aperto, il viewer si rimonta e carica il PDF giusto -->
+    {#key openDoc.id}
     <Viewer
       id={openDoc.id}
       title={openDoc.title ?? "PDF"}
@@ -5814,6 +5885,7 @@
       onSendToNote={(content, page, pos, opts) => openSendToNote(openDoc, { content, page, collapse: !opts?.code && !opts?.raw, label: opts?.label, code: opts?.code, raw: opts?.raw }, pos)}
       onOpenNotes={() => { openDoc = null; openDocPage = null; openNotesView(); }}
     />
+    {/key}
   {/if}
 
   {#if sendNote}

@@ -979,3 +979,13 @@ export const readProjectFileB64 = (slug: string, rel: string) =>
 export const syncProjectBib = (slug: string) => invoke<number>("sync_project_bib", { slug });
 export const compileProject = (slug: string) => invoke<CompileResult>("compile_project", { slug });
 export const revealProjectDir = (slug: string) => invoke<void>("reveal_project_dir", { slug });
+
+// ===== Controllo aggiornamenti (solo avviso, nessun download) =====
+export interface UpdateInfo {
+  current: string;
+  /** Versione sul ramo main di GitHub; null se non raggiungibile (repo privato/offline). */
+  latest: string | null;
+  newer: boolean;
+  url: string;
+}
+export const checkUpdate = () => invoke<UpdateInfo>("check_update");

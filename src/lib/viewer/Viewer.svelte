@@ -1993,6 +1993,20 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    // Superfici sopra il lettore (palette comandi, guida flottante…): se il
+    // focus è su un elemento FUORI dal viewer, i tasti non sono per noi.
+    {
+      const t = e.target as HTMLElement | null;
+      if (
+        t instanceof HTMLElement &&
+        t !== document.body &&
+        t !== document.documentElement &&
+        overlayEl &&
+        !overlayEl.contains(t)
+      ) {
+        return;
+      }
+    }
     if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
       e.preventDefault();
       openFind();

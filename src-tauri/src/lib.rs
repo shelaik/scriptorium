@@ -67,6 +67,9 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("pdfmanage.db");
+            // Rete di sicurezza: alla prima apertura di una versione nuova,
+            // copia del DB in backups/ PRIMA che le migrazioni lo tocchino.
+            db::backup_on_upgrade(&data_dir, &db_path, env!("CARGO_PKG_VERSION"));
             let conn = db::open(&db_path).map_err(|e| e.to_string())?;
             let pdfium = pdf::bind_for_app(app.handle()).map_err(|e| e.to_string())?;
             app.manage(AppState {
@@ -278,6 +281,7 @@ pub fn run() {
             commands::sync_project_bib,
             commands::compile_project,
             commands::reveal_project_dir,
+            commands::check_update,
             commands::term_open,
             commands::term_write,
             commands::term_resize,

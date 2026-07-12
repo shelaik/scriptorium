@@ -30,12 +30,13 @@
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
   // Slug che il genitore chiede di aprire (es. dalla palette comandi).
+  // Semantica: «assicurati che QUEL progetto sia aperto» — quindi si confronta
+  // col progetto corrente (untracked, per non creare cicli), non con l'ultima
+  // richiesta: così ripetere la stessa scelta dopo un cambio manuale funziona.
   let { openSlug = null }: { openSlug?: string | null } = $props();
-  let handledSlug: string | null = null; // non-reattivo: evita loop nell'effetto
   $effect(() => {
     const s = openSlug;
-    if (s && s !== handledSlug) {
-      handledSlug = s;
+    if (s && s !== untrack(() => current)) {
       untrack(() => void openProject(s));
     }
   });

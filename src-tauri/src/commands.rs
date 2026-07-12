@@ -1573,6 +1573,85 @@ pub fn save_graph_positions(
     tx.commit().map_err(|e| e.to_string())
 }
 
+// ===== Controllo aggiornamenti: solo un avviso read-only, nessun auto-update =====
+
+#[derive(serde::Serialize)]
+pub struct UpdateInfo {
+    pub current: String,
+    /// Versione pubblicata sul ramo main di GitHub; None se non raggiungibile
+    /// (repository privato, offline, …).
+    pub latest: Option<String>,
+    pub newer: bool,
+    pub url: String,
+}
+
+/// Confronta la versione in esecuzione con il package.json pubblicato su
+/// GitHub. Non scarica né installa nulla: informa soltanto.
+#[tauri::command]
+pub async fn check_update() -> Result<UpdateInfo, String> {
+    const RAW: &str = "https://raw.githubusercontent.com/shelaik/scriptorium/main/package.json";
+    const REPO: &str = "https://github.com/shelaik/scriptorium";
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("scriptorium/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let latest = match client.get(RAW).send().await {
+        Ok(r) if r.status().is_success() => r
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("version").and_then(|s| s.as_str()).map(String::from)),
+        _ => None,
+    };
+    let newer = latest.as_deref().map(|l| version_newer(l, &current)).unwrap_or(false);
+    Ok(UpdateInfo { current, latest, newer, url: REPO.into() })
+}
+
+/// true se `a` è più nuova di `b` (componenti numeriche, tollerante a "v" e suffissi).
+fn version_newer(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|p| {
+                p.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0)
+            })
+            .collect()
+    };
+    let (va, vb) = (parse(a), parse(b));
+    for i in 0..va.len().max(vb.len()) {
+        let x = va.get(i).copied().unwrap_or(0);
+        let y = vb.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::version_newer;
+
+    #[test]
+    fn version_ordering() {
+        assert!(version_newer("1.0.0", "0.9.12"));
+        assert!(version_newer("0.9.10", "0.9.9")); // numerico, non lessicografico
+        assert!(version_newer("0.10.0", "0.9.99"));
+        assert!(!version_newer("0.9.12", "0.9.12"));
+        assert!(!version_newer("0.9.11", "0.9.12"));
+        assert!(version_newer("v1.0.1", "1.0.0")); // prefisso v tollerato
+        assert!(version_newer("1.0.0.1", "1.0.0")); // componente extra
+        assert!(!version_newer("garbage", "0.1.0")); // non numerico → 0
+    }
+}
+
 // ===== Progetti LaTeX: folders of .tex/.bib the user owns, compiled via system toolchain =====
 
 /// Root folder of the LaTeX projects (created on demand).

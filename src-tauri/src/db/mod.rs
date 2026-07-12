@@ -32,6 +32,72 @@ pub fn register_sqlite_vec() {
     });
 }
 
+/// Pre-migration safety net: the FIRST time a new app version starts, copy the
+/// database (plus any leftover WAL/SHM from an unclean shutdown) into
+/// `backups/` BEFORE the new version's migrations touch it. Keeps the newest
+/// 5 backups. Must run before [`open`]; best-effort — never blocks startup.
+pub fn backup_on_upgrade(data_dir: &Path, db_path: &Path, version: &str) {
+    let marker = data_dir.join("last_version.txt");
+    let prev = std::fs::read_to_string(&marker).ok();
+    if prev.as_deref().map(str::trim) == Some(version) {
+        return; // stessa versione già avviata: nessuna migrazione nuova in arrivo
+    }
+    if db_path.is_file() {
+        let dir = data_dir.join("backups");
+        let _ = std::fs::create_dir_all(&dir);
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let base = format!("pre-{version}-{secs}");
+        let _ = std::fs::copy(db_path, dir.join(format!("{base}.db")));
+        for ext in ["-wal", "-shm"] {
+            let side = db_path.with_file_name(format!(
+                "{}{}",
+                db_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                ext
+            ));
+            if side.is_file() {
+                let _ = std::fs::copy(&side, dir.join(format!("{base}.db{ext}")));
+            }
+        }
+        prune_backups(&dir, 5);
+    }
+    let _ = std::fs::write(&marker, version);
+}
+
+/// Keep only the newest `keep` backup groups (a group = the files sharing the
+/// same `pre-…` stem, i.e. .db + optional .db-wal/.db-shm).
+fn prune_backups(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    // (stem, mtime, full paths) per group
+    let mut groups: std::collections::HashMap<String, (std::time::SystemTime, Vec<std::path::PathBuf>)> =
+        std::collections::HashMap::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with("pre-") {
+            continue;
+        }
+        let stem = name.split(".db").next().unwrap_or(&name).to_string();
+        let mtime = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        let g = groups.entry(stem).or_insert((mtime, Vec::new()));
+        if mtime > g.0 {
+            g.0 = mtime;
+        }
+        g.1.push(e.path());
+    }
+    if groups.len() <= keep {
+        return;
+    }
+    let mut ordered: Vec<_> = groups.into_values().collect();
+    ordered.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    for (_, files) in ordered.into_iter().skip(keep) {
+        for f in files {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+}
+
 /// Open (creating if needed) the database at `path`, set pragmas and apply
 /// migrations. [`register_sqlite_vec`] must already have been called.
 pub fn open(path: &Path) -> Result<Connection> {
@@ -103,6 +169,32 @@ mod tests {
         )?;
         assert_eq!(stale, 0, "FTS still matches stale tokens after update");
 
+        Ok(())
+    }
+
+    /// Version bump → one backup; same version again → no new backup.
+    #[test]
+    fn backup_runs_once_per_version() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("dbbk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let db = dir.join("pdfmanage.db");
+        std::fs::write(&db, b"fake-db-bytes")?;
+
+        backup_on_upgrade(&dir, &db, "1.2.3");
+        let count = || {
+            std::fs::read_dir(dir.join("backups"))
+                .map(|it| it.flatten().count())
+                .unwrap_or(0)
+        };
+        assert_eq!(count(), 1, "prima apertura della versione: un backup");
+        backup_on_upgrade(&dir, &db, "1.2.3");
+        assert_eq!(count(), 1, "stessa versione: nessun backup in più");
+        backup_on_upgrade(&dir, &db, "1.2.4");
+        assert_eq!(count(), 2, "versione nuova: nuovo backup");
+        assert_eq!(std::fs::read_to_string(dir.join("last_version.txt"))?, "1.2.4");
+
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 
