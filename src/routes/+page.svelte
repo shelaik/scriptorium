@@ -8,7 +8,9 @@
     listDocuments,
     getThumbnail,
     rebuildThumbnails,
-    enrichAll,
+    recoverMissingMetadata,
+    cancelRecoverMetadata,
+    type MetaRecoverProgress,
     repairMetadata,
     searchDocuments,
     searchNotes,
@@ -159,6 +161,7 @@
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
   import MetaEditor from "$lib/MetaEditor.svelte";
+  import MetaFinder from "$lib/MetaFinder.svelte";
   import { mathRender } from "$lib/math";
   import { printDocument, printDocuments, printHtml } from "$lib/print";
   import ShareMenu from "$lib/ShareMenu.svelte";
@@ -272,6 +275,10 @@
   let embedProgress = $state<EmbedProgress | null>(null);
   let busy = $state(false);
   let enriching = $state(false);
+  // Bulk metadata recovery: live progress from the `meta-progress` event.
+  let metaScan = $state<MetaRecoverProgress | null>(null);
+  // Which document the "Recupera metadati" candidate finder is open on.
+  let metaFindId = $state<number | null>(null);
   let generating = $state(false);
   let searching = $state(false);
   let printing = $state(false);
@@ -607,7 +614,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.13";
+  const APP_VERSION = "0.9.14";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1050,21 +1057,23 @@
   }
 
   async function enrichMeta() {
+    if (enriching) return; // callable from header/radial/palette: no concurrent runs
     enriching = true;
-    status = "Recupero metadati (DOI e ricerca per titolo su Crossref/arXiv)…";
+    status = "Recupero metadati dei documenti incompleti (arXiv dal nome file, DOI e titolo dal PDF)…";
     try {
-      const res = await enrichAll();
+      const res = await recoverMissingMetadata();
       const parts = [`${res.updated} aggiornati`];
-      // no_doi + skipped_mismatch both mean "couldn't be resolved online" now.
-      const notFound = res.no_doi + res.skipped_mismatch;
-      if (notFound) parts.push(`${notFound} non trovati online (non indicizzati)`);
+      if (res.from_arxiv) parts.push(`${res.from_arxiv} da arXiv (nome file)`);
+      if (res.unresolved)
+        parts.push(`${res.unresolved} da confermare a mano (tasto destro → Organizza → Recupera metadati)`);
       if (res.errors.length) parts.push(`${res.errors.length} errori`);
-      status = parts.join(" · ");
+      status = "Metadati: " + parts.join(" · ");
       await loadDocs();
     } catch (e) {
       status = "Errore metadati: " + e;
     } finally {
       enriching = false;
+      metaScan = null;
     }
   }
 
@@ -2662,6 +2671,7 @@
   let askP: Promise<() => void> | undefined;
   let connP: Promise<() => void> | undefined;
   let wikiP: Promise<() => void> | undefined;
+  let metaP: Promise<() => void> | undefined;
   let clearTimer: ReturnType<typeof setTimeout> | undefined;
   onMount(() => {
     loadDocs();
@@ -2768,6 +2778,9 @@
     wikiP = listen<{ phase: string; done: number; total: number; concept: string }>("wiki-progress", (e) => {
       wikiProg = e.payload.phase === "done" ? null : e.payload;
     });
+    metaP = listen<MetaRecoverProgress>("meta-progress", (e) => {
+      metaScan = e.payload.phase === "running" ? e.payload : null;
+    });
     // "Novità": the on-launch sweep finished — refresh the badge (and the feed if open).
     novitaP = listen<number>("novita-changed", () => {
       refreshNovitaCount();
@@ -2785,6 +2798,7 @@
       askP?.then((f) => f());
       connP?.then((f) => f());
       wikiP?.then((f) => f());
+      metaP?.then((f) => f());
       novitaP?.then((f) => f());
       clearTimeout(searchTimer);
       clearTimeout(clearTimer);
@@ -2860,6 +2874,8 @@
     backup: "M22 12H2M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01",
     layers: "M12 2l9 5-9 5-9-5zM3 12l9 5 9-5M3 17l9 5 9-5",
     bookmark: "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z",
+    // lente con "+": cerca e AGGIUNGE i metadati (distinta dalla lente semplice)
+    metafind: "M11 3a8 8 0 1 0 .01 0M21 21l-4.35-4.35M11 8v6M8 11h6",
     // salvagente (life-buoy): inconfondibile col «?» di Chiedi alla libreria
     help: "M12 2a10 10 0 1 0 .01 0M12 8a4 4 0 1 0 .01 0M4.93 4.93l4.24 4.24M14.83 14.83l4.24 4.24M14.83 9.17l4.24-4.24M4.93 19.07l4.24-4.24",
     x: "M18 6L6 18M6 6l12 12",
@@ -3059,6 +3075,7 @@
       { id: "ai-path", label: "Percorso di lettura", icon: I.map, hint: "Cosa leggere prima per capirlo: fondamenti citati + vicini precedenti (senza LLM)", action: () => openReadingPath(d) },
     ];
     const orgKids: RadialItem[] = [
+      { id: "or-find", label: "Recupera metadati…", icon: I.metafind, hint: "Cerca online la scheda giusta (Crossref, arXiv, OpenAlex) e scegli tu quale applicare", action: () => (metaFindId = d.id) },
       { id: "or-meta", label: "Modifica metadati", icon: I.edit, action: () => (editingId = d.id) },
       { id: "or-tag", label: "Tag…", icon: I.tag, hint: "Assegna o togli tag", action: () => (tagPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
       { id: "or-coll", label: "Collezioni…", icon: I.folder, hint: "Aggiungi a una collezione", action: () => (collPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
@@ -3229,6 +3246,7 @@
         hint: "Salute, gap di citazioni, duplicati e manutenzione",
         children: [
           { id: "gc-health", label: "Salute libreria", hint: "File mancanti, PDF senza testo, metadati incompleti…", action: () => openCare("salute") },
+          { id: "gc-meta", label: "Recupera metadati mancanti", hint: needsMeta ? `${needsMeta} documenti incompleti — arXiv dal nome file, DOI e titolo dal PDF` : "Nessun documento incompleto al momento", disabled: enriching || needsMeta === 0, action: () => enrichMeta() },
           { id: "gc-gaps", label: "Gap di citazioni", hint: "I DOI più citati dai tuoi paper che ancora non possiedi", action: () => openCare("gap") },
           { id: "gc-dup", label: "Duplicati", hint: "Trova e unisci le copie dello stesso lavoro", action: () => openCare("duplicati") },
           { id: "gt-thumb", label: "Rigenera anteprime", hint: "Ricrea le copertine dal PDF ad alta risoluzione", disabled: rebuildingThumbs, action: () => rebuildThumbs() },
@@ -4753,9 +4771,9 @@
         class="ambient"
         onclick={enrichMeta}
         disabled={enriching}
-        title={"Recupera da Crossref (tramite il DOI trovato nel PDF): titoli, autori, anno, rivista, abstract e riferimenti.\n«Riferimenti e citazioni», «Gap di citazioni» e i campi delle schede si popolano solo dopo."}
+        title={"Recupera titolo, autori, anno, rivista, abstract e riferimenti dei documenti incompleti:\narXiv dall'id nel nome del file (anche scansioni), poi DOI e titolo dal PDF (Crossref/arXiv).\nSolo abbinamenti sicuri; i restanti si confermano a mano (tasto destro → Organizza → Recupera metadati)."}
       >
-        {enriching ? "recupero…" : `✦ ${needsMeta} senza metadati`}
+        {enriching ? (metaScan ? `recupero… ${metaScan.done}/${metaScan.total}` : "recupero…") : `✦ ${needsMeta} senza metadati`}
       </button>
     {/if}
     <button class="iconbtn" title="Palette comandi — ogni azione, digitando (Ctrl+K)" aria-label="Palette comandi" onclick={(e) => { e.stopPropagation(); paletteOpen = true; }}>
@@ -6166,6 +6184,13 @@
         <button class="ghost small" onclick={() => (batchCancel = true)} title="Interrompi l'operazione AI in corso">Stop</button>
       </div>
     {/if}
+    {#if metaScan}
+      <div class="toast">
+        <span>Metadati: {metaScan.done}/{metaScan.total} — {metaScan.updated} aggiornati</span>
+        <div class="bar"><div class="fill" style="width:{metaScan.total ? (metaScan.done / metaScan.total) * 100 : 0}%"></div></div>
+        <button class="ghost small" onclick={() => cancelRecoverMetadata()} title="Interrompi il recupero (quanto già aggiornato resta)">Stop</button>
+      </div>
+    {/if}
     {#if status}
       <div class="toast">{status}</div>
     {/if}
@@ -6179,6 +6204,25 @@
         editingId = null;
         await loadDocs();
         await loadSidebar();
+      }}
+    />
+  {/if}
+
+  {#if metaFindId !== null}
+    <MetaFinder
+      id={metaFindId}
+      onClose={() => (metaFindId = null)}
+      onApplied={async () => {
+        metaFindId = null;
+        status = "Metadati applicati ✓";
+        await loadDocs();
+        await loadSidebar();
+        if (careModal && careTab === "salute") openHealth();
+      }}
+      onEditManual={() => {
+        const x = metaFindId;
+        metaFindId = null;
+        editingId = x;
       }}
     />
   {/if}
@@ -6472,11 +6516,11 @@
           <p class="dimtext">Analisi in corso…</p>
         {:else if health}
           {@const cats = [
-            { label: "File mancanti sul disco", rows: health.missing_file, hint: "Il PDF non è più al percorso salvato.", ocr: false },
-            { label: "PDF senza testo estratto", rows: health.no_text, hint: "Probabili scansioni (immagine): non cercabili né indicizzabili. «OCR» riconosce il testo con il motore di Windows.", ocr: true },
-            { label: "Metadati incompleti", rows: health.no_metadata, hint: "Manca titolo, anno o autori.", ocr: false },
-            { label: "Senza incorporamento semantico", rows: health.no_embedding, hint: "Esclusi dalla ricerca semantica e da «Correlati».", ocr: false },
-            { label: "Senza copertina", rows: health.no_thumbnail, hint: "Nessuna anteprima generata.", ocr: false },
+            { label: "File mancanti sul disco", rows: health.missing_file, hint: "Il PDF non è più al percorso salvato.", ocr: false, find: false },
+            { label: "PDF senza testo estratto", rows: health.no_text, hint: "Probabili scansioni (immagine): non cercabili né indicizzabili. «OCR» riconosce il testo con il motore di Windows.", ocr: true, find: false },
+            { label: "Metadati incompleti", rows: health.no_metadata, hint: "Manca titolo, anno o autori. «✦ senza metadati» in alto li recupera in blocco; «Trova…» cerca i candidati online per il singolo documento e scegli tu.", ocr: false, find: true },
+            { label: "Senza incorporamento semantico", rows: health.no_embedding, hint: "Esclusi dalla ricerca semantica e da «Correlati».", ocr: false, find: false },
+            { label: "Senza copertina", rows: health.no_thumbnail, hint: "Nessuna anteprima generata.", ocr: false, find: false },
           ]}
           <p class="dimtext">{health.total} documenti analizzati.</p>
           {#each cats as cat (cat.label)}
@@ -6489,6 +6533,7 @@
                     <li class="refrow">
                       <button class="hflink" onclick={() => openHealthRow(r.id)} title={r.path}>{r.title ?? r.path.split(/[\\/]/).pop()}</button>
                       {#if cat.ocr}<button class="hflink small" disabled={ocrBusy === r.id} onclick={() => runOcr(r.id)} title="Riconosci il testo della scansione (motore OCR di Windows) e rendilo cercabile">{ocrBusy === r.id ? "OCR…" : "OCR"}</button>{/if}
+                      {#if cat.find}<button class="hflink small" onclick={() => (metaFindId = r.id)} title="Cerca online la scheda giusta (Crossref, arXiv, OpenAlex) e confermala tu">Trova…</button>{/if}
                     </li>
                   {/each}
                 </ul>
@@ -6728,7 +6773,8 @@
         <div class="helpsec">
           <h3>Metadati</h3>
           <ul>
-            <li>Quando ci sono schede incomplete compare «<strong>✦ N senza metadati</strong>»: un clic recupera titolo, autori, anno, rivista, abstract e riferimenti. L'identità si risolve dal <strong>titolo</strong> (Crossref/arXiv), mai dal primo DOI trovato nel testo: niente etichette sbagliate — se un paper non è indicizzato, resta com'è.</li>
+            <li>Quando ci sono schede incomplete compare «<strong>✦ N senza metadati</strong>»: un clic le recupera in blocco (con barra di avanzamento e Stop) — prima l'id arXiv nel <strong>nome del file</strong> (funziona anche sulle scansioni), poi DOI e <strong>titolo</strong> dal PDF (Crossref/arXiv). Mai dal primo DOI trovato nel testo: niente etichette sbagliate — ciò che non è sicuro resta com'è.</li>
+            <li>Per il caso singolo o ostinato: tasto destro → Organizza → <strong>Recupera metadati…</strong> fa la ricerca <em>estesa</em> (Crossref, arXiv, OpenAlex, ogni DOI/arXiv stampato nel PDF, nome del file) e mostra i <strong>candidati con le prove</strong> trovate nel PDF (titolo, autori, anno): scegli tu quale applicare, o incolla un DOI/arXiv. Lo stesso da Salute libreria («Trova…») accanto a ogni documento incompleto.</li>
             <li><strong>Impostazioni → Manutenzione → «Ripara metadati errati»</strong> ricontrolla tutta la libreria e corregge le schede il cui titolo non corrisponde al PDF. Sicuro e ripetibile. A mano: tasto destro → <strong>Modifica metadati</strong>.</li>
           </ul>
         </div>
@@ -6888,7 +6934,7 @@
             <dt>…aggiungere il PDF che ho appena scaricato col browser?</dt>
             <dd>Copia il link del PDF e torna su Scriptorium: compare «Aggancia». Oppure punta la Cartella sorvegliata su Download: entra da solo.</dd>
             <dt>…sistemare un paper arrivato senza titolo o con metadati sbagliati?</dt>
-            <dd>Clic su «✦ N senza metadati» in alto; per un caso singolo: tasto destro → Modifica metadati. Per tutta la libreria: Impostazioni → Manutenzione → «Ripara metadati errati».</dd>
+            <dd>Clic su «✦ N senza metadati» in alto per il recupero in blocco (solo abbinamenti sicuri). Per il caso singolo: tasto destro → Organizza → <strong>Recupera metadati…</strong> mostra i candidati trovati online con le prove nel PDF e applichi quello giusto (o incolli un DOI/arXiv). Ritocchi a mano: Modifica metadati. Per tutta la libreria: Impostazioni → Manutenzione → «Ripara metadati errati».</dd>
             <dt>…copiare una citazione pronta?</dt>
             <dd>Tasto destro sul paper → Cita: APA, IEEE, BibTeX, citekey, <code>\cite</code>, <code>[@…]</code>. Con più paper selezionati ottieni <code>\cite&#123;k1,k2&#125;</code> o tutte le voci BibTeX insieme.</dd>
             <dt>…mandare un paper a un collega?</dt>

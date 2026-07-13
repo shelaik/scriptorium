@@ -7,7 +7,7 @@ Tutto vive sul tuo computer: i PDF, il catalogo (SQLite), gli appunti (file `.md
 
 ## Cosa fa
 
-- **Libreria**: import da disco/BibTeX/DOI/arXiv/URL/zip LaTeX, cartella sorvegliata, aggancio dal browser; tag, collezioni smart, filtri, metadati precision-first (mai un'etichetta incerta); salute libreria, gap di citazioni, duplicati, backup.
+- **Libreria**: import da disco/BibTeX/DOI/arXiv/URL/zip LaTeX, cartella sorvegliata, aggancio dal browser; tag, collezioni smart, filtri, metadati precision-first (mai un'etichetta incerta) con recupero in blocco e per scheda (candidati multi-fonte da confermare); salute libreria, gap di citazioni, duplicati, backup.
 - **Lettura**: lettore immersivo con annotazioni ancorate, ricerca nel documento, e **estrazione**: tabelle (motore nativo, modello TATR locale, o vision-LLM), testo con formattazione (corsivi/apici/pedici → Markdown), **formule → LaTeX** (math-OCR locale Pix2Text-MFR con anteprima modificabile), figure → PNG.
 - **Scrittura**: **Appunti** in Markdown (file veri, `[[wikilink]]` verso paper e appunti, backlink, formule KaTeX, immagini, export MD/HTML/LaTeX/PDF); **Wiki della libreria** (enciclopedia privata generata dall'AI locale sui *tuoi* documenti, citazioni che aprono il PDF alla pagina giusta); **Progetti LaTeX** (un piccolo Overleaf locale: modelli, `\cite{}` dalla libreria, `refs.bib` sincronizzato, compilazione con Tectonic/MiKTeX e anteprima in-app).
 - **Scoperta**: ricerca su arXiv/OpenAlex/ADS/Semantic Scholar/…, ricerche salvate con campana **Novità**, mappa delle citazioni, **Costellazione** (la libreria come grafo semantico: comunità, stelle fantasma da OpenAlex, appunti nel grafo).

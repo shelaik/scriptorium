@@ -523,6 +523,60 @@ export interface RepairSummary {
 /** Re-verify enriched documents and fix any whose title doesn't match the PDF. */
 export const repairMetadata = () => invoke<RepairSummary>("repair_metadata");
 
+// ----- Metadata recovery (bulk over thin docs + per-document candidates) -----
+export interface MetaRecoverSummary {
+  scanned: number;
+  updated: number;
+  /** Of which: recovered via the arXiv id in the filename. */
+  from_arxiv: number;
+  unresolved: number;
+  errors: string[];
+}
+export interface MetaRecoverProgress {
+  done: number;
+  total: number;
+  updated: number;
+  phase: "running" | "done" | "cancelled";
+}
+/** Bulk recovery over every doc with thin metadata (no title/year/authors):
+ *  arXiv id from the filename, then the precision-first resolver. Emits
+ *  `meta-progress` events; cancellable. */
+export const recoverMissingMetadata = () =>
+  invoke<MetaRecoverSummary>("recover_missing_metadata");
+export const cancelRecoverMetadata = () => invoke<void>("cancel_recover_metadata");
+
+/** One candidate identity for a document, to be confirmed by the user. */
+export interface MetaCandidate {
+  source: string;
+  /** Provenance label (Italian), e.g. "DOI stampato nel PDF". */
+  origin: string;
+  doi: string | null;
+  arxiv_id: string | null;
+  title: string | null;
+  authors: string[];
+  year: number | null;
+  venue: string | null;
+  score: number;
+  /** Passed the same strict title gate automatic enrichment uses. */
+  sure: boolean;
+  /** Evidence chips (Italian). */
+  signals: string[];
+  /** Title of another live doc that already owns this DOI (likely duplicate). */
+  duplicate_of: string | null;
+}
+export interface MetaProbe {
+  pdf_title: string | null;
+  filename: string;
+  candidates: MetaCandidate[];
+}
+/** Extensive per-document search (Crossref/arXiv/OpenAlex + ids in the PDF and
+ *  filename): scored candidates only — nothing is applied automatically. */
+export const metadataCandidates = (id: number) =>
+  invoke<MetaProbe>("metadata_candidates", { id });
+/** Apply a user-confirmed candidate (re-fetches the full record when it has an id). */
+export const applyMetaCandidate = (id: number, candidate: MetaCandidate) =>
+  invoke<void>("apply_meta_candidate", { id, candidate });
+
 export type SearchMode = "fulltext" | "semantic" | "hybrid";
 
 /** Search the library by full-text, semantic similarity, or both (RRF). */

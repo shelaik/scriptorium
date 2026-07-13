@@ -512,6 +512,677 @@ pub async fn repair_metadata(app: AppHandle) -> Result<RepairSummary, String> {
     Ok(sum)
 }
 
+// ===== Recupero metadati: bulk sui documenti "magri" + candidati per documento =====
+
+/// Progress event payload emitted during the bulk metadata recovery.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MetaRecoverProgress {
+    pub done: usize,
+    pub total: usize,
+    pub updated: usize,
+    /// "running" | "done" | "cancelled"
+    pub phase: String,
+}
+
+/// Result of a bulk metadata-recovery pass.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct MetaRecoverSummary {
+    pub scanned: usize,
+    pub updated: usize,
+    /// Of which: recovered via the arXiv id in the filename.
+    pub from_arxiv: usize,
+    pub unresolved: usize,
+    pub errors: Vec<String>,
+}
+
+/// Recover metadata for every document with THIN metadata — blank title, no
+/// year or no authors, the same notion "Salute libreria" reports — on live,
+/// on-disk documents. Wider than `enrich_all` (which only visits `doi IS NULL`
+/// docs) and additionally recovers arXiv papers from the id in the FILENAME,
+/// the only safe signal for scanned PDFs with no text layer. Precision-first
+/// like the whole engine: an online record is applied only when it passes the
+/// title gates; anything else is left for the interactive per-document finder.
+/// Emits `meta-progress` events; cancellable via `cancel_recover_metadata`.
+#[tauri::command]
+pub async fn recover_missing_metadata(app: AppHandle) -> Result<MetaRecoverSummary, String> {
+    let candidates: Vec<(i64, Option<String>, String, String)> = {
+        let state = app.state::<AppState>();
+        state.meta_cancel.store(false, Ordering::SeqCst);
+        let conn = state.db.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT d.id, d.doi, d.path, substr(COALESCE(d.fulltext,''),1,20000)
+                 FROM documents d
+                 WHERE d.deleted_at IS NULL AND d.path NOT LIKE 'ref:%'
+                   AND (d.title IS NULL OR TRIM(d.title) = '' OR d.year IS NULL
+                        OR NOT EXISTS (SELECT 1 FROM document_authors da WHERE da.document_id = d.id))
+                 ORDER BY d.id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    let email = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty())
+    };
+    let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
+
+    let total = candidates.len();
+    let mut sum = MetaRecoverSummary { scanned: total, ..Default::default() };
+    let emit = |done: usize, updated: usize, phase: &str| {
+        let _ = app.emit(
+            "meta-progress",
+            MetaRecoverProgress { done, total, updated, phase: phase.into() },
+        );
+    };
+    emit(0, 0, "running");
+
+    for (done, (id, existing_doi, path, text)) in candidates.into_iter().enumerate() {
+        {
+            let state = app.state::<AppState>();
+            if state.meta_cancel.load(Ordering::SeqCst) {
+                emit(done, sum.updated, "cancelled");
+                return Ok(sum);
+            }
+        }
+        let head: String = text.chars().take(1500).collect();
+        let fname = std::path::Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // (a) arXiv id in the FILENAME — authoritative for arXiv papers, and the
+        //     only usable signal when the PDF has no text layer. Accepted when
+        //     the record's title matches the PDF head, or — with NO text to gate
+        //     against — when the filename is essentially just the id (a bare
+        //     "2406.09406v2.pdf" names exactly one paper; anything longer could
+        //     be a mislabelled save and is left to the interactive finder).
+        let mut recovered = false;
+        if let Some(aid) = metadata::arxiv_id_from_filename(&fname) {
+            let fetched = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                metadata::fetch_arxiv(&client, &aid),
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await; // be gentle to arXiv
+            if let Ok(Ok(Some(meta))) = fetched {
+                let gate_text = meta
+                    .title
+                    .as_deref()
+                    .is_some_and(|t| metadata::title_matches_doc(t, &head));
+                let gate_bare = head.trim().is_empty() && filename_is_bare_id(&fname, &aid);
+                if gate_text || gate_bare {
+                    let state = app.state::<AppState>();
+                    let mut conn = state.db.lock();
+                    match write_repaired(&mut conn, id, &meta) {
+                        Ok(()) => {
+                            let _ = crate::db::citekey::auto_citekey(&conn, id);
+                            sum.updated += 1;
+                            sum.from_arxiv += 1;
+                            recovered = true;
+                        }
+                        Err(e) => sum.errors.push(format!("id {id}: {e:#}")),
+                    }
+                }
+            }
+        }
+
+        // (b) Full precision-first resolution from the document's own text.
+        if !recovered && !text.trim().is_empty() {
+            let resolved = tokio::time::timeout(
+                std::time::Duration::from_secs(45),
+                metadata::resolve_document_meta(&client, &text, existing_doi.as_deref(), email.as_deref()),
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            match resolved {
+                Ok(Ok(Some(r))) => {
+                    let state = app.state::<AppState>();
+                    let mut conn = state.db.lock();
+                    match apply_resolved(&mut conn, id, &r) {
+                        Ok(()) => {
+                            let _ = crate::db::citekey::auto_citekey(&conn, id);
+                            sum.updated += 1;
+                            recovered = true;
+                        }
+                        Err(e) => sum.errors.push(format!("id {id}: {e:#}")),
+                    }
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => sum.errors.push(format!("id {id}: {e:#}")),
+                Err(_) => sum.errors.push(format!("id {id}: timeout")),
+            }
+        }
+        if !recovered {
+            sum.unresolved += 1;
+        }
+        emit(done + 1, sum.updated, "running");
+    }
+    emit(total, sum.updated, "done");
+    Ok(sum)
+}
+
+/// Request cancellation of an in-progress bulk metadata recovery.
+#[tauri::command]
+pub fn cancel_recover_metadata(state: State<'_, AppState>) {
+    state.meta_cancel.store(true, Ordering::SeqCst);
+}
+
+/// True when `fname`'s stem is essentially just the arXiv id `aid` (allowing an
+/// "arxiv" marker or a version suffix) — e.g. "2406.09406v2.pdf",
+/// "arxiv_2606_00995.pdf" — so the id can be trusted without a text gate.
+fn filename_is_bare_id(fname: &str, aid: &str) -> bool {
+    let alnum = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase()
+    };
+    let stem = std::path::Path::new(fname)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let residue = alnum(&stem).replacen(&alnum(aid), "", 1);
+    residue.is_empty() || residue == "arxiv" || residue.len() <= 2
+}
+
+/// One candidate identity for a document, offered to the user for confirmation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MetaCandidate {
+    /// "crossref" | "arxiv" | "openalex"
+    pub source: String,
+    /// Where this candidate came from, for display (Italian).
+    pub origin: String,
+    pub doi: Option<String>,
+    pub arxiv_id: Option<String>,
+    pub title: Option<String>,
+    /// Display author names ("Given Family").
+    pub authors: Vec<String>,
+    pub year: Option<i64>,
+    pub venue: Option<String>,
+    /// Heuristic evidence score (higher = more likely this document).
+    pub score: i64,
+    /// Passed the same strict title gate automatic enrichment uses.
+    pub sure: bool,
+    /// Human-readable evidence chips (Italian).
+    pub signals: Vec<String>,
+    /// Title of another live document that already owns this DOI (likely a duplicate).
+    pub duplicate_of: Option<String>,
+}
+
+/// Report of the per-document candidate search.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MetaProbe {
+    pub pdf_title: Option<String>,
+    pub filename: String,
+    pub candidates: Vec<MetaCandidate>,
+}
+
+/// Candidate metadata before scoring, as gathered from one source.
+struct RawCandidate {
+    source: &'static str,
+    origin: String,
+    doi: Option<String>,
+    arxiv_id: Option<String>,
+    title: Option<String>,
+    authors: Vec<String>,
+    year: Option<i64>,
+    venue: Option<String>,
+    from_identifier: bool,
+}
+
+/// Display author names for a fetched record.
+fn display_authors(meta: &metadata::CrossrefMeta) -> Vec<String> {
+    meta.authors
+        .iter()
+        .map(|a| {
+            format!("{} {}", a.given.as_deref().unwrap_or(""), a.family.as_deref().unwrap_or(""))
+                .trim()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// EXTENSIVE per-document metadata search: gather candidate identities from
+/// every available signal — the stored DOI, every DOI/arXiv id printed in the
+/// first pages (a citation's id is a legitimate *candidate* here: the user
+/// confirms visually, unlike automatic enrichment which must reject it), the
+/// arXiv id in the filename, and title searches (recovered PDF title, cleaned
+/// filename, stored title) on Crossref, arXiv and OpenAlex. Each candidate is
+/// scored against evidence found in the PDF itself; NOTHING is applied — the
+/// user picks one via `apply_meta_candidate`.
+#[tauri::command]
+pub async fn metadata_candidates(app: AppHandle, id: i64) -> Result<MetaProbe, String> {
+    let (existing_doi, stored_title, path, text): (Option<String>, Option<String>, String, String) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        conn.query_row(
+            "SELECT doi, title, path, substr(COALESCE(fulltext,''),1,20000) FROM documents WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(|e| e.to_string())?
+    };
+    let (email, oa_key) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        (
+            setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty()),
+            secret::get("openalex_key").unwrap_or_default(),
+        )
+    };
+    let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
+    let timeout = std::time::Duration::from_secs(20);
+    let nap = || tokio::time::sleep(std::time::Duration::from_millis(120));
+
+    let head: String = text.chars().take(1500).collect();
+    let pdf_title = metadata::first_line_title(&head);
+    let fname = std::path::Path::new(&path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = std::path::Path::new(&fname)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut raw: Vec<RawCandidate> = Vec::new();
+
+    // 1) DOIs: the stored one plus every one printed in the first pages.
+    let mut dois: Vec<String> = Vec::new();
+    if let Some(d) = existing_doi.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        dois.push(d.to_string());
+    }
+    for d in metadata::extract_dois(&text, 5) {
+        if !dois.iter().any(|x| x.eq_ignore_ascii_case(&d)) {
+            dois.push(d);
+        }
+    }
+    for (i, d) in dois.iter().take(5).enumerate() {
+        let origin = if i == 0 && existing_doi.as_deref().map(str::trim).is_some_and(|e| e.eq_ignore_ascii_case(d)) {
+            "DOI della scheda".to_string()
+        } else {
+            "DOI stampato nel PDF".to_string()
+        };
+        if let Ok(Ok(Some(meta))) =
+            tokio::time::timeout(timeout, metadata::fetch_crossref(&client, d, email.as_deref())).await
+        {
+            raw.push(RawCandidate {
+                source: "crossref",
+                origin,
+                doi: Some(d.clone()),
+                arxiv_id: None,
+                title: meta.title.clone(),
+                authors: display_authors(&meta),
+                year: meta.year,
+                venue: meta.venue.clone(),
+                from_identifier: true,
+            });
+        }
+        nap().await;
+    }
+
+    // 2) arXiv ids: filename first, then explicit "arXiv:…" mentions in the text.
+    let mut aids: Vec<(String, String)> = Vec::new();
+    if let Some(aid) = metadata::arxiv_id_from_filename(&fname) {
+        aids.push((aid, "arXiv nel nome del file".to_string()));
+    }
+    for aid in metadata::extract_arxiv_ids(&text, 3) {
+        if !aids.iter().any(|(x, _)| x == &aid) {
+            aids.push((aid, "arXiv stampato nel PDF".to_string()));
+        }
+    }
+    for (aid, origin) in aids.into_iter().take(3) {
+        if let Ok(Ok(Some(meta))) = tokio::time::timeout(timeout, metadata::fetch_arxiv(&client, &aid)).await {
+            raw.push(RawCandidate {
+                source: "arxiv",
+                origin,
+                doi: None,
+                arxiv_id: Some(aid),
+                title: meta.title.clone(),
+                authors: display_authors(&meta),
+                year: meta.year,
+                venue: meta.venue.clone(),
+                from_identifier: true,
+            });
+        }
+        nap().await;
+    }
+
+    // 3) Title searches on Crossref + arXiv + OpenAlex.
+    let norm = |s: &str| -> String {
+        metadata::fold_ascii(&s.to_lowercase())
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut queries: Vec<(String, String)> = Vec::new();
+    if let Some(g) = pdf_title.as_deref().filter(|g| g.chars().count() >= 8) {
+        queries.push(("titolo dal PDF".to_string(), g.to_string()));
+    }
+    let stem_q = stem.replace(['_', '-', '.'], " ").split_whitespace().collect::<Vec<_>>().join(" ");
+    let stem_alpha_words = stem_q
+        .split_whitespace()
+        .filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 3)
+        .count();
+    if stem_q.chars().count() >= 12
+        && stem_alpha_words >= 3
+        && !queries.iter().any(|(_, q)| norm(q) == norm(&stem_q))
+    {
+        queries.push(("nome del file".to_string(), stem_q));
+    }
+    if let Some(t) = stored_title.as_deref().map(str::trim).filter(|t| t.chars().count() >= 8) {
+        if !queries.iter().any(|(_, q)| norm(q) == norm(t)) {
+            queries.push(("titolo della scheda".to_string(), t.to_string()));
+        }
+    }
+    let oa_filters = discovery::Filters {
+        year_from: None,
+        year_to: None,
+        oa_only: false,
+        sort: "relevance".to_string(),
+        author: None,
+    };
+    for (label, q) in queries.iter().take(3) {
+        if let Ok(Ok(list)) =
+            tokio::time::timeout(timeout, metadata::crossref_search_candidates(&client, q, email.as_deref(), 5)).await
+        {
+            for (doi, meta) in list {
+                raw.push(RawCandidate {
+                    source: "crossref",
+                    origin: format!("ricerca per {label} (Crossref)"),
+                    doi: Some(doi),
+                    arxiv_id: None,
+                    title: meta.title.clone(),
+                    authors: display_authors(&meta),
+                    year: meta.year,
+                    venue: meta.venue.clone(),
+                    from_identifier: false,
+                });
+            }
+        }
+        nap().await;
+        if let Ok(Ok(list)) = tokio::time::timeout(timeout, metadata::arxiv_search_candidates(&client, q, 5)).await {
+            for (aid, meta) in list {
+                raw.push(RawCandidate {
+                    source: "arxiv",
+                    origin: format!("ricerca per {label} (arXiv)"),
+                    doi: None,
+                    arxiv_id: (!aid.is_empty()).then_some(aid),
+                    title: meta.title.clone(),
+                    authors: display_authors(&meta),
+                    year: meta.year,
+                    venue: meta.venue.clone(),
+                    from_identifier: false,
+                });
+            }
+        }
+        nap().await;
+        if let Ok(Ok(list)) =
+            tokio::time::timeout(timeout, discovery::search_openalex(&client, q, &oa_filters, &oa_key)).await
+        {
+            for r in list.into_iter().take(5) {
+                raw.push(RawCandidate {
+                    source: "openalex",
+                    origin: format!("ricerca per {label} (OpenAlex)"),
+                    doi: r.doi.clone(),
+                    arxiv_id: None,
+                    title: r.title.clone(),
+                    authors: r.authors.clone(),
+                    year: r.year,
+                    venue: r.venue.clone(),
+                    from_identifier: false,
+                });
+            }
+        }
+        nap().await;
+    }
+
+    // --- score against evidence in the PDF itself ---
+    let head4000: String = text.chars().take(4000).collect();
+    let head_l = metadata::fold_ascii(&head4000.to_lowercase());
+    let head_tokens: std::collections::HashSet<String> = head_l
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect();
+    let hay_l = text.to_lowercase();
+
+    let mut out: Vec<MetaCandidate> = Vec::new();
+    for r in raw {
+        let Some(t) = r.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let mut score: i64 = 0;
+        let mut signals: Vec<String> = Vec::new();
+        let sure = pdf_title.as_deref().is_some_and(|g| metadata::strong_title_match(g, t));
+        if sure {
+            score += 100;
+            signals.push("titolo identico a quello nel PDF".to_string());
+        } else if metadata::title_matches_doc(t, &head4000) {
+            score += 30;
+            signals.push("parole del titolo nella prima pagina".to_string());
+        }
+        // Author surnames printed near the top — whole tokens ('adam' ≠ 'adamson').
+        let fams: Vec<String> = r
+            .authors
+            .iter()
+            .filter_map(|a| parse_author(a).1)
+            .filter_map(|f| {
+                metadata::fold_ascii(&f.to_lowercase())
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| w.len() >= 3)
+                    .last()
+                    .map(str::to_string)
+            })
+            .collect();
+        if !fams.is_empty() {
+            let hits = fams.iter().filter(|f| head_tokens.contains(*f)).count();
+            if hits > 0 {
+                score += (30 * hits / fams.len()) as i64;
+                signals.push(format!("{hits}/{} autori nella prima pagina", fams.len()));
+            }
+        }
+        if let Some(d) = r.doi.as_deref() {
+            if hay_l.contains(&d.to_lowercase()) {
+                score += 25;
+                signals.push("DOI presente nel PDF".to_string());
+            }
+        }
+        if let Some(y) = r.year {
+            if head_tokens.contains(&y.to_string()) {
+                score += 5;
+                signals.push("anno nella prima pagina".to_string());
+            }
+        }
+        if r.from_identifier {
+            score += 10;
+        }
+        out.push(MetaCandidate {
+            source: r.source.to_string(),
+            origin: r.origin,
+            doi: r.doi,
+            arxiv_id: r.arxiv_id,
+            title: r.title,
+            authors: r.authors,
+            year: r.year,
+            venue: r.venue,
+            score,
+            sure,
+            signals,
+            duplicate_of: None,
+        });
+    }
+
+    // Best first; dedup by identity (DOI, else arXiv id sans version, else title).
+    out.sort_by(|a, b| (b.sure, b.score).cmp(&(a.sure, a.score)));
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    out.retain(|c| {
+        let key = c
+            .doi
+            .as_deref()
+            .map(|d| format!("doi:{}", d.to_lowercase()))
+            .or_else(|| {
+                c.arxiv_id
+                    .as_deref()
+                    .map(|a| format!("arx:{}", a.split('v').next().unwrap_or(a)))
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "t:{}",
+                    c.title
+                        .as_deref()
+                        .map(|t| t.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" "))
+                        .unwrap_or_default()
+                )
+            });
+        seen.insert(key)
+    });
+    out.truncate(12);
+
+    // Flag candidates whose DOI already belongs to another live document.
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        for c in out.iter_mut() {
+            if let Some(d) = c.doi.as_deref() {
+                let dup: Option<String> = conn
+                    .query_row(
+                        "SELECT COALESCE(NULLIF(TRIM(title),''),'senza titolo') FROM documents
+                         WHERE doi = ?1 AND id <> ?2 AND deleted_at IS NULL",
+                        params![d, id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                if let Some(t) = dup {
+                    c.duplicate_of = Some(t);
+                    c.signals.push("già in libreria (possibile duplicato)".to_string());
+                }
+            }
+        }
+    }
+
+    Ok(MetaProbe { pdf_title, filename: fname, candidates: out })
+}
+
+/// A `CrossrefMeta` built from a candidate's own fields (fallback when the
+/// record cannot be re-fetched).
+fn meta_from_candidate(c: &MetaCandidate) -> metadata::CrossrefMeta {
+    metadata::CrossrefMeta {
+        title: c.title.clone(),
+        venue: c.venue.clone(),
+        year: c.year,
+        abstract_text: None,
+        authors: c
+            .authors
+            .iter()
+            .map(|s| {
+                let (given, family) = parse_author(s);
+                metadata::Author { given, family }
+            })
+            .collect(),
+        references: Vec::new(),
+        raw_json: String::new(),
+    }
+}
+
+/// Apply a USER-CONFIRMED candidate to document `id`. With a DOI the full
+/// Crossref record is re-fetched and applied (references included); with an
+/// arXiv id the arXiv record is fetched and applied, clearing any stale
+/// DOI/references — the user just told us the paper's identity. With neither,
+/// the candidate's own fields are written. The citekey is refreshed afterwards.
+#[tauri::command]
+pub async fn apply_meta_candidate(app: AppHandle, id: i64, candidate: MetaCandidate) -> Result<(), String> {
+    let email = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty())
+    };
+    let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
+    let timeout = std::time::Duration::from_secs(20);
+
+    if let Some(doi) = candidate.doi.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        // Refuse a DOI another live document already owns: applying it would
+        // silently drop the identifier (apply_metadata's dup-guard) — the user
+        // almost certainly has a duplicate to merge instead.
+        let dup: Option<String> = {
+            let state = app.state::<AppState>();
+            let conn = state.db.lock();
+            conn.query_row(
+                "SELECT COALESCE(NULLIF(TRIM(title),''),'senza titolo') FROM documents
+                 WHERE doi = ?1 AND id <> ?2 AND deleted_at IS NULL",
+                params![doi, id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+        };
+        if let Some(t) = dup {
+            return Err(format!(
+                "Questo DOI appartiene già a «{t}»: probabilmente è un duplicato — meglio unire i documenti"
+            ));
+        }
+        let fetched = tokio::time::timeout(timeout, metadata::fetch_crossref(&client, doi, email.as_deref())).await;
+        let meta = match fetched {
+            Ok(Ok(Some(m))) => m,
+            _ => meta_from_candidate(&candidate),
+        };
+        let state = app.state::<AppState>();
+        let mut conn = state.db.lock();
+        metadata::apply_metadata(&mut conn, id, doi, &meta).map_err(|e| e.to_string())?;
+        let _ = crate::db::citekey::auto_citekey(&conn, id);
+        return Ok(());
+    }
+
+    if let Some(aid) = candidate.arxiv_id.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        let fetched = tokio::time::timeout(timeout, metadata::fetch_arxiv(&client, aid)).await;
+        let meta = match fetched {
+            Ok(Ok(Some(m))) => m,
+            _ => meta_from_candidate(&candidate),
+        };
+        if meta.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            return Err("Record arXiv non trovato per questo identificativo".to_string());
+        }
+        let state = app.state::<AppState>();
+        let mut conn = state.db.lock();
+        write_repaired(&mut conn, id, &meta).map_err(|e| e.to_string())?;
+        let _ = crate::db::citekey::auto_citekey(&conn, id);
+        return Ok(());
+    }
+
+    let meta = meta_from_candidate(&candidate);
+    if meta.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        return Err("Il candidato non ha né identificativo né titolo".to_string());
+    }
+    let state = app.state::<AppState>();
+    let mut conn = state.db.lock();
+    write_repaired(&mut conn, id, &meta).map_err(|e| e.to_string())?;
+    let _ = crate::db::citekey::auto_citekey(&conn, id);
+    Ok(())
+}
+
+#[cfg(test)]
+mod meta_recover_tests {
+    use super::filename_is_bare_id;
+
+    #[test]
+    fn bare_id_filenames() {
+        assert!(filename_is_bare_id("2406.09406v2.pdf", "2406.09406v2"));
+        assert!(filename_is_bare_id("arxiv_2606_00995.pdf", "2606.00995"));
+        assert!(filename_is_bare_id("2512.16301.pdf", "2512.16301"));
+        // A descriptive filename that merely CONTAINS an id is not "bare": with
+        // no text layer to gate against, it must not be trusted.
+        assert!(!filename_is_bare_id("smith_review_2406.09406.pdf", "2406.09406"));
+    }
+}
+
 /// Read a document's raw PDF bytes for the in-app viewer (efficient binary IPC).
 #[tauri::command]
 pub fn read_pdf(state: State<'_, AppState>, id: i64) -> Result<tauri::ipc::Response, String> {

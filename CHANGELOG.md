@@ -2,6 +2,14 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.14 — Recupero metadati: in blocco + per documento con conferma
+- **«✦ senza metadati» potenziato**: il recupero in blocco copre tutti i documenti incompleti (titolo/anno/autori mancanti, non più solo quelli senza DOI), recupera i paper arXiv dall'**id nel nome del file** (funziona anche sulle scansioni senza testo) e mostra **barra di avanzamento con Stop**. Precision-first invariato: si applica solo un abbinamento sicuro.
+- **«Recupera metadati…» sulla scheda** (tasto destro / ⋯ → Organizza; «Trova…» in Salute libreria): ricerca **estesa** su Crossref, arXiv e OpenAlex, più ogni DOI/arXiv stampato nel PDF e nel nome del file; i **candidati** mostrano le prove riscontrate nel PDF (titolo, autori, anno, DOI) e applichi tu quello giusto — o incolli un DOI/arXiv. I probabili duplicati (DOI già in libreria) sono segnalati.
+
+## 0.9.13 — Costellazione: posizioni degli appunti + nebulose leggibili
+- Le posizioni dei nodi **appunto** nel grafo sono persistite tra le sessioni; nomi delle comunità su **targhette** leggibili sopra tutto, con selettore Nebulose+nomi / Solo nebulose / Senza (ricordato).
+- Prima release pubblicata con **installer allegato** su GitHub Releases.
+
 ## 0.9.12 — Rete di sicurezza + avviso versione + rifiniture QA
 - **Backup automatico del database** a ogni cambio di versione dell'app, prima delle migrazioni (in `backups/`, ultime 5 copie).
 - **Controlla aggiornamenti** (Sistema → menu): confronto read-only con GitHub, segnalino in header se c'è una versione nuova — nessun download automatico. All'avvio è silenzioso, opt-in (scoperta online attiva) e al più quotidiano.

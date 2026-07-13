@@ -56,6 +56,65 @@ pub fn extract_doi(text: &str) -> Option<String> {
     Some(doi.to_string())
 }
 
+/// All distinct DOIs in `text`, in order of first appearance, cleaned like
+/// [`extract_doi`], capped at `max`. For the interactive candidate finder,
+/// where a *citation's* DOI on the first page is a legitimate candidate (the
+/// user confirms visually) — unlike automatic enrichment, which must reject it.
+pub fn extract_dois(text: &str, max: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in DOI_RE.find_iter(text) {
+        let mut doi = m.as_str();
+        if let Some(idx) = doi.to_ascii_lowercase().find("http") {
+            doi = &doi[..idx];
+        }
+        let doi = doi.trim_end_matches(|c: char| {
+            matches!(c, '.' | ',' | ';' | ':' | ')' | ']' | '>' | '"' | '\'' | '/')
+        });
+        if doi.len() < 8 {
+            continue;
+        }
+        if !out.iter().any(|d| d.eq_ignore_ascii_case(doi)) {
+            out.push(doi.to_string());
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
+/// Distinct arXiv ids explicitly marked as such in `text` ("arXiv:2406.09406",
+/// "arxiv.org/abs/1706.03762"), in order of appearance, capped at `max`. Only
+/// `arXiv`-prefixed ids are trusted — a bare `dddd.ddddd` in body text is far
+/// too often a section/figure number.
+pub fn extract_arxiv_ids(text: &str, max: usize) -> Vec<String> {
+    static ARXIV_MARKED_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?i)arxiv(?:\.org)?[:\s./]{0,3}(?:abs/|pdf/)?(\d{4})\.(\d{4,5})(v\d+)?")
+            .expect("valid marked arxiv regex")
+    });
+    let mut out: Vec<String> = Vec::new();
+    for c in ARXIV_MARKED_RE.captures_iter(text) {
+        let (Some(yymm), Some(num)) = (c.get(1), c.get(2)) else { continue };
+        // Plausibility: new-scheme id starts with YYMM, month 01–12.
+        let mm: u32 = match yymm.as_str().get(2..4).and_then(|s| s.parse().ok()) {
+            Some(m) => m,
+            None => continue,
+        };
+        if !(1..=12).contains(&mm) {
+            continue;
+        }
+        let ver = c.get(3).map_or("", |m| m.as_str());
+        let id = format!("{}.{}{}", yymm.as_str(), num.as_str(), ver);
+        if !out.iter().any(|d| d == &id) {
+            out.push(id);
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
 /// Function words plus a few ultra-generic domain terms that co-occur across
 /// unrelated papers — excluded so the title-match gate keys on *distinctive*
 /// words rather than boilerplate like "large language models".
@@ -77,7 +136,7 @@ static TITLE_STOP: Lazy<std::collections::HashSet<&'static str>> = Lazy::new(|| 
 /// Fold common Latin diacritics to ASCII so titles that disagree only on accents
 /// (Poincaré/Poincare, Erdős/Erdos, Schrödinger/Schrodinger) compare as equal.
 /// Apply after lowercasing.
-fn fold_ascii(s: &str) -> String {
+pub fn fold_ascii(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -413,6 +472,47 @@ pub async fn crossref_search_title(
     Ok(None)
 }
 
+/// UNGATED variant of [`crossref_search_title`] for the interactive candidate
+/// finder: every parsed row (DOI + metadata) of the bibliographic search is
+/// returned — the caller scores them and the USER confirms; nothing is applied
+/// automatically, so the precision gate is not needed here.
+pub async fn crossref_search_candidates(
+    client: &reqwest::Client,
+    query: &str,
+    email: Option<&str>,
+    rows: usize,
+) -> Result<Vec<(String, CrossrefMeta)>> {
+    let query = query.trim();
+    if query.chars().count() < 8 {
+        return Ok(Vec::new());
+    }
+    let mail = match email {
+        Some(e) if !e.trim().is_empty() => format!("&mailto={}", e.trim()),
+        _ => String::new(),
+    };
+    let url = format!(
+        "https://api.crossref.org/works?query.bibliographic={}&rows={}{}",
+        urlencoding(query),
+        rows.clamp(1, 10),
+        mail
+    );
+    let resp = client.get(&url).send().await.context("Crossref candidate search")?;
+    if !resp.status().is_success() {
+        return Ok(Vec::new());
+    }
+    let body: Value = resp.json().await.context("Crossref candidates JSON")?;
+    let Some(items) = body["message"]["items"].as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .iter()
+        .filter_map(|it| {
+            let doi = it["DOI"].as_str()?.to_string();
+            Some((doi, parse_crossref_work(it)))
+        })
+        .collect())
+}
+
 /// True when a Crossref candidate TITLE is essentially spelled out inside a raw
 /// reference string — i.e. (nearly) all of the title's distinctive words appear
 /// in the citation text. Stricter than [`title_matches_doc`] (a 50% gate against a
@@ -707,6 +807,41 @@ pub async fn arxiv_search_title(client: &reqwest::Client, title: &str) -> Result
     Ok(None)
 }
 
+/// UNGATED arXiv title search for the interactive candidate finder: every entry
+/// with its arXiv id — the caller scores, the user confirms.
+pub async fn arxiv_search_candidates(
+    client: &reqwest::Client,
+    query: &str,
+    rows: usize,
+) -> Result<Vec<(String, CrossrefMeta)>> {
+    let query = query.trim();
+    if query.chars().count() < 8 {
+        return Ok(Vec::new());
+    }
+    let url = format!(
+        "https://export.arxiv.org/api/query?search_query=ti:%22{}%22&max_results={}",
+        urlencoding(query),
+        rows.clamp(1, 10)
+    );
+    let resp = client.get(&url).send().await.context("arXiv candidate search")?;
+    if !resp.status().is_success() {
+        return Ok(Vec::new());
+    }
+    let body = resp.text().await.context("arXiv candidates body")?;
+    let mut out = Vec::new();
+    for entry in body.split("<entry>").skip(1) {
+        let meta = parse_arxiv_entry(entry);
+        // <id>http://arxiv.org/abs/2406.09406v2</id> → "2406.09406v2"
+        let id = between(entry, "<id>", "</id>")
+            .and_then(|u| u.rsplit('/').next().map(str::to_string))
+            .unwrap_or_default();
+        if meta.title.is_some() {
+            out.push((id, meta));
+        }
+    }
+    Ok(out)
+}
+
 /// Metadata resolved for a document, with the DOI when the source has one
 /// (Crossref) or `None` when it does not (arXiv preprints).
 pub struct Resolved {
@@ -984,6 +1119,31 @@ mod tests {
     }
 
     #[test]
+    fn extract_dois_distinct_in_order() {
+        let t = "10.1145/3292500.3330701. later see doi:10.1038/nature14539 \
+                 and again 10.1145/3292500.3330701";
+        assert_eq!(
+            extract_dois(t, 5),
+            vec!["10.1145/3292500.3330701".to_string(), "10.1038/nature14539".to_string()]
+        );
+        assert_eq!(extract_dois(t, 1).len(), 1);
+        assert!(extract_dois("no identifiers", 5).is_empty());
+    }
+
+    #[test]
+    fn extract_arxiv_ids_requires_marker() {
+        let t = "as in arXiv:2406.09406v2 and arxiv.org/abs/1706.03762; \
+                 but Section 1999.12345 and the bare 2301.00001 are not ids; \
+                 arXiv preprint arXiv:2406.09406v2 repeats";
+        assert_eq!(
+            extract_arxiv_ids(t, 5),
+            vec!["2406.09406v2".to_string(), "1706.03762".to_string()]
+        );
+        // Implausible month (99) is rejected even when arXiv-marked.
+        assert!(extract_arxiv_ids("arXiv:1999.12345", 5).is_empty());
+    }
+
+    #[test]
     fn strips_jats_markup() {
         assert_eq!(
             strip_markup("<jats:p>Hello   <jats:italic>world</jats:italic></jats:p>"),
@@ -1099,6 +1259,38 @@ mod tests {
             "Translating embeddings for modeling multi-relational data across federated knowledge graphs",
             raw
         ));
+    }
+
+    #[test]
+    #[ignore = "hits the live Crossref/arXiv APIs"]
+    fn candidate_searches_live() {
+        // Run with: cargo test --lib candidate_searches_live -- --ignored --nocapture
+        let client = super::http_client(Some("test@example.com")).unwrap();
+        tauri::async_runtime::block_on(async {
+            let cx = super::crossref_search_candidates(
+                &client,
+                "Attention Is All You Need",
+                Some("test@example.com"),
+                5,
+            )
+            .await
+            .unwrap();
+            println!("crossref candidates: {}", cx.len());
+            for (doi, m) in &cx {
+                println!("  {doi} -> {:?} ({:?})", m.title, m.year);
+            }
+            assert!(!cx.is_empty(), "expected Crossref candidates");
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let ax = super::arxiv_search_candidates(&client, "Attention Is All You Need", 5)
+                .await
+                .unwrap();
+            println!("arxiv candidates: {}", ax.len());
+            for (id, m) in &ax {
+                println!("  {id} -> {:?}", m.title);
+            }
+            assert!(!ax.is_empty(), "expected arXiv candidates");
+            assert!(ax.iter().all(|(id, _)| !id.is_empty()), "arXiv ids parsed from <id>");
+        });
     }
 
     #[test]

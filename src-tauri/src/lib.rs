@@ -50,6 +50,8 @@ pub struct AppState {
     pub refdoi_cancel: AtomicBool,
     /// Set to request cancellation of an in-progress wiki generation.
     pub wiki_cancel: AtomicBool,
+    /// Set to request cancellation of an in-progress bulk metadata recovery.
+    pub meta_cancel: AtomicBool,
     /// The active watched-folder watcher (dropping it stops watching).
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
     /// The running browser-connector loopback server, if any (drop = stop).
@@ -80,6 +82,7 @@ pub fn run() {
                 rag_cancel: AtomicBool::new(false),
                 refdoi_cancel: AtomicBool::new(false),
                 wiki_cancel: AtomicBool::new(false),
+                meta_cancel: AtomicBool::new(false),
                 watcher: Mutex::new(None),
                 connector: Mutex::new(None),
             });
@@ -135,6 +138,10 @@ pub fn run() {
             commands::read_pdf,
             commands::enrich_all,
             commands::repair_metadata,
+            commands::recover_missing_metadata,
+            commands::cancel_recover_metadata,
+            commands::metadata_candidates,
+            commands::apply_meta_candidate,
             commands::embedding_status,
             commands::generate_embeddings,
             commands::cancel_embeddings,
