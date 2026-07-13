@@ -14,6 +14,10 @@ Tutto vive sul tuo computer: i PDF, il catalogo (SQLite), gli appunti (file `.md
 - **AI locale** (opzionale): riassunti, tag automatici, lente di lettura, «Chiedi alla libreria» con fonti, confronti e rassegne. Nessun dato esce dal PC.
 - **Interfaccia «Orbita»**: barra strumenti + **menu radiale** (tasto destro) + **palette comandi** (Ctrl+K) che pescano dallo stesso registro; guida integrata a schede con FAQ, in finestra flottante.
 
+## Installazione
+
+Scarica l'ultimo `Scriptorium_x.y.z_x64-setup.exe` dalle **[Release](https://github.com/shelaik/scriptorium/releases)** ed eseguilo (Windows 10/11 x64). Ogni versione pubblicata corrisponde al commit «Release …» omonimo; in alternativa puoi compilare dal sorgente (sotto).
+
 ## Stack
 
 Tauri 2 · Rust (rusqlite + FTS5 + sqlite-vec, pdfium, ONNX Runtime per embedding bge-m3 / math-OCR / TATR) · SvelteKit + Svelte 5 (runes) · KaTeX · pdf.js. Solo Windows al momento.
