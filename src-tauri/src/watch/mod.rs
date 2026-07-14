@@ -56,7 +56,9 @@ fn import_watched(app: &AppHandle, path: PathBuf) {
     if let Some(prepared) = prepared {
         let outcome = {
             let conn = state.db.lock();
-            import::commit_import(&conn, &prepared)
+            // Passive watch event: never auto-restore a trashed twin (a Modify from an
+            // AV scan / OneDrive sync would otherwise resurrect a paper the user trashed).
+            import::commit_import(&conn, &prepared, false)
         };
         if matches!(outcome, Ok(o) if o.imported) {
             let _ = app.emit("library-changed", ());
@@ -97,7 +99,9 @@ pub fn scan_existing(app: AppHandle, dir: String) {
             if let Ok(prepared) = prepared {
                 let outcome = {
                     let conn = state.db.lock();
-                    import::commit_import(&conn, &prepared)
+                    // Startup rescan over the whole folder: never auto-restore a trashed
+                    // twin, or trashed watched-folder papers would return on every launch.
+                    import::commit_import(&conn, &prepared, false)
                 };
                 if matches!(outcome, Ok(o) if o.imported) {
                     let _ = app.emit("library-changed", ());

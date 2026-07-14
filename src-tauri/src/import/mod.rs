@@ -116,8 +116,46 @@ fn find_existing(conn: &Connection, hash: &str, path: &str) -> Result<Option<i64
 
 /// Commit a prepared import under the DB lock. Single INSERT (incl. thumb_path)
 /// so the FTS5 insert trigger fires once and no follow-up UPDATE is needed.
-pub fn commit_import(conn: &Connection, p: &PreparedImport) -> Result<ImportOutcome> {
+/// `restore_trashed`: true only for a DELIBERATE manual re-import (drag-in / file
+/// picker). Passive watched-folder rescans pass false — they run over the whole folder
+/// on every launch (and on AV/OneDrive Modify events), so auto-restoring there would
+/// silently defeat the Trash and resurrect merge_documents' soft-deleted duplicates.
+pub fn commit_import(conn: &Connection, p: &PreparedImport, restore_trashed: bool) -> Result<ImportOutcome> {
     if let Some(existing) = find_existing(conn, &p.hash, &p.path)? {
+        // A manual re-import of the exact file whose twin is in the Trash should bring it
+        // back. Restore only a twin at the SAME content-addressed path: that update leaves
+        // path unchanged (no UNIQUE(path) risk) and points at a file we know is present.
+        // A hash-only match with a different path stays a "duplicate" (imported=false).
+        if restore_trashed {
+            let trashed_same_path: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM documents WHERE path = ?1 AND deleted_at IS NOT NULL LIMIT 1",
+                    params![p.path],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(tid) = trashed_same_path {
+                // Refresh the file-derived facts too (the file at this path may have been
+                // replaced with different bytes since it was trashed): hash, cover,
+                // fulltext (re-indexes FTS via the update trigger) and page count. Title
+                // is left as-is so a user's manual edit survives the round-trip.
+                conn.execute(
+                    "UPDATE documents SET deleted_at = NULL, file_hash = ?2, thumb_path = ?3,
+                     fulltext = ?4, page_count = COALESCE(?5, page_count) WHERE id = ?1",
+                    params![
+                        tid,
+                        p.hash,
+                        p.thumb_path,
+                        p.fulltext,
+                        (p.page_count > 0).then_some(p.page_count),
+                    ],
+                )?;
+                return Ok(ImportOutcome {
+                    document_id: tid,
+                    imported: true,
+                });
+            }
+        }
         return Ok(ImportOutcome {
             document_id: existing,
             imported: false,
@@ -149,7 +187,7 @@ pub fn import_file(
     src: &Path,
 ) -> Result<ImportOutcome> {
     let prepared = prepare_import(pdfium, thumb_dir, src)?;
-    commit_import(conn, &prepared)
+    commit_import(conn, &prepared, false)
 }
 
 #[cfg(test)]

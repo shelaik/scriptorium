@@ -42,7 +42,13 @@ pub fn backup_on_upgrade(data_dir: &Path, db_path: &Path, version: &str) {
     if prev.as_deref().map(str::trim) == Some(version) {
         return; // stessa versione già avviata: nessuna migrazione nuova in arrivo
     }
+    // No DB yet (first ever launch) → nothing to back up; advancing the marker is
+    // correct. If a DB exists, only advance the marker once the .db copy actually
+    // succeeded, so a failed backup (full disk, AV/OneDrive lock, unwritable dir)
+    // is retried next launch instead of silently running migrations with no net.
+    let mut backed_up = true;
     if db_path.is_file() {
+        backed_up = false;
         let dir = data_dir.join("backups");
         let _ = std::fs::create_dir_all(&dir);
         let secs = std::time::SystemTime::now()
@@ -50,20 +56,24 @@ pub fn backup_on_upgrade(data_dir: &Path, db_path: &Path, version: &str) {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let base = format!("pre-{version}-{secs}");
-        let _ = std::fs::copy(db_path, dir.join(format!("{base}.db")));
-        for ext in ["-wal", "-shm"] {
-            let side = db_path.with_file_name(format!(
-                "{}{}",
-                db_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
-                ext
-            ));
-            if side.is_file() {
-                let _ = std::fs::copy(&side, dir.join(format!("{base}.db{ext}")));
+        if std::fs::copy(db_path, dir.join(format!("{base}.db"))).is_ok() {
+            backed_up = true;
+            for ext in ["-wal", "-shm"] {
+                let side = db_path.with_file_name(format!(
+                    "{}{}",
+                    db_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                    ext
+                ));
+                if side.is_file() {
+                    let _ = std::fs::copy(&side, dir.join(format!("{base}.db{ext}")));
+                }
             }
+            prune_backups(&dir, 5);
         }
-        prune_backups(&dir, 5);
     }
-    let _ = std::fs::write(&marker, version);
+    if backed_up {
+        let _ = std::fs::write(&marker, version);
+    }
 }
 
 /// Keep only the newest `keep` backup groups (a group = the files sharing the

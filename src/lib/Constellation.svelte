@@ -84,6 +84,7 @@
     onGhostAdd,
     onGhostExplore,
     onGhostsClear,
+    paused = false,
   }: {
     graph: SimilarityGraph | null;
     loading: boolean;
@@ -110,6 +111,9 @@
     onGhostExplore?: (key: string, relation: ExploreRelation) => void;
     /** Dismiss all ghost stars. */
     onGhostsClear?: () => void;
+    /** True while another surface (the reader) fully covers the map: stop the rAF
+     *  loop so exploration-mode pulses don't repaint a hidden canvas at 60fps. */
+    paused?: boolean;
   } = $props();
 
   // ----- Simulation state (plain, non-reactive: the canvas is redrawn manually) -----
@@ -201,6 +205,16 @@
   $effect(() => {
     localStorage.setItem("scriptorium-map-color", colorMode);
     schedule();
+  });
+  // Pause the render loop while the map is covered by the reader; resume (and repaint
+  // once) when it's shown again — so the canvas is current without burning frames hidden.
+  $effect(() => {
+    if (paused) {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      rafId = null;
+    } else {
+      schedule();
+    }
   });
   // Nebulose delle comunità: aloni + nomi, solo aloni, o niente (persistito).
   type NebulaMode = "full" | "tint" | "off";
@@ -1112,10 +1126,14 @@
 
   // ----- Frame loop: physics while hot, otherwise redraw-on-interaction only -----
   function schedule() {
+    // Don't paint (or keep the loop alive) while the map is hidden behind the reader:
+    // exploration mode otherwise forces a 60fps full-canvas redraw of a covered surface.
+    if (paused) return;
     if (rafId === null) rafId = requestAnimationFrame(frame);
   }
   function frame() {
     rafId = null;
+    if (paused) return;
     let animating = false;
     if (needFit && vw > 0 && nodes.length > 0) {
       needFit = false;

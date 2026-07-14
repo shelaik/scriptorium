@@ -64,10 +64,10 @@ pub async fn import_files(app: AppHandle, paths: Vec<String>) -> Result<ImportSu
                 }
             };
             let text_failed = prepared.text_failed;
-            // Short-lived lock just for the commit.
+            // Short-lived lock just for the commit. Manual import → restore a trashed twin.
             let outcome = {
                 let conn = state.db.lock();
-                import::commit_import(&conn, &prepared)
+                import::commit_import(&conn, &prepared, true)
             };
             match outcome {
                 Ok(o) if o.imported => {
@@ -162,7 +162,13 @@ pub async fn rebuild_thumbnails(app: AppHandle) -> Result<usize, String> {
                 Some(t) => std::path::PathBuf::from(t),
                 None => dir.join(format!("{}.png", hash.unwrap_or_else(|| id.to_string()))),
             };
-            if pdf::render_thumbnail(&state.pdfium, src, &out, pdf::THUMB_WIDTH).is_ok() {
+            // Serialize against other whole-document pdfium ops (imports, OCR, RAG
+            // chunking); the `thread_safe` feature only guards single FFI calls.
+            let rendered = {
+                let _pdf_guard = state.pdfium_lock.lock();
+                pdf::render_thumbnail(&state.pdfium, src, &out, pdf::THUMB_WIDTH).is_ok()
+            };
+            if rendered {
                 let conn = state.db.lock();
                 let _ = conn.execute(
                     "UPDATE documents SET thumb_path = ?1 WHERE id = ?2",
@@ -196,8 +202,12 @@ pub async fn enrich_all(app: AppHandle) -> Result<EnrichSummary, String> {
     let candidates: Vec<(i64, Option<String>, String)> = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
+        // Cap the copied text at 20k chars (as the other resolution call sites do):
+        // the DOI/arXiv id and title live on the first page, and materializing the
+        // FULL fulltext of every DOI-less doc up front can balloon to ~1GB on a
+        // library of scanned PDFs — the very docs this command targets.
         let mut stmt = conn
-            .prepare("SELECT id, doi, COALESCE(fulltext, '') FROM documents WHERE doi IS NULL AND deleted_at IS NULL")
+            .prepare("SELECT id, doi, substr(COALESCE(fulltext, ''), 1, 20000) FROM documents WHERE doi IS NULL AND deleted_at IS NULL")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -2670,9 +2680,14 @@ pub fn cancel_rag_index(state: State<'_, AppState>) {
 /// pick up page attribution for documents indexed before that existed).
 #[tauri::command]
 pub fn clear_rag_index(state: State<'_, AppState>) -> Result<(), String> {
-    let conn = state.db.lock();
-    conn.execute("DELETE FROM chunk_vec", []).map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM doc_chunks", []).map_err(|e| e.to_string())?;
+    let mut conn = state.db.lock();
+    // One transaction: a crash between the two DELETEs must not leave doc_chunks
+    // populated with zero vectors (rag_index_status would report "indexed" and
+    // build_rag_index would skip every doc, so "ask your library" returns nothing).
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM chunk_vec", []).map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM doc_chunks", []).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2734,7 +2749,12 @@ pub async fn build_rag_index(app: AppHandle) -> Result<usize, String> {
                 if state.rag_cancel.load(Ordering::SeqCst) {
                     break;
                 }
-                let chunks = chunk_document(&state.pdfium, &path, &fulltext);
+                // Serialize whole-document pdfium work against imports/OCR/thumbnails
+                // (the `thread_safe` feature only guards single FFI calls).
+                let chunks = {
+                    let _pdf_guard = state.pdfium_lock.lock();
+                    chunk_document(&state.pdfium, &path, &fulltext)
+                };
                 if tx.send((doc_id, chunks)).is_err() {
                     break;
                 }
@@ -3533,8 +3553,13 @@ pub async fn ocr_document(app: AppHandle, id: i64) -> Result<OcrSummary, String>
             resolve_existing_path(&conn, id)?
                 .ok_or_else(|| "Nessun file PDF su disco per questo documento".to_string())?
         };
-        let out = crate::ocr::ocr_pdf(&state.pdfium, std::path::Path::new(&path), MAX_OCR_PAGES)
-            .map_err(|e| format!("{e:#}"))?;
+        // Serialize whole-document pdfium rendering against imports/thumbnails/RAG
+        // (the `thread_safe` feature only guards single FFI calls).
+        let out = {
+            let _pdf_guard = state.pdfium_lock.lock();
+            crate::ocr::ocr_pdf(&state.pdfium, std::path::Path::new(&path), MAX_OCR_PAGES)
+        }
+        .map_err(|e| format!("{e:#}"))?;
         let trimmed = out.text.trim();
         if trimmed.is_empty() {
             return Err("OCR non ha riconosciuto testo in questo PDF".to_string());
@@ -3642,18 +3667,61 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
     Ok(())
 }
 
-/// Copy the whole library data folder (DB + PDFs + thumbnails) into `dest`.
-/// Returns the path of the created backup folder.
+/// Copy the whole library data folder (catalog + PDFs + thumbnails + notes +
+/// projects) into `dest`. The catalog is snapshotted under the DB lock (WAL
+/// checkpointed first), so the copy is one consistent point in time — never a
+/// torn `.db`/`.db-wal` pair from two different instants. Runs off the UI thread
+/// so a multi-GB library never freezes the window. Returns the backup folder path.
 #[tauri::command]
-pub fn backup_library(app: AppHandle, dest: String) -> Result<String, String> {
-    let src = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let target = std::path::Path::new(&dest).join(format!("Scriptorium-backup-{stamp}"));
-    copy_dir_all(&src, &target).map_err(|e| e.to_string())?;
-    Ok(target.to_string_lossy().to_string())
+pub async fn backup_library(app: AppHandle, dest: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let state = app.state::<AppState>();
+        let src = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let target = std::path::Path::new(&dest).join(format!("Scriptorium-backup-{stamp}"));
+        std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+
+        // 1) Consistent catalog snapshot: fold the WAL into the main file and copy
+        //    the DB (+ any sidecars) while holding the DB lock, so no writer can
+        //    commit between copying the .db and its -wal/-shm.
+        let db_files = ["pdfmanage.db", "pdfmanage.db-wal", "pdfmanage.db-shm"];
+        {
+            let conn = state.db.lock();
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            for name in db_files {
+                let f = src.join(name);
+                if f.is_file() {
+                    std::fs::copy(&f, target.join(name)).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+
+        // 2) Everything else (papers/, thumbnails, notes/, projects/, models…) WITHOUT
+        //    the lock; skip the DB files already snapshotted above.
+        for entry in std::fs::read_dir(&src).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            if db_files.iter().any(|d| std::ffi::OsStr::new(d) == name.as_os_str()) {
+                continue;
+            }
+            let ft = entry.file_type().map_err(|e| e.to_string())?;
+            if ft.is_symlink() {
+                continue;
+            }
+            let to = target.join(&name);
+            if ft.is_dir() {
+                copy_dir_all(&entry.path(), &to).map_err(|e| e.to_string())?;
+            } else {
+                std::fs::copy(entry.path(), &to).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(target.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ===== Add by identifier =====
@@ -4046,7 +4114,9 @@ fn import_latex_zip_inner(app: &AppHandle, zip_path: &str) -> Result<LatexImport
         };
         let outcome = {
             let conn = state.db.lock();
-            match import::commit_import(&conn, &prepared) {
+            // LaTeX-archive import: never restore a trashed twin (callers treat
+            // imported=true as a fresh row and re-insert the whole bibliography).
+            match import::commit_import(&conn, &prepared, false) {
                 Ok(o) => o,
                 Err(e) => {
                     errors.push(format!("Salvataggio PDF: {e:#}"));
@@ -4437,6 +4507,24 @@ async fn download_and_attach(app: &AppHandle, id: i64, urls: &[String]) -> Resul
     if dup.is_some() {
         // Content-addressed storage means `saved` may be the very file the
         // existing duplicate already references — so never delete it here.
+        return Ok("duplicate".into());
+    }
+    // Only when a soft-deleted twin owns this exact content-addressed PATH would the
+    // UPDATE below hit `UNIQUE constraint failed: documents.path`. Restore that twin
+    // instead — it brings the real paper (with its tags/notes) back. Match on path only:
+    // a hash-only match with a DIFFERENT path is no collision, so it must fall through to
+    // the normal attach (which correctly points the reference row at the downloaded file).
+    let trashed_twin: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM documents WHERE path = ?1 AND id != ?2 AND deleted_at IS NOT NULL LIMIT 1",
+            params![prepared.path, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(tid) = trashed_twin {
+        conn.execute("UPDATE documents SET deleted_at = NULL WHERE id = ?1", params![tid])
+            .map_err(|e| e.to_string())?;
         return Ok("duplicate".into());
     }
     conn.execute(
@@ -4904,6 +4992,25 @@ pub async fn attach_from_url(app: AppHandle, id: i64, url: String) -> Result<Str
     if dup.is_some() {
         return Ok("duplicate".into());
     }
+    // Only a soft-deleted twin owning this exact content-addressed PATH would make the
+    // UPDATE fail with a raw UNIQUE(path) error. Restore that twin instead. Match on path
+    // only: a hash-only match with a DIFFERENT path is no collision, so it falls through
+    // to the normal attach (which points this reference row at the downloaded file).
+    let trashed_twin: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM documents WHERE path = ?1 AND id != ?2 AND deleted_at IS NOT NULL LIMIT 1",
+            params![prepared.path, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(tid) = trashed_twin {
+        conn.execute("UPDATE documents SET deleted_at = NULL WHERE id = ?1", params![tid])
+            .map_err(|e| e.to_string())?;
+        drop(conn);
+        let _ = app.emit("library-changed", ());
+        return Ok("duplicate".into());
+    }
     conn.execute(
         "UPDATE documents SET path = ?1, file_hash = ?2, thumb_path = ?3, fulltext = ?4,
          github_url = COALESCE(?5, github_url), page_count = COALESCE(?6, page_count) WHERE id = ?7",
@@ -5140,8 +5247,8 @@ pub async fn github_readme(app: AppHandle, owner: String, repo: String) -> Resul
 /// rotation-0 frame) of page `page` (1-based) of a document.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub fn extract_table(
-    state: State<'_, AppState>,
+pub async fn extract_table(
+    app: AppHandle,
     id: i64,
     page: u16,
     x: f32,
@@ -5149,19 +5256,25 @@ pub fn extract_table(
     w: f32,
     h: f32,
 ) -> Result<Vec<Vec<String>>, String> {
-    let path = {
-        let conn = state.db.lock();
-        resolve_existing_path(&conn, id)?
-    };
-    let path = path.ok_or_else(|| "Questo elemento non ha un file PDF".to_string())?;
-    let words = pdf::extract_region_words(
-        &state.pdfium,
-        Path::new(&path),
-        page.saturating_sub(1),
-        [x, y, w, h],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(table::reconstruct(&words))
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Vec<String>>, String> {
+        let state = app.state::<AppState>();
+        let path = {
+            let conn = state.db.lock();
+            resolve_existing_path(&conn, id)?
+        };
+        let path = path.ok_or_else(|| "Questo elemento non ha un file PDF".to_string())?;
+        // Off the event loop AND serialized against other whole-document pdfium work:
+        // imports / OCR / RAG can hold pdfium_lock for a while, so blocking on it inline
+        // (this was a sync command) would freeze the whole window.
+        let words = {
+            let _pdf_guard = state.pdfium_lock.lock();
+            pdf::extract_region_words(&state.pdfium, Path::new(&path), page.saturating_sub(1), [x, y, w, h])
+        }
+        .map_err(|e| e.to_string())?;
+        Ok(table::reconstruct(&words))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Extract the text of a normalized region `[x,y,w,h]` (rotation-0 frame) of page
@@ -5170,8 +5283,8 @@ pub fn extract_table(
 /// markers and chemical formulas. The frontend derives plain text / LaTeX from it.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub fn extract_region_text(
-    state: State<'_, AppState>,
+pub async fn extract_region_text(
+    app: AppHandle,
     id: i64,
     page: u16,
     x: f32,
@@ -5179,19 +5292,24 @@ pub fn extract_region_text(
     w: f32,
     h: f32,
 ) -> Result<String, String> {
-    let path = {
-        let conn = state.db.lock();
-        resolve_existing_path(&conn, id)?
-    };
-    let path = path.ok_or_else(|| "Questo elemento non ha un file PDF".to_string())?;
-    let words = pdf::extract_region_words(
-        &state.pdfium,
-        Path::new(&path),
-        page.saturating_sub(1),
-        [x, y, w, h],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(table::join_text_rich(&words))
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let state = app.state::<AppState>();
+        let path = {
+            let conn = state.db.lock();
+            resolve_existing_path(&conn, id)?
+        };
+        let path = path.ok_or_else(|| "Questo elemento non ha un file PDF".to_string())?;
+        // Off the event loop AND serialized against other whole-document pdfium work
+        // (see extract_table): a sync inline block on pdfium_lock would freeze the window.
+        let words = {
+            let _pdf_guard = state.pdfium_lock.lock();
+            pdf::extract_region_words(&state.pdfium, Path::new(&path), page.saturating_sub(1), [x, y, w, h])
+        }
+        .map_err(|e| e.to_string())?;
+        Ok(table::join_text_rich(&words))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Directory where the formula-OCR (pix2tex) models are cached. Downloaded once
@@ -5251,37 +5369,46 @@ pub async fn extract_table_model(
         .decode(b64)
         .map_err(|e| format!("immagine non valida: {e}"))?;
 
-    // Words of the SAME region, converted to region-relative coordinates.
-    let path = {
-        let state = app.state::<AppState>();
-        let conn = state.db.lock();
-        resolve_existing_path(&conn, id)?
-    };
-    let path = path.ok_or_else(|| "Questo elemento non ha un file PDF".to_string())?;
-    let words = {
-        let state = app.state::<AppState>();
-        pdf::extract_region_words(&state.pdfium, Path::new(&path), page.saturating_sub(1), [x, y, w, h])
-            .map_err(|e| e.to_string())?
-    };
-    if words.is_empty() {
+    // Words of the SAME region, converted to region-relative coordinates. Resolve the
+    // path + open pdfium OFF the async worker: pdfium_lock can be held for a while by OCR
+    // / the RAG producer, and a blocking acquire on a runtime worker would starve other
+    // async commands (this whole command is already async).
+    let rw = w.max(f32::MIN_POSITIVE);
+    let rh = h.max(f32::MIN_POSITIVE);
+    let app2 = app.clone();
+    let wboxes: Vec<tablestruct::WordBox> =
+        tauri::async_runtime::spawn_blocking(move || -> Result<Vec<tablestruct::WordBox>, String> {
+            let state = app2.state::<AppState>();
+            let path = {
+                let conn = state.db.lock();
+                resolve_existing_path(&conn, id)?
+            };
+            let path = path.ok_or_else(|| "Questo elemento non ha un file PDF".to_string())?;
+            let words = {
+                let _pdf_guard = state.pdfium_lock.lock();
+                pdf::extract_region_words(&state.pdfium, Path::new(&path), page.saturating_sub(1), [x, y, w, h])
+                    .map_err(|e| e.to_string())?
+            };
+            Ok(words
+                .into_iter()
+                .map(|wd| tablestruct::WordBox {
+                    text: wd.text,
+                    x0: (wd.x0 - x) / rw,
+                    y0: (wd.y0 - y) / rh,
+                    x1: (wd.x1 - x) / rw,
+                    y1: (wd.y1 - y) / rh,
+                })
+                .collect())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+    if wboxes.is_empty() {
         return Err(
             "Nessun testo nel PDF in quest'area (pagina scansionata?): il modello struttura \
              ha bisogno del testo del PDF per riempire le celle — usa il motore «Ollama»."
                 .to_string(),
         );
     }
-    let rw = w.max(f32::MIN_POSITIVE);
-    let rh = h.max(f32::MIN_POSITIVE);
-    let wboxes: Vec<tablestruct::WordBox> = words
-        .into_iter()
-        .map(|wd| tablestruct::WordBox {
-            text: wd.text,
-            x0: (wd.x0 - x) / rw,
-            y0: (wd.y0 - y) / rh,
-            x1: (wd.x1 - x) / rw,
-            y1: (wd.y1 - y) / rh,
-        })
-        .collect();
 
     let grid = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Vec<String>>, String> {
         let dets = tablestruct::recognize(&dir, &bytes).map_err(|e| e.to_string())?;
@@ -5739,12 +5866,35 @@ pub fn migrate_keys_to_vault(conn: &Connection) {
 /// Set a discovered/reference document's metadata + authors (replace).
 fn write_result_meta(conn: &mut Connection, id: i64, r: &discovery::SearchResult) -> anyhow::Result<()> {
     let tx = conn.transaction()?;
+    // UNIQUE(doi) spans soft-deleted rows: a trashed twin holding this DOI would make
+    // the UPDATE fail and (in discover_add) leave a committed, un-removable orphan stub
+    // that also blocks re-adding. Mirror apply_metadata — reclaim the DOI from a
+    // soft-deleted holder, but never steal it from a LIVE paper.
+    let claim_doi: Option<&str> = match r.doi.as_deref() {
+        Some(doi) if !doi.trim().is_empty() => {
+            let live_dup: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM documents WHERE doi = ?1 AND id <> ?2 AND deleted_at IS NULL",
+                    params![doi, id],
+                    |r2| r2.get(0),
+                )
+                .optional()?;
+            if live_dup.is_some() {
+                None // a live paper owns it — keep our own DOI rather than collide
+            } else {
+                // Free it from any soft-deleted holder, then claim it here.
+                tx.execute("UPDATE documents SET doi = NULL WHERE doi = ?1 AND id <> ?2", params![doi, id])?;
+                Some(doi)
+            }
+        }
+        _ => None,
+    };
     tx.execute(
         "UPDATE documents
          SET title = COALESCE(?1, title), year = ?2, venue = ?3,
              doi = COALESCE(?4, doi), abstract = COALESCE(?5, abstract)
          WHERE id = ?6",
-        params![r.title, r.year, r.venue, r.doi, r.abstract_text, id],
+        params![r.title, r.year, r.venue, claim_doi, r.abstract_text, id],
     )?;
     tx.execute("DELETE FROM document_authors WHERE document_id = ?1", params![id])?;
     for (pos, name) in r.authors.iter().enumerate() {
@@ -5778,21 +5928,10 @@ fn safe_component(s: &str) -> String {
     s.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect()
 }
 
-/// Extract the host from a URL authority (handles `user@`, `:port`, and `[ipv6]`).
-fn host_of(authority: &str) -> String {
-    let a = authority.rsplit('@').next().unwrap_or(authority);
-    if let Some(rest) = a.strip_prefix('[') {
-        return rest.split(']').next().unwrap_or("").to_ascii_lowercase();
-    }
-    a.split(':').next().unwrap_or(a).to_ascii_lowercase()
-}
-
-/// SSRF guard: only allow https to public hosts (reject loopback/private/link-local
-/// IP literals and localhost). Note: a DNS name resolving to an internal IP is not
-/// fully blocked here — that would require resolve-and-pin.
 /// Whether an IP literal is a routable public address. Rejects loopback, private,
 /// link-local, unique-local, multicast and unspecified — for IPv4, IPv6, and
-/// IPv4-mapped IPv6 (e.g. `::ffff:127.0.0.1`).
+/// IPv4-mapped IPv6 (e.g. `::ffff:127.0.0.1`). Used by both the fetch guard
+/// ([`is_safe_fetch_url`]) and the browser-open guard (`open_external`).
 fn ip_is_public(ip: std::net::IpAddr) -> bool {
     use std::net::IpAddr;
     match ip {
@@ -6188,7 +6327,9 @@ pub async fn discover_add(app: AppHandle, result: discovery::SearchResult) -> Re
             };
             if let Ok(prepared) = prepared {
                 let mut conn = state.db.lock();
-                match import::commit_import(&conn, &prepared) {
+                // Discovery add: content-addressed download; don't silently restore a
+                // trashed twin here (keep the metadata-only add / dedup path simple).
+                match import::commit_import(&conn, &prepared, false) {
                     Ok(o) if o.imported => {
                         write_result_meta(&mut conn, o.document_id, &result).map_err(|e| e.to_string())?;
                         return Ok("added_pdf".into());
@@ -6382,7 +6523,9 @@ pub(crate) async fn import_from_url(app: &AppHandle, url: &str) -> Result<&'stat
     let outcome = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
-        import::commit_import(&conn, &prepared)
+        // Import-by-URL treats imported=true as a fresh row (overwrites the title with a
+        // URL slug, re-enriches); don't restore a trashed twin under that assumption.
+        import::commit_import(&conn, &prepared, false)
     }
     .map_err(|e| e.to_string())?;
     if !outcome.imported {
@@ -7956,9 +8099,14 @@ pub fn restore_documents(state: State<'_, AppState>, ids: Vec<i64>) -> Result<()
 /// Permanently delete documents (and their vector rows + thumbnail files).
 #[tauri::command]
 pub fn purge_documents(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
-    let conn = state.db.lock();
+    let mut conn = state.db.lock();
+    // One transaction over the whole list: a crash mid-purge must not leave a
+    // document row whose vector rows were already deleted — restoring it would
+    // silently drop it from semantic search, the Costellazione and RAG answers.
+    let mut thumbs: Vec<String> = Vec::new();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
     for id in &ids {
-        let thumb: Option<String> = conn
+        let thumb: Option<String> = tx
             .query_row("SELECT thumb_path FROM documents WHERE id = ?1", params![id], |r| {
                 r.get::<_, Option<String>>(0)
             })
@@ -7967,22 +8115,28 @@ pub fn purge_documents(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), 
             .flatten();
         if let Some(t) = thumb {
             if !t.is_empty() {
-                std::fs::remove_file(&t).ok();
+                thumbs.push(t);
             }
         }
         // doc_vec / chunk_vec are vec0 virtual tables with no FK cascade; remove
         // them explicitly BEFORE deleting the document (chunk_vec must go while the
         // doc_chunks rows still exist to resolve the chunk ids). The rest cascades,
         // and the FTS delete trigger fires on the documents delete.
-        conn.execute("DELETE FROM doc_vec WHERE document_id = ?1", params![id])
+        tx.execute("DELETE FROM doc_vec WHERE document_id = ?1", params![id])
             .map_err(|e| e.to_string())?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM chunk_vec WHERE chunk_id IN (SELECT id FROM doc_chunks WHERE document_id = ?1)",
             params![id],
         )
         .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM documents WHERE id = ?1", params![id])
+        tx.execute("DELETE FROM documents WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    // Delete cover files only after the DB delete is durable (so a rolled-back
+    // transaction never leaves a live row pointing at a removed thumbnail).
+    for t in thumbs {
+        std::fs::remove_file(&t).ok();
     }
     Ok(())
 }
@@ -8091,7 +8245,9 @@ pub fn merge_documents(state: State<'_, AppState>, master_id: i64, other_ids: Ve
 // ===== Filter helpers =====
 
 fn load_tags(conn: &Connection, document_id: i64) -> anyhow::Result<Vec<Tag>> {
-    let mut stmt = conn.prepare(
+    // prepare_cached: this is called once per document in query_documents' row loop,
+    // so recompiling the statement every call is a real cost on large libraries.
+    let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.name, t.color FROM tags t
          JOIN document_tags dt ON dt.tag_id = t.id
          WHERE dt.document_id = ?1 ORDER BY t.name",
@@ -8391,19 +8547,23 @@ pub fn open_external(url: String) -> Result<(), String> {
     // For web links (which may come from untrusted search results / READMEs),
     // refuse internal/LAN targets so a malicious link can't make the browser
     // hit localhost or a private host with the user's cookies (SSRF / LAN-CSRF).
-    if let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) {
-        let authority = rest.split(|c| c == '/' || c == '?' || c == '#').next().unwrap_or("");
-        let host = host_of(authority);
-        let host = host.trim_end_matches('.');
-        if host.is_empty() || host == "localhost" || host.ends_with(".localhost") {
+    // Parse with the WHATWG url parser (the SAME normalization the OS default
+    // browser applies), so the host we vet is byte-identical to the one the
+    // browser will navigate to — no '\' / userinfo-'@' / obfuscated-numeric-IP
+    // differential (e.g. `http://127.0.0.1\@github.com/` canonicalizes to host
+    // 127.0.0.1, and `http://0x7f000001/` to 127.0.0.1, both rejected below).
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let parsed = reqwest::Url::parse(&url).map_err(|_| "URL non valido".to_string())?;
+        let host = parsed.host_str().unwrap_or("");
+        let h = host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(host);
+        let hl = h.trim_end_matches('.').to_ascii_lowercase();
+        if hl.is_empty() || hl == "localhost" || hl.ends_with(".localhost") {
             return Err("Indirizzo locale non consentito".into());
         }
-        if host.starts_with("0x")
-            || (!host.chars().any(|c| c.is_ascii_alphabetic()) && host.parse::<std::net::IpAddr>().is_err())
-        {
-            return Err("Indirizzo non valido".into());
-        }
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if let Ok(ip) = h.parse::<std::net::IpAddr>() {
             if !ip_is_public(ip) {
                 return Err("Indirizzo locale non consentito".into());
             }
@@ -9151,8 +9311,18 @@ pub fn term_open(
 }
 
 #[tauri::command]
-pub fn term_write(state: State<'_, term::TermState>, data: String) -> Result<(), String> {
-    term::write(state.inner(), &data)
+pub async fn term_write(app: AppHandle, data: String) -> Result<(), String> {
+    // Run off the event-loop thread: a ConPTY write blocks when the foreground
+    // child stops reading stdin (a paused program + a paste larger than the input
+    // buffer). If that ran inline it would freeze the whole UI AND make term_close /
+    // term_resize — the designed escape hatch — undeliverable. Off-thread, the event
+    // loop keeps pumping and term_close can still tear the session down.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<term::TermState>();
+        term::write(state.inner(), &data)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

@@ -146,6 +146,7 @@
   let annos = $state<Annotation[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let pdf: any = null;
+  let closed = false; // set on unmount; lets load() destroy a doc that resolves after teardown
   let pageWraps: HTMLDivElement[] = [];
 
   let selBtn = $state<{ x: number; y: number } | null>(null);
@@ -495,9 +496,18 @@
     type Slot = { n: number; page: any; viewport: any; canvas: HTMLCanvasElement; textDiv: HTMLDivElement };
     const slots: Slot[] = [];
     const wraps: HTMLDivElement[] = [];
-    for (let n = 1; n <= pdf.numPages; n++) {
-      if (myToken !== renderToken) return;
-      const page = await pdf.getPage(n);
+    for (let n = 1; pdf && n <= pdf.numPages; n++) {
+      if (myToken !== renderToken || !pdf) return;
+      // The reader can be closed mid-pass (cleanup destroys pdf + bumps renderToken);
+      // a destroyed transport rejects getPage — swallow it instead of surfacing an
+      // unhandled rejection, since this pass is now stale anyway.
+      let page;
+      try {
+        page = await pdf.getPage(n);
+      } catch {
+        return;
+      }
+      if (myToken !== renderToken || !pdf) return;
       const viewport = page.getViewport({ scale, rotation });
       const wrap = document.createElement("div");
       wrap.className = "pagewrap";
@@ -568,7 +578,16 @@
     error = "";
     try {
       const buf = (await invoke("read_pdf", { id })) as ArrayBuffer;
-      pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const doc: any = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+      // The reader can be closed while the file is still parsing (onMount fires load()
+      // un-awaited). If so, the cleanup already ran with pdf === null, so destroy the
+      // just-resolved document here — otherwise it leaks into the worker for the session.
+      if (closed) {
+        void doc.destroy?.();
+        return;
+      }
+      pdf = doc;
       annos = await listAnnotations(id);
       docNotes = (await getDocumentMeta(id).then((m) => m.notes ?? "").catch(() => "")) ?? "";
       notesSaved = true;
@@ -1446,8 +1465,14 @@
   /** Natural (scale-1) size of page 1 in the current rotation. */
   async function pageSize(): Promise<{ w: number; h: number } | null> {
     if (!pdf) return null;
-    const vp = (await pdf.getPage(1)).getViewport({ scale: 1, rotation });
-    return { w: vp.width, h: vp.height };
+    try {
+      // getPage can reject if the reader is closed mid-call (destroyed transport);
+      // callers invoke fitWidth/fitPage un-awaited, so let it settle to null quietly.
+      const vp = (await pdf.getPage(1)).getViewport({ scale: 1, rotation });
+      return { w: vp.width, h: vp.height };
+    } catch {
+      return null;
+    }
   }
   async function fitWidth() {
     const s = await pageSize();
@@ -2117,9 +2142,19 @@
       clearTimeout(notesTimer);
       clearTimeout(idleTimer);
       clearTimeout(zoomSaveTimer);
+      clearTimeout(renderTimer); // a zoom just before close must not render after unmount
+      clearTimeout(formulaPrevTimer);
       if (zoomDirty) writeZoomNow(); // don't lose a zoom made within the debounce window
       if (!notesSaved) flushNotes();
       if (currentPage > 0) setLastPage(id, currentPage, pdf?.numPages ?? undefined).catch(() => {});
+      // Free the pdf.js document and its worker resources (page trees, fonts, raster
+      // caches live in the shared worker until destroy(); GC-ing the proxy won't). The
+      // reader is remounted per document ({#key openDoc.id}), so skipping this leaks
+      // every opened PDF into the worker for the whole session.
+      closed = true; // a document that resolves after this is destroyed by load()
+      renderToken++; // invalidate any in-flight render pass before tearing pdf down
+      void pdf?.destroy?.();
+      pdf = null;
     };
   });
 </script>

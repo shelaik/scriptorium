@@ -416,6 +416,9 @@
     added: "desc", // most recent first
   };
   let selected = $state<number[]>([]);
+  // O(1) membership for the grid/list hot paths: every card checks it per render, and a
+  // "Seleziona tutti" toggle otherwise re-runs O(selected) array scans for every row.
+  let selectedSet = $derived(new Set(selected));
   let dupGroups = $state<number[][]>([]);
   let dupMap = $state<Record<number, DocumentItem>>({});
   let idModal = $state(false);
@@ -620,7 +623,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.22";
+  const APP_VERSION = "0.9.23";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -778,7 +781,7 @@
 
   // Select-all (for batch actions): toggles the whole shown list.
   let allSelected = $derived(
-    displayed.length > 0 && displayed.every((d) => selected.includes(d.id)),
+    displayed.length > 0 && displayed.every((d) => selectedSet.has(d.id)),
   );
   function toggleSelectAll() {
     selected = allSelected ? [] : displayed.map((d) => d.id);
@@ -791,7 +794,12 @@
     const m = mode;
     clearTimeout(searchTimer);
     if (!q.trim()) {
+      // Bump the epoch so any in-flight search's `finally` is a no-op, and reset the
+      // spinner + stale hits here — otherwise clearing the box mid-search leaves
+      // "cerco…" stuck forever and retyping flashes the previous query's results.
       searchSeq++;
+      searching = false;
+      results = [];
       noteResults = [];
       return;
     }
@@ -818,16 +826,48 @@
     }, 250);
   });
 
+  // Bounded thumbnail loader: queue ids and keep only a few getThumbnail() calls in
+  // flight at once. Opening a large library used to fire one IPC per document all at
+  // once — thousands serializing on the single DB mutex, each returning a base64 PNG
+  // — which janked first paint. The queue caps that burst without dropping any cover.
+  const THUMB_CONCURRENCY = 6;
+  let thumbQueue: number[] = [];
+  const thumbQueued = new Set<number>();
+  let thumbActive = 0;
+  function pumpThumbs() {
+    while (thumbActive < THUMB_CONCURRENCY && thumbQueue.length) {
+      const id = thumbQueue.shift()!;
+      thumbQueued.delete(id);
+      if (thumbs[id]) continue; // filled in the meantime
+      thumbActive++;
+      getThumbnail(id)
+        .then((t) => {
+          if (t) thumbs[id] = t;
+        })
+        .catch(() => {})
+        .finally(() => {
+          thumbActive--;
+          pumpThumbs();
+        });
+    }
+  }
   function ensureThumbs(items: DocumentItem[]) {
     for (const d of items) {
-      if (d.has_thumb && !thumbs[d.id]) {
-        getThumbnail(d.id)
-          .then((t) => {
-            if (t) thumbs[d.id] = t;
-          })
-          .catch(() => {});
+      if (d.has_thumb && !thumbs[d.id] && !thumbQueued.has(d.id)) {
+        thumbQueued.add(d.id);
+        thumbQueue.push(d.id);
       }
     }
+    pumpThumbs();
+  }
+  /** Drop cached covers (and any pending fetches) for documents that no longer exist. */
+  function forgetThumbs(ids: number[]) {
+    const gone = new Set(ids);
+    for (const id of ids) {
+      delete thumbs[id];
+      thumbQueued.delete(id);
+    }
+    thumbQueue = thumbQueue.filter((id) => !gone.has(id));
   }
 
   /** Re-render every cover at high resolution so zoomed-in grid thumbnails are crisp. */
@@ -839,6 +879,8 @@
       const n = await rebuildThumbnails();
       // Drop the cached data URLs so the freshly-rendered, higher-res covers reload.
       thumbs = {};
+      thumbQueue = [];
+      thumbQueued.clear();
       ensureThumbs(displayed);
       status = `✓ ${n} anteprime rigenerate ad alta risoluzione`;
     } catch (e) {
@@ -1048,13 +1090,16 @@
   async function purgeFromTrash(id: number) {
     if (!(await confirmAsk("Eliminare definitivamente questo documento? L'operazione è irreversibile."))) return;
     await purgeDocuments([id]);
+    forgetThumbs([id]);
     await loadDocs();
   }
   async function emptyTrash() {
     const n = docs.length;
     if (!n) return;
     if (!(await confirmAsk(`Svuotare il cestino? ${n} ${n > 1 ? "documenti verranno eliminati" : "documento verrà eliminato"} definitivamente.`, "Svuota cestino"))) return;
-    await purgeDocuments(docs.map((d) => d.id));
+    const ids = docs.map((d) => d.id);
+    await purgeDocuments(ids);
+    forgetThumbs(ids);
     await loadDocs();
   }
   async function doMerge(group: number[]) {
@@ -2115,6 +2160,11 @@
     }
   }
   async function runSaved(s: SavedSearch) {
+    // Command-palette "Ricerca salvata: …" entries aren't disabled during a run
+    // (unlike the Cerca button), so guard here: without this, launching a second
+    // saved search while the first is in flight lets the slower one overwrite the
+    // newer one's results under the wrong query, and its finally re-enables the UI.
+    if (discovering) return;
     if (filter.kind !== "discover") setFilter({ kind: "discover" });
     // Reflect the saved query in the search bar.
     discoverSource = s.source as typeof discoverSource;
@@ -5133,7 +5183,7 @@
         {/if}
       </div>
 
-      <p class="sidehint" title="Chiedi alla libreria, Wiki, Appunti, Cerca online, Novità, Cura della libreria, Cestino, Terminale, Impostazioni, Aiuto e Informazioni sono ora nella barra strumenti in alto ↑ — tasto destro: menu radiale · Ctrl+K: palette">Gli strumenti sono nella barra in alto ↑</p>
+      <p class="sidehint" title="Chiedi alla libreria, Wiki, Appunti, Cerca online, Novità, Cura della libreria, Cestino, Terminale, Guida, Impostazioni e Informazioni sono ora nella barra strumenti in alto ↑ — tasto destro: menu radiale · Ctrl+K: palette">Gli strumenti sono nella barra in alto ↑</p>
     </aside>
 
     <main class="main">
@@ -5499,7 +5549,7 @@
               <p>Le tue {savedSearches.length} ricerche salvate vengono ricontrollate a ogni avvio. Quando esce qualcosa di nuovo lo trovi qui, pronto da aggiungere con un click.</p>
               <p class="dimtext">Puoi forzare il controllo adesso con «↻ Cerca ora».</p>
             {:else}
-              <p>Salva una ricerca da <strong>Scopri online</strong> (★ Salva) per iniziare a monitorare un tema: le novità compariranno qui.</p>
+              <p>Salva una ricerca da <strong>Cerca online</strong> (★ Salva) per iniziare a monitorare un tema: le novità compariranno qui.</p>
             {/if}
           </div>
         {:else}
@@ -5844,6 +5894,7 @@
             <Constellation
               {graph}
               loading={graphLoading}
+              paused={openDoc !== null}
               {selected}
               onOpen={(id) => {
                 if (id < 0) {
@@ -5904,9 +5955,9 @@
         {:else if view === "grid"}
           <div class="grid" style="--grid-min: {gridSize}px">
             {#each displayed as d (d.id)}
-              <article class="card" class:selcard={selected.includes(d.id)} class:kfocus={focusId === d.id} role="button" tabindex="0" onclick={() => focusCard(d)} ondblclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} onkeydown={(e) => { if (e.key === "Enter") openDocument(d); }}>
+              <article class="card" class:selcard={selectedSet.has(d.id)} class:kfocus={focusId === d.id} role="button" tabindex="0" onclick={() => focusCard(d)} ondblclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} onkeydown={(e) => { if (e.key === "Enter") openDocument(d); }}>
                 <button class="dots" title="Altre azioni (anche col tasto destro)" onclick={(e) => openCardMenu(e, d)}>⋯</button>
-                <button class="cardsel" class:on={selected.includes(d.id)} title="Seleziona per azioni multiple" aria-label="Seleziona" onclick={(e) => { e.stopPropagation(); toggleSelect(d.id); }}>{selected.includes(d.id) ? "✓" : ""}</button>
+                <button class="cardsel" class:on={selectedSet.has(d.id)} title="Seleziona per azioni multiple" aria-label="Seleziona" onclick={(e) => { e.stopPropagation(); toggleSelect(d.id); }}>{selectedSet.has(d.id) ? "✓" : ""}</button>
                 <button class="starbtn" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>
                 <div class="thumb">
                   {#if thumbs[d.id]}<img src={thumbs[d.id]} alt="" />{:else}<div class="thumb-placeholder" class:refonly={!d.has_file}>{d.has_file ? "PDF" : "Riferimento — senza PDF"}</div>{/if}
@@ -5970,8 +6021,8 @@
               <tbody>
                 {#each displayed as d (d.id)}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <tr onclick={() => focusCard(d)} ondblclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selected.includes(d.id)} class:kfocus={focusId === d.id}>
-                    <td class="sel"><input type="checkbox" checked={selected.includes(d.id)} onclick={(e) => e.stopPropagation()} onchange={() => toggleSelect(d.id)} title="Seleziona" /></td>
+                  <tr onclick={() => focusCard(d)} ondblclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selectedSet.has(d.id)} class:kfocus={focusId === d.id}>
+                    <td class="sel"><input type="checkbox" checked={selectedSet.has(d.id)} onclick={(e) => e.stopPropagation()} onchange={() => toggleSelect(d.id)} title="Seleziona" /></td>
                     <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if d.citekey && !isBare(d)}<button type="button" class="ckey-inline" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}{#if d.has_summary}<span class="aisum inline" title="Riassunto AI già presente (il batch AI salta questo documento)">✦</span>{/if}{#if isBare(d)}<span class="metamiss-inline" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ</span>{/if}</td>
                     <td class="dim" title={authorLine(d)}>{#if authorLine(d)}<button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button>{:else}—{/if}</td>
                     <td class="num dim">{d.year ?? "—"}</td>
@@ -6889,7 +6940,7 @@
         <div class="helpsec">
           <h3>Le tre porte d'ingresso</h3>
           <ul>
-            <li><strong>Barra strumenti</strong> (in alto): un'icona per ogni strumento — passaci sopra col mouse per il nome. Nell'ordine: <strong>I miei paper</strong> (torna alla griglia), <strong>Importa</strong>, <strong>Vista</strong>, <strong>Riprendi lettura</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Appunti</strong>, <strong>Progetti (LaTeX)</strong>, <strong>Riscopri</strong>, <strong>Novità</strong> (🔔 col conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong>, <strong>Indice semantico</strong>, <strong>Memoria AI</strong> (o <em>Attiva AI</em> quando è spenta), <strong>Backup</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Aspetto</strong>, <strong>Sistema</strong> (Impostazioni · Aiuto · Informazioni). Le voci con un menu si aprono al clic, le altre eseguono; l'icona è evidenziata quando sei nella vista corrispondente. In alto trovi anche il chip <strong>AI</strong> (stato dell'AI locale), «✦ N senza metadati» quando serve, e l'icona della <strong>palette</strong>.</li>
+            <li><strong>Barra strumenti</strong> (in alto): un'icona per ogni strumento — passaci sopra col mouse per il nome. Nell'ordine: <strong>I miei paper</strong> (torna alla griglia), <strong>Importa</strong>, <strong>Vista</strong>, <strong>Riprendi lettura</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Appunti</strong>, <strong>Progetti (LaTeX)</strong>, <strong>Riscopri</strong>, <strong>Novità</strong> (🔔 col conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong>, <strong>Indice semantico</strong>, <strong>Memoria AI</strong> (o <em>Attiva AI</em> quando è spenta), <strong>Backup</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Guida</strong>, <strong>Aspetto</strong>, <strong>Sistema</strong> (Impostazioni · Controlla aggiornamenti · Informazioni). Le voci con un menu si aprono al clic, le altre eseguono; l'icona è evidenziata quando sei nella vista corrispondente. In alto trovi anche il chip <strong>AI</strong> (stato dell'AI locale), «✦ N senza metadati» quando serve, e l'icona della <strong>palette</strong>.</li>
             <li><strong>Menu radiale</strong> (tasto destro): su un <strong>documento</strong> → le azioni su quel documento; sullo <strong>spazio vuoto</strong> → il menu globale (gli stessi gruppi della barra); su una <strong>selezione multipla</strong> → le azioni in blocco. Muovi verso un petalo e clicca (basta la direzione); <strong>rotella</strong> per ruotare; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; il centro torna indietro, <kbd>Esc</kbd> chiude. La <strong>descrizione</strong> della voce evidenziata compare sotto l'anello.</li>
             <li><strong>Palette comandi</strong> (<kbd>Ctrl</kbd>+<kbd>K</kbd>): ogni azione, documento, <strong>appunto</strong>, <strong>pagina wiki</strong>, <strong>progetto LaTeX</strong>, filtro, sezione della guida e tema — digitando. Funziona <strong>anche dentro il lettore</strong>. Barra, radiale e palette pescano dallo <strong>stesso registro</strong>: se non trovi un comando, è comunque lì.</li>
           </ul>
@@ -6948,7 +6999,7 @@
           <ul>
             <li>Quando ci sono schede incomplete compare «<strong>✦ N senza metadati</strong>»: un clic le recupera in blocco (con barra di avanzamento e Stop) — prima l'id arXiv nel <strong>nome del file</strong> (funziona anche sulle scansioni), poi DOI e <strong>titolo</strong> dal PDF (Crossref/arXiv). Mai dal primo DOI trovato nel testo: niente etichette sbagliate — ciò che non è sicuro resta com'è.</li>
             <li>Per il caso singolo o ostinato: tasto destro → Organizza → <strong>Recupera metadati…</strong> fa la ricerca <em>estesa</em> (Crossref, arXiv, OpenAlex, ogni DOI/arXiv stampato nel PDF, nome del file) e mostra i <strong>candidati con le prove</strong> trovate nel PDF (titolo, autori, anno): scegli tu quale applicare, o incolla un DOI/arXiv. Lo stesso da Salute libreria («Trova…») accanto a ogni documento incompleto.</li>
-            <li><strong>Impostazioni → Manutenzione → «Ripara metadati errati»</strong> ricontrolla tutta la libreria e corregge le schede il cui titolo non corrisponde al PDF. Sicuro e ripetibile. A mano: tasto destro → <strong>Modifica metadati</strong>.</li>
+            <li><strong>Impostazioni → Manutenzione → «Verifica e ripara metadati»</strong> ricontrolla tutta la libreria e corregge le schede il cui titolo non corrisponde al PDF. Sicuro e ripetibile. A mano: tasto destro → <strong>Modifica metadati</strong>.</li>
           </ul>
         </div>
 
@@ -6963,7 +7014,7 @@
         <div class="helpsec">
           <h3>Cercare in libreria</h3>
           <ul>
-            <li>Barra di ricerca in alto (<kbd>/</kbd>), tre modalità: <em>Testo</em>, <em>Semantica</em> (per significato — serve l'<strong>Indice semantico</strong>) o <em>Ibrida</em>. Cerca anche nelle <strong>annotazioni</strong> e nelle <strong>note dei documenti</strong>; gli <strong>Appunti .md</strong> che corrispondono compaiono in un gruppo dedicato sopra i risultati.</li>
+            <li>Barra di ricerca in alto (<kbd>/</kbd>), tre modalità: <em>Tutto</em> (testo + semantica), <em>Testo</em> o <em>Semantica</em> (per significato — serve l'<strong>Indice semantico</strong>). Cerca anche nelle <strong>annotazioni</strong> e nelle <strong>note dei documenti</strong>; gli <strong>Appunti .md</strong> che corrispondono compaiono in un gruppo dedicato sopra i risultati.</li>
           </ul>
         </div>
 
@@ -7108,7 +7159,7 @@
             <dt>…aggiungere il PDF che ho appena scaricato col browser?</dt>
             <dd>Copia il link del PDF e torna su Scriptorium: compare «Aggancia». Oppure punta la Cartella sorvegliata su Download: entra da solo.</dd>
             <dt>…sistemare un paper arrivato senza titolo o con metadati sbagliati?</dt>
-            <dd>Clic su «✦ N senza metadati» in alto per il recupero in blocco (solo abbinamenti sicuri). Per il caso singolo: tasto destro → Organizza → <strong>Recupera metadati…</strong> mostra i candidati trovati online con le prove nel PDF e applichi quello giusto (o incolli un DOI/arXiv). Ritocchi a mano: Modifica metadati. Per tutta la libreria: Impostazioni → Manutenzione → «Ripara metadati errati».</dd>
+            <dd>Clic su «✦ N senza metadati» in alto per il recupero in blocco (solo abbinamenti sicuri). Per il caso singolo: tasto destro → Organizza → <strong>Recupera metadati…</strong> mostra i candidati trovati online con le prove nel PDF e applichi quello giusto (o incolli un DOI/arXiv). Ritocchi a mano: Modifica metadati. Per tutta la libreria: Impostazioni → Manutenzione → «Verifica e ripara metadati».</dd>
             <dt>…copiare una citazione pronta?</dt>
             <dd>Tasto destro sul paper → Cita: APA, IEEE, BibTeX, citekey, <code>\cite</code>, <code>[@…]</code>. Con più paper selezionati ottieni <code>\cite&#123;k1,k2&#125;</code> o tutte le voci BibTeX insieme.</dd>
             <dt>…mandare un paper a un collega?</dt>
@@ -7170,7 +7221,7 @@
           <div class="setpane">
             {#if settingsTab === "online"}
               <p class="dimtext">La ricerca online è una funzione di rete: finché è disattivata, l'app resta 100% offline. I PDF vengono scaricati solo per i lavori Open Access.</p>
-              <label class="setrow"><input type="checkbox" bind:checked={discEnabled} /> Abilita ricerca online (arXiv + OpenAlex + ADS)</label>
+              <label class="setrow"><input type="checkbox" bind:checked={discEnabled} /> Abilita funzioni online (ricerca su arXiv, OpenAlex, ADS, Semantic Scholar e altre fonti; Trova PDF, esplorazione citazioni, recupero metadati)</label>
               <label class="setlbl">
                 Email di contatto — opzionale ma consigliata
                 <input bind:value={discEmail} placeholder="tua@email.it" />

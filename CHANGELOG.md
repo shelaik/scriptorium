@@ -2,6 +2,15 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.23 — Irrobustimento: niente crash pdfium, backup coerenti, link sicuri
+Giro di consolidamento dopo un audit interno (24 punti deboli confermati e corretti). Nessuna funzione nuova: robustezza, integrità dei dati e sicurezza.
+- **Niente più crash nativo (0xc0000409)**: sei operazioni pdfium (indice RAG, rigenerazione anteprine, OCR, estrazione tabelle/testo di una regione) non prendevano il lock che serializza il lavoro su tutto il documento; ora sì. Prima potevano andare in conflitto con un import (cartella sorvegliata o manuale) e far chiudere l'app di colpo.
+- **Backup della libreria coerente e non bloccante**: la copia ora scatta un checkpoint del WAL e copia il database sotto lock (istantanea a un solo istante, mai una coppia `.db`/`.db-wal` disallineata) e gira fuori dal thread dell'interfaccia (niente più «Non risponde» su librerie grandi). Il backup pre-migrazione all'avvio segna la versione **solo se la copia è riuscita** (disco pieno / file bloccato → riprova al prossimo avvio invece di saltare la rete di sicurezza).
+- **Link esterni più sicuri**: `apri nel browser` ora valida l'host con lo stesso parser del browser (WHATWG), chiudendo un aggiramento con `\` (es. `http://127.0.0.1\@host/`) che poteva puntare a `localhost`/rete locale.
+- **Cestino coerente**: reimportare o «Trova PDF» di un paper che è nel Cestino ora lo **ripristina** invece di dare un errore `UNIQUE` o un «duplicato» invisibile; svuotamento del Cestino e azzeramento indici avvengono in transazione unica (niente stati a metà se manca la corrente); niente più schede-fantasma quando si ri-aggiunge un paper il cui DOI era su una scheda cestinata.
+- **Più fluido**: anteprime caricate a piccoli gruppi invece di migliaia di chiamate in blocco all'avvio (e ripulite quando svuoti il Cestino); la mappa (Costellazione) **smette di ridisegnarsi** quando apri un PDF che la copre; ricerca in libreria che non lascia più lo spinner «cerco…» bloccato se svuoti la casella a metà.
+- **Guida allineata**: corrette alcune diciture non più vere (menu Sistema, «Verifica e ripara metadati», modalità di ricerca «Tutto», «Cerca online», toggle delle funzioni online).
+
 ## 0.9.22 — Server MCP
 - Nuovo binario **`scriptorium-mcp`**: server **MCP** locale (stdio, read-only, gemello della CLI) che porta la libreria dentro **Claude Desktop / Claude Code** e qualsiasi client MCP — 9 strumenti: `search_library`, `list_documents`, `get_document`, `get_bibtex`, `list_notes`, `get_note`, `search_notes`, `list_projects`, `library_stats`. Nessun servizio in background: lo avvia il client quando serve. Allegato alle Release.
 - Nuova scheda **Impostazioni → CLI e MCP**: percorsi dei binari con verifica di presenza e configurazione pronta da copiare (comando `claude mcp add` e voce per `claude_desktop_config.json`).
