@@ -142,6 +142,8 @@ pub fn run() {
             commands::cancel_recover_metadata,
             commands::metadata_candidates,
             commands::apply_meta_candidate,
+            commands::pdf_candidates,
+            commands::attach_pdf_candidate,
             commands::embedding_status,
             commands::generate_embeddings,
             commands::cancel_embeddings,

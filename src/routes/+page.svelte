@@ -162,6 +162,7 @@
   import Viewer from "$lib/viewer/Viewer.svelte";
   import MetaEditor from "$lib/MetaEditor.svelte";
   import MetaFinder from "$lib/MetaFinder.svelte";
+  import PdfFinder from "$lib/PdfFinder.svelte";
   import { mathRender } from "$lib/math";
   import { printDocument, printDocuments, printHtml } from "$lib/print";
   import ShareMenu from "$lib/ShareMenu.svelte";
@@ -279,6 +280,8 @@
   let metaScan = $state<MetaRecoverProgress | null>(null);
   // Which document the "Recupera metadati" candidate finder is open on.
   let metaFindId = $state<number | null>(null);
+  // Which reference-only document the "Trova PDF" candidate finder is open on.
+  let pdfFindId = $state<number | null>(null);
   let generating = $state(false);
   let searching = $state(false);
   let printing = $state(false);
@@ -614,7 +617,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.16";
+  const APP_VERSION = "0.9.17";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1637,25 +1640,8 @@
     }
   }
 
-  async function doFindPdf(d: DocumentItem) {
-    status = `Cerco un PDF per «${d.title ?? "documento"}»…`;
-    try {
-      const res = await findPdf(d.id);
-      status =
-        res === "attached"
-          ? "PDF trovato e allegato ✓"
-          : res === "already"
-            ? "Questo documento ha già un PDF"
-            : res === "duplicate"
-              ? "Quel PDF è già nella libreria (in un altro documento)"
-              : "Nessun PDF Open Access trovato";
-      if (res === "attached") {
-        await loadDocs();
-      }
-    } catch (e) {
-      status = "Errore Trova PDF: " + e;
-    }
-  }
+  // Per-doc "Trova PDF" is now the CANDIDATES dialog (PdfFinder): the strictly
+  // gated automatic path lives on in the batch sweep (findPdf) only.
 
   // ---- «Trova PDF» in blocco: allega copie OA a più riferimenti in sequenza ----
   let pdfBatch = $state<{ done: number; total: number; found: number } | null>(null);
@@ -2971,21 +2957,10 @@
   // ---- "Riferimento senza PDF": attach a file to an existing entry ----
   let refPanel = $state<{ doc: DocumentItem; url: string; busy: boolean } | null>(null);
 
-  async function refFindPdf() {
-    if (!refPanel || refPanel.busy) return;
-    refPanel.busy = true;
-    const id = refPanel.doc.id;
-    try {
-      await doFindPdf(refPanel.doc); // status + reload già gestiti lì
-    } finally {
-      const fresh = docs.find((x) => x.id === id);
-      if (fresh?.has_file) {
-        refPanel = null;
-        openDocument(fresh);
-      } else if (refPanel) {
-        refPanel.busy = false;
-      }
-    }
+  /** "Trova PDF" from the reference panel: open the candidates dialog. */
+  function refFindPdf() {
+    if (!refPanel) return;
+    pdfFindId = refPanel.doc.id;
   }
 
   async function refAttach() {
@@ -3149,11 +3124,11 @@
     if (!d.has_file)
       items.splice(1, 0, {
         id: "d-findpdf",
-        label: "Trova PDF",
+        label: "Trova PDF…",
         icon: I.imp,
-        hint: "Cerca una copia Open Access (arXiv, Unpaywall, OpenAlex, Semantic Scholar) e allegala a questa voce",
+        hint: "Mostra i candidati trovati online (arXiv, OpenAlex, Semantic Scholar, Crossref, per identificativo e per titolo): scegli tu quale scaricare e allegare",
         disabled: !!pdfBatch,
-        action: () => doFindPdf(d),
+        action: () => (pdfFindId = d.id),
       });
     return items;
   }
@@ -6186,8 +6161,8 @@
           allegato (quando è stato aggiunto non c'era un PDF Open Access scaricabile).
         </p>
         <div class="refactions">
-          <button class="primary" onclick={refFindPdf} disabled={refPanel.busy} title="Cerca una copia Open Access in cascata — arXiv, Unpaywall, OpenAlex, Semantic Scholar (e per titolo se manca il DOI) — e allegala a questa voce">
-            {refPanel.busy ? "…" : "Trova PDF (Open Access)"}
+          <button class="primary" onclick={refFindPdf} disabled={refPanel.busy} title="Cerca i candidati online — arXiv, Unpaywall, OpenAlex, Semantic Scholar, Crossref, per identificativo e per titolo — e scegli tu quale scaricare e allegare">
+            {refPanel.busy ? "…" : "Trova PDF…"}
           </button>
           <button class="ghost" onclick={() => (editingId = refPanel!.doc.id)}>Modifica metadati</button>
           <button class="ghost" onclick={() => (refPanel = null)}>Chiudi</button>
@@ -6304,6 +6279,23 @@
         const x = metaFindId;
         metaFindId = null;
         editingId = x;
+      }}
+    />
+  {/if}
+
+  {#if pdfFindId !== null}
+    <PdfFinder
+      id={pdfFindId}
+      onClose={() => (pdfFindId = null)}
+      onApplied={async () => {
+        const x = pdfFindId;
+        pdfFindId = null;
+        refPanel = null;
+        status = "PDF trovato e allegato ✓";
+        await loadDocs();
+        await loadSidebar();
+        const fresh = docs.find((d) => d.id === x);
+        if (fresh?.has_file) openDocument(fresh);
       }}
     />
   {/if}
@@ -6830,7 +6822,7 @@
           <ul>
             <li><strong>Sei vie</strong> (barra → Importa): <strong>PDF dal disco</strong> (anche trascinandoli nella finestra — restano dove sono, l'app li indicizza; i duplicati si riconoscono dal contenuto); <strong>BibTeX .bib</strong> (la tua libreria Zotero/Mendeley); per <strong>identificatore</strong> (DOI / arXiv / ISBN / PMID); <strong>da URL</strong>; <strong>progetto LaTeX (.zip)</strong> — i tuoi paper con la loro bibliografia, marcati «Il mio lavoro»; <strong>Cartella sorvegliata</strong> (importa da sola ciò che ci finisce dentro).</li>
             <li><strong>Dal browser</strong>: copia il link del PDF e torna su Scriptorium — compare «Aggancia» (interruttore in Impostazioni → Connettore); in alternativa il <strong>bookmarklet</strong>, o la Cartella sorvegliata puntata su Download.</li>
-            <li><strong>Riferimenti senza PDF</strong> (aggiunti da ricerca online, citazioni, BibTeX o ID): aprendoli compare il pannello per allegare il file — <strong>Trova PDF</strong> cerca in cascata su arXiv, Unpaywall, OpenAlex e Semantic Scholar (per titolo se manca il DOI), oppure <strong>Allega</strong> da un link, sulla stessa voce e senza duplicati. La stessa azione è nel <strong>radiale</strong> della scheda, sulla <strong>selezione multipla</strong> e in blocco su tutta la libreria (Cura della libreria → «Trova PDF dei riferimenti»).</li>
+            <li><strong>Riferimenti senza PDF</strong> (aggiunti da ricerca online, citazioni, BibTeX o ID): <strong>Trova PDF…</strong> (radiale della scheda, o aprendo la voce) mostra i <strong>candidati</strong> trovati online per identificativo e per titolo (arXiv, Unpaywall, OpenAlex, Semantic Scholar, Crossref) con le prove — «Scarica e allega» quello giusto, «Apri pagina» per controllare, o incolla un link diretto. Sulla <strong>selezione multipla</strong> e in blocco (Cura della libreria → «Trova PDF dei riferimenti») resta automatico: allega solo abbinamenti sicuri, ora anche per titolo su arXiv/S2.</li>
           </ul>
         </div>
 

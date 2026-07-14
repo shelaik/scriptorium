@@ -206,6 +206,18 @@ fn distinctive_set(s: &str) -> HashSet<String> {
     sig_title_words(s).into_iter().collect()
 }
 
+/// Fraction of `a`'s distinctive words that also appear in `b` (0..1) — a
+/// TOLERANT similarity for RANKING candidates that a human confirms visually.
+/// The strict identity gate for anything automatic remains [`strong_title_match`].
+pub fn title_overlap_frac(a: &str, b: &str) -> f32 {
+    let da = distinctive_set(a);
+    if da.is_empty() {
+        return 0.0;
+    }
+    let db = distinctive_set(b);
+    da.intersection(&db).count() as f32 / da.len() as f32
+}
+
 /// Do two TITLES name the same paper? True only when they carry the SAME set of
 /// distinctive words. Precision-first by design: a genuinely different paper —
 /// even one that merely adds ("Riemannian Denoising Diffusion…") or reorders

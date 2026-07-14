@@ -81,8 +81,36 @@ export interface LatexImportSummary {
  *  recovers missing DOIs (title → Crossref) so the gap-finder can see them. */
 export const importLatexZip = (path: string) =>
   invoke<LatexImportSummary>("import_latex_zip", { path });
-/** Try to attach an Open-Access PDF to a reference-only doc. "attached"|"already"|"not_found". */
+/** Try to attach an Open-Access PDF to a reference-only doc (automatic,
+ *  strictly gated). "attached"|"already"|"duplicate"|"not_found". */
 export const findPdf = (id: number) => invoke<string>("find_pdf", { id });
+
+/** One candidate PDF source for a reference-only doc, to be confirmed by the user. */
+export interface PdfCandidate {
+  source: string;
+  /** Provenance label (Italian), e.g. "ricerca per titolo (arXiv)". */
+  origin: string;
+  title: string | null;
+  authors: string[];
+  year: number | null;
+  venue: string | null;
+  pdf_url: string | null;
+  doi: string | null;
+  arxiv_id: string | null;
+  landing_url: string | null;
+  score: number;
+  sure: boolean;
+  signals: string[];
+}
+export interface PdfProbe {
+  title: string | null;
+  candidates: PdfCandidate[];
+}
+/** Extensive PDF-candidate search (identifiers + title on arXiv/OpenAlex/S2/Crossref). */
+export const pdfCandidates = (id: number) => invoke<PdfProbe>("pdf_candidates", { id });
+/** Download and attach a user-chosen candidate. "attached"|"already"|"duplicate"|"not_found". */
+export const attachPdfCandidate = (id: number, candidate: PdfCandidate) =>
+  invoke<string>("attach_pdf_candidate", { id, candidate });
 /** Attach the PDF at `url` to an EXISTING reference-only doc (no new entry).
  *  "attached" | "already" | "duplicate" | "not_pdf". GitHub blob links are normalized. */
 export const attachFromUrl = (id: number, url: string) =>

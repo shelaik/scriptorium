@@ -2,6 +2,10 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.17 — Trova PDF con candidati
+- **«Trova PDF…» ora mostra i candidati** invece di fallire in silenzio: cerca per identificativo (arXiv, DOI → Unpaywall/OpenAlex/Semantic Scholar) e **per titolo** su arXiv, OpenAlex, Semantic Scholar e Crossref; ogni candidato arriva con le prove (titolo identico/simile, autori coincidenti, anno) e i pulsanti **«Scarica e allega»** e **«Apri pagina»** (per controllare nel browser). In fondo, il campo per allegare un link diretto. Se un candidato non è scaricabile, la finestra resta aperta e provi il prossimo.
+- Il recupero **automatico** (selezione multipla e in blocco) ora cerca per titolo anche su **arXiv** e **Semantic Scholar** (sempre col gate rigoroso): il caso «lo trovavo a mano su arXiv» ora lo trova da solo.
+
 ## 0.9.16 — Trova PDF robusto + rifiniture ricerca grafo + fix esplora citazioni
 - **«Trova PDF» in cascata** per le voci solo-riferimento: arXiv (id o DOI), Unpaywall (se c'è l'email, non più obbligatoria), OpenAlex, Semantic Scholar, e ricerca per titolo con gate rigoroso se manca il DOI; se un link OA è morto si passa al successivo. Ora anche nel **radiale della scheda** («Trova PDF»), sulla **selezione multipla** e in blocco su tutta la libreria (Cura della libreria → «Trova PDF dei riferimenti»), con barra di avanzamento e Stop.
 - **Ricerca nel grafo**: menù dei candidati più largo (i titoli lunghi vanno su due righe), niente scroll orizzontale, scrollbar verticale sottile ed elegante.

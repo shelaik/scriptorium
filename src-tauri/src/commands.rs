@@ -4304,8 +4304,10 @@ pub async fn find_pdf(app: AppHandle, id: i64) -> Result<String, String> {
         }
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     }
-    // (6) No leads yet: OpenAlex search by the stored title, accepted ONLY on
-    // the strict title match — a near-neighbour must never provide the file.
+    // (6) No leads yet: TITLE searches on OpenAlex, arXiv and Semantic Scholar,
+    // each accepted ONLY on the strict title match — a near-neighbour must
+    // never provide the file. (Looser matches belong to the interactive
+    // `pdf_candidates` dialog, where the USER confirms.)
     if urls.is_empty() {
         if let Some(t) = title.as_deref().map(str::trim).filter(|t| t.chars().count() >= 8) {
             let filters = discovery::Filters {
@@ -4333,17 +4335,46 @@ pub async fn find_pdf(app: AppHandle, id: i64) -> Result<String, String> {
                     }
                 }
             }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            // arXiv by title — the common case for CS/ML references without a DOI.
+            if let Ok(Ok(list)) = tokio::time::timeout(timeout, metadata::arxiv_search_candidates(&client, t, 5)).await
+            {
+                for (aid, meta) in list {
+                    if !aid.is_empty()
+                        && meta.title.as_deref().is_some_and(|c| metadata::strong_title_match(t, c))
+                    {
+                        push_pdf_url(&mut urls, Some(format!("https://arxiv.org/pdf/{aid}")));
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            if let Ok(Ok(list)) =
+                tokio::time::timeout(timeout, discovery::search_semantic_scholar(&client, t, &filters, &s2_key)).await
+            {
+                for r in list.into_iter().take(8) {
+                    if r.title.as_deref().is_some_and(|c| metadata::strong_title_match(t, c)) {
+                        push_pdf_url(&mut urls, r.oa_pdf_url);
+                        break;
+                    }
+                }
+            }
         }
     }
     if urls.is_empty() {
         return Ok("not_found".into());
     }
+    download_and_attach(&app, id, &urls).await
+}
 
-    // Download the candidates in order: a dead OA link (404 host, HTML landing
-    // page) just moves on to the next source instead of giving up.
+/// Download the first WORKING candidate URL — a dead OA link (404 host, HTML
+/// landing page) just moves on to the next — and attach it to document `id`.
+/// Shared by the automatic `find_pdf` and the user-picked `attach_pdf_candidate`.
+/// Returns "attached" | "duplicate" | "not_found".
+async fn download_and_attach(app: &AppHandle, id: i64, urls: &[String]) -> Result<String, String> {
     let mut saved_path: Option<PathBuf> = None;
-    for url in &urls {
-        match download_pdf(&app, url).await {
+    for url in urls {
+        match download_pdf(app, url).await {
             Ok(Some(p)) => {
                 saved_path = Some(p);
                 break;
@@ -4358,7 +4389,7 @@ pub async fn find_pdf(app: AppHandle, id: i64) -> Result<String, String> {
     // Extract text + thumbnail (no DB lock), serialized against other pdfium
     // document work, then attach to the existing row.
     let state = app.state::<AppState>();
-    let dir = thumb_dir(&app);
+    let dir = thumb_dir(app);
     let prepared = {
         let _pdf_guard = state.pdfium_lock.lock();
         import::prepare_import(&state.pdfium, &dir, &saved)
@@ -4387,6 +4418,411 @@ pub async fn find_pdf(app: AppHandle, id: i64) -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok("attached".into())
+}
+
+/// One candidate PDF source for a reference-only document, offered to the user.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PdfCandidate {
+    /// "arxiv" | "openalex" | "semanticscholar" | "crossref" | "doi"
+    pub source: String,
+    /// Where it came from, for display (Italian).
+    pub origin: String,
+    pub title: Option<String>,
+    pub authors: Vec<String>,
+    pub year: Option<i64>,
+    pub venue: Option<String>,
+    /// Direct PDF link, when the source exposes one.
+    pub pdf_url: Option<String>,
+    /// DOI to resolve at attach time (Unpaywall/OpenAlex/S2) when no direct link.
+    pub doi: Option<String>,
+    pub arxiv_id: Option<String>,
+    /// Landing/abstract page, for the "open and check" button.
+    pub landing_url: Option<String>,
+    pub score: i64,
+    /// Passed the same strict title gate the automatic path uses (or comes
+    /// from an identifier of the record itself, whose identity is certain).
+    pub sure: bool,
+    pub signals: Vec<String>,
+}
+
+/// Report of the per-document PDF-candidate search.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PdfProbe {
+    pub title: Option<String>,
+    pub candidates: Vec<PdfCandidate>,
+}
+
+/// Last surname token of each display name — whole tokens, folded.
+fn surname_tokens(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter_map(|a| parse_author(a).1)
+        .filter_map(|f| {
+            metadata::fold_ascii(&f.to_lowercase())
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.len() >= 3)
+                .last()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// EXTENSIVE per-document PDF search for a reference-only entry: gather
+/// CANDIDATE sources by identifier (arXiv id in the path, DOI → Unpaywall/
+/// OpenAlex/Semantic Scholar) and by TITLE on arXiv, OpenAlex, Semantic
+/// Scholar and Crossref, scored against the stored title/authors/year.
+/// Nothing is downloaded here — the user picks one and `attach_pdf_candidate`
+/// does the download+attach. This is the human fallback for when the
+/// strictly-gated automatic `find_pdf` comes up empty.
+#[tauri::command]
+pub async fn pdf_candidates(app: AppHandle, id: i64) -> Result<PdfProbe, String> {
+    let (doi, path, title, year, authors, email): (
+        Option<String>,
+        String,
+        Option<String>,
+        Option<i64>,
+        Vec<String>,
+        Option<String>,
+    ) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let (doi, path, title, year) = conn
+            .query_row(
+                "SELECT doi, path, title, year FROM documents WHERE id = ?1 AND deleted_at IS NULL",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "documento non trovato".to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.given, a.family FROM authors a
+                 JOIN document_authors da ON da.author_id = a.id
+                 WHERE da.document_id = ?1 ORDER BY da.position",
+            )
+            .map_err(|e| e.to_string())?;
+        let authors: Vec<String> = stmt
+            .query_map(params![id], |r| {
+                let g: Option<String> = r.get(0)?;
+                let f: Option<String> = r.get(1)?;
+                Ok(format!("{} {}", g.unwrap_or_default(), f.unwrap_or_default()).trim().to_string())
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .filter(|s| !s.is_empty())
+            .collect();
+        let email = setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty());
+        (doi, path, title, year, authors, email)
+    };
+    let oa_key = secret::get("openalex_key").unwrap_or_default();
+    let s2_key = secret::get("s2_key").unwrap_or_default();
+    let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
+    let timeout = std::time::Duration::from_secs(20);
+    let nap = || tokio::time::sleep(std::time::Duration::from_millis(150));
+
+    let mut raw: Vec<PdfCandidate> = Vec::new();
+
+    // Identifier-based candidates: the IDENTITY is certain, only the link can fail.
+    if let Some(rest) = path.strip_prefix("ref:arxiv:").filter(|r| !r.is_empty()) {
+        raw.push(PdfCandidate {
+            source: "arxiv".into(),
+            origin: "id arXiv della scheda".into(),
+            title: title.clone(),
+            authors: authors.clone(),
+            year,
+            venue: Some("arXiv".into()),
+            pdf_url: Some(format!("https://arxiv.org/pdf/{rest}")),
+            doi: None,
+            arxiv_id: Some(rest.to_string()),
+            landing_url: Some(format!("https://arxiv.org/abs/{rest}")),
+            score: 120,
+            sure: true,
+            signals: vec!["identificativo della scheda".into(), "link PDF diretto".into()],
+        });
+    }
+    if let Some(d) = doi.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        let dl = d.to_lowercase();
+        if let Some(aid) = dl.strip_prefix("10.48550/arxiv.").filter(|a| !a.is_empty()) {
+            raw.push(PdfCandidate {
+                source: "arxiv".into(),
+                origin: "DOI arXiv della scheda".into(),
+                title: title.clone(),
+                authors: authors.clone(),
+                year,
+                venue: Some("arXiv".into()),
+                pdf_url: Some(format!("https://arxiv.org/pdf/{aid}")),
+                doi: Some(d.to_string()),
+                arxiv_id: Some(aid.to_string()),
+                landing_url: Some(format!("https://arxiv.org/abs/{aid}")),
+                score: 120,
+                sure: true,
+                signals: vec!["identificativo della scheda".into(), "link PDF diretto".into()],
+            });
+        }
+        let doi_link = |u: Option<String>, origin: &str, source: &str, raw: &mut Vec<PdfCandidate>| {
+            if let Some(u) = u.filter(|u| !u.trim().is_empty()) {
+                raw.push(PdfCandidate {
+                    source: source.into(),
+                    origin: origin.into(),
+                    title: title.clone(),
+                    authors: authors.clone(),
+                    year,
+                    venue: None,
+                    pdf_url: Some(u),
+                    doi: Some(d.to_string()),
+                    arxiv_id: None,
+                    landing_url: Some(format!("https://doi.org/{d}")),
+                    score: 115,
+                    sure: true,
+                    signals: vec!["via il DOI della scheda".into(), "link PDF diretto".into()],
+                });
+            }
+        };
+        if let Some(mail) = email.as_deref() {
+            if let Ok(Ok(u)) = tokio::time::timeout(timeout, metadata::unpaywall_pdf(&client, d, mail)).await {
+                doi_link(u, "Unpaywall (dal DOI)", "doi", &mut raw);
+            }
+            nap().await;
+        }
+        if let Ok(u) = tokio::time::timeout(timeout, discovery::openalex_oa_pdf(&client, d, &oa_key)).await {
+            doi_link(u, "OpenAlex (dal DOI)", "openalex", &mut raw);
+        }
+        nap().await;
+        if let Ok(u) = tokio::time::timeout(timeout, discovery::s2_oa_pdf(&client, d, &s2_key)).await {
+            doi_link(u, "Semantic Scholar (dal DOI)", "semanticscholar", &mut raw);
+        }
+        nap().await;
+    }
+
+    // Title searches → candidates the USER judges (this is where the automatic
+    // strict gate is deliberately relaxed into a ranked list).
+    if let Some(t) = title.as_deref().map(str::trim).filter(|t| t.chars().count() >= 8) {
+        let filters = discovery::Filters {
+            year_from: None,
+            year_to: None,
+            oa_only: false,
+            sort: "relevance".to_string(),
+            author: None,
+        };
+        if let Ok(Ok(list)) = tokio::time::timeout(timeout, discovery::search_arxiv(&client, t, &filters)).await {
+            for r in list.into_iter().take(6) {
+                let aid = r.external_id.clone();
+                raw.push(PdfCandidate {
+                    source: "arxiv".into(),
+                    origin: "ricerca per titolo (arXiv)".into(),
+                    title: r.title,
+                    authors: r.authors,
+                    year: r.year,
+                    venue: r.venue,
+                    pdf_url: r
+                        .oa_pdf_url
+                        .or_else(|| (!aid.is_empty()).then(|| format!("https://arxiv.org/pdf/{aid}"))),
+                    doi: r.doi,
+                    arxiv_id: (!aid.is_empty()).then_some(aid),
+                    landing_url: r.url,
+                    score: 0,
+                    sure: false,
+                    signals: Vec::new(),
+                });
+            }
+        }
+        nap().await;
+        if let Ok(Ok(list)) =
+            tokio::time::timeout(timeout, discovery::search_openalex(&client, t, &filters, &oa_key)).await
+        {
+            for r in list.into_iter().take(6) {
+                raw.push(PdfCandidate {
+                    source: "openalex".into(),
+                    origin: "ricerca per titolo (OpenAlex)".into(),
+                    title: r.title,
+                    authors: r.authors,
+                    year: r.year,
+                    venue: r.venue,
+                    pdf_url: r.oa_pdf_url,
+                    doi: r.doi,
+                    arxiv_id: None,
+                    landing_url: r.url,
+                    score: 0,
+                    sure: false,
+                    signals: Vec::new(),
+                });
+            }
+        }
+        nap().await;
+        if let Ok(Ok(list)) =
+            tokio::time::timeout(timeout, discovery::search_semantic_scholar(&client, t, &filters, &s2_key)).await
+        {
+            for r in list.into_iter().take(6) {
+                raw.push(PdfCandidate {
+                    source: "semanticscholar".into(),
+                    origin: "ricerca per titolo (Semantic Scholar)".into(),
+                    title: r.title,
+                    authors: r.authors,
+                    year: r.year,
+                    venue: r.venue,
+                    pdf_url: r.oa_pdf_url,
+                    doi: r.doi,
+                    arxiv_id: None,
+                    landing_url: r.url,
+                    score: 0,
+                    sure: false,
+                    signals: Vec::new(),
+                });
+            }
+        }
+        nap().await;
+        if let Ok(Ok(list)) =
+            tokio::time::timeout(timeout, metadata::crossref_search_candidates(&client, t, email.as_deref(), 5)).await
+        {
+            for (cdoi, meta) in list {
+                raw.push(PdfCandidate {
+                    source: "crossref".into(),
+                    origin: "ricerca per titolo (Crossref)".into(),
+                    title: meta.title.clone(),
+                    authors: display_authors(&meta),
+                    year: meta.year,
+                    venue: meta.venue.clone(),
+                    pdf_url: None,
+                    doi: Some(cdoi.clone()),
+                    arxiv_id: None,
+                    landing_url: Some(format!("https://doi.org/{cdoi}")),
+                    score: 0,
+                    sure: false,
+                    signals: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // Score the title-search candidates against the STORED record.
+    let stored_t = title.as_deref().unwrap_or("");
+    let stored_fams = surname_tokens(&authors);
+    for c in raw.iter_mut() {
+        if c.sure {
+            continue; // identifier-based: already top-ranked
+        }
+        let ct = c.title.as_deref().unwrap_or("");
+        if !stored_t.is_empty() && !ct.is_empty() {
+            if metadata::strong_title_match(stored_t, ct) {
+                c.sure = true;
+                c.score += 100;
+                c.signals.push("titolo identico alla scheda".into());
+            } else {
+                let f = metadata::title_overlap_frac(stored_t, ct);
+                if f >= 0.5 {
+                    c.score += (40.0 * f) as i64;
+                    c.signals.push(format!("titolo simile ({}%)", (f * 100.0) as i32));
+                }
+            }
+        }
+        if !stored_fams.is_empty() && !c.authors.is_empty() {
+            let cand: std::collections::HashSet<String> = surname_tokens(&c.authors).into_iter().collect();
+            let hits = stored_fams.iter().filter(|f| cand.contains(*f)).count();
+            if hits > 0 {
+                c.score += (30 * hits / stored_fams.len()) as i64;
+                c.signals.push(format!("{hits}/{} autori coincidono", stored_fams.len()));
+            }
+        }
+        if let (Some(sy), Some(cy)) = (year, c.year) {
+            if sy == cy {
+                c.score += 10;
+                c.signals.push("stesso anno".into());
+            } else if (sy - cy).abs() <= 1 {
+                c.score += 4;
+            }
+        }
+        if c.pdf_url.is_some() {
+            c.score += 15;
+            c.signals.push("link PDF diretto".into());
+        }
+    }
+
+    // Best first; dedup by identity (arXiv id — an arXiv DOI counts as one —
+    // then DOI, then the link itself, then the title).
+    raw.sort_by(|a, b| (b.sure, b.score).cmp(&(a.sure, a.score)));
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    raw.retain(|c| {
+        let key = if let Some(a) = c.arxiv_id.as_deref() {
+            format!("a:{}", a.split('v').next().unwrap_or(a).to_lowercase())
+        } else if let Some(d) = c.doi.as_deref() {
+            let dl = d.trim().to_lowercase();
+            match dl.strip_prefix("10.48550/arxiv.") {
+                Some(aid) => format!("a:{}", aid.split('v').next().unwrap_or(aid)),
+                None => format!("d:{dl}"),
+            }
+        } else if let Some(u) = c.pdf_url.as_deref() {
+            format!("u:{}", u.to_lowercase())
+        } else {
+            format!("t:{}", c.title.as_deref().unwrap_or("").to_lowercase())
+        };
+        seen.insert(key)
+    });
+    raw.truncate(10);
+    Ok(PdfProbe { title, candidates: raw })
+}
+
+/// Download and attach a USER-CHOSEN PDF candidate: its direct link first,
+/// then the links its identifiers unlock (arXiv id → eprint; DOI → Unpaywall/
+/// OpenAlex/Semantic Scholar). Returns "attached" | "already" | "duplicate" |
+/// "not_found" — on "not_found" the dialog stays open so the user can try the
+/// next candidate.
+#[tauri::command]
+pub async fn attach_pdf_candidate(app: AppHandle, id: i64, candidate: PdfCandidate) -> Result<String, String> {
+    let (path, email): (String, Option<String>) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let path = conn
+            .query_row(
+                "SELECT path FROM documents WHERE id = ?1 AND deleted_at IS NULL",
+                params![id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "documento non trovato".to_string())?;
+        let email = setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty());
+        (path, email)
+    };
+    if !path.starts_with("ref:") {
+        return Ok("already".into());
+    }
+    let oa_key = secret::get("openalex_key").unwrap_or_default();
+    let s2_key = secret::get("s2_key").unwrap_or_default();
+    let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
+    let timeout = std::time::Duration::from_secs(20);
+
+    let mut urls: Vec<String> = Vec::new();
+    push_pdf_url(&mut urls, candidate.pdf_url.clone());
+    if let Some(aid) = candidate.arxiv_id.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        push_pdf_url(&mut urls, Some(format!("https://arxiv.org/pdf/{aid}")));
+    }
+    if let Some(d) = candidate.doi.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        if let Some(mail) = email.as_deref() {
+            if let Ok(Ok(u)) = tokio::time::timeout(timeout, metadata::unpaywall_pdf(&client, d, mail)).await {
+                push_pdf_url(&mut urls, u);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+        if let Ok(u) = tokio::time::timeout(timeout, discovery::openalex_oa_pdf(&client, d, &oa_key)).await {
+            push_pdf_url(&mut urls, u);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        if let Ok(u) = tokio::time::timeout(timeout, discovery::s2_oa_pdf(&client, d, &s2_key)).await {
+            push_pdf_url(&mut urls, u);
+        }
+    }
+    if urls.is_empty() {
+        return Ok("not_found".into());
+    }
+    download_and_attach(&app, id, &urls).await
 }
 
 /// Attach a PDF downloaded from `url` to an EXISTING reference-only document —
