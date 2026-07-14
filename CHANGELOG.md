@@ -2,6 +2,10 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.20 — Modalità esplorazione nel grafo + citazioni senza DOI
+- **Modalità esplorazione**: mentre ci sono stelle fantasma la Costellazione cambia pelle — la libreria si attenua a fondale, i paper di partenza hanno un anello «scanner» rotante, ogni **hop** della catena ha il suo colore, i collegamenti sono **archi curvi animati** e le scoperte pulsano con un alone. Le catene multi-hop si dispongono da sole: i fantasmi hanno una **mini-fisica** dedicata (si respingono tra loro e stanno alla larga dalle stelle della libreria), quindi niente più sovrapposizioni. La funzionalità esistente non cambia: × per uscire e la mappa torna com'era.
+- **Citazioni «da e per» senza DOI**: l'esplorazione delle citazioni ora aggancia il paper anche per **id OpenAlex** (le scoperte ce l'hanno sempre: mai più «manca il DOI» sui fantasmi) o per **titolo** con corrispondenza rigorosa (per i paper della libreria senza DOI). Vale nel grafo, nel radiale («Esplora citazioni (online)») e nella finestra Esplora citazioni («Esplora da qui» / «Esplora ↗» sempre disponibili).
+
 ## 0.9.19 — CLI estesa + esplorazione a catena dalle stelle fantasma
 - **CLI `scriptorium-cli` aggiornata** (era ferma alla libreria): nuovi comandi `notes` (elenco del vault Appunti .md), `note <slug>` (stampa il Markdown), `search-notes` (ricerca con estratto), `projects` (progetti LaTeX), `version`; `schema` documenta anche i percorsi dei file. Sempre read-only e sicura con l'app aperta; binario allegato alla release.
 - **Costellazione — esplorazione a catena**: anche la scheda di una **stella fantasma** ha Citazioni / Simili / Autore; le nuove scoperte si agganciano a quella (con la linea tratteggiata al genitore), così si scava di paper in paper senza dover aggiungere nulla.

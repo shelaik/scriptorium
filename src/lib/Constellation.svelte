@@ -310,16 +310,32 @@
     schedule();
   }
   // ----- Ghost stars: online discoveries anchored around their seed node (or,
-  //       in an exploration chain, around the ghost they were discovered from) -----
+  //       in an exploration chain, around the ghost they were discovered from).
+  //       While ghosts exist the map is in "exploration mode": they get a tiny
+  //       physics of their own (springs to their base + repulsion from each
+  //       other AND from library stars) so multi-hop chains never pile up. -----
   let ghostAnchor = new Map<string, { angle: number; dist: number }>();
   let ghostByKey = new Map<string, GhostStar>();
+  let ghostHop = new Map<string, number>(); // chain depth (0 = straight from the seed)
+  let ghostPos = new Map<string, { x: number; y: number; vx: number; vy: number }>();
+  let ghostAlpha = 0; // relaxation heat of the ghost mini-sim
   let ghostCard = $state<GhostStar | null>(null);
   $effect(() => {
     const list = ghosts ?? [];
-    ghostByKey = new Map(list.map((g) => [g.key, g]));
+    const byKey = new Map(list.map((g) => [g.key, g]));
+    ghostByKey = byKey;
+    // Chain depth per ghost (bounded walk; malformed cycles collapse to 0).
+    const hops = new Map<string, number>();
+    const hopOf = (g: GhostStar, depth = 0): number => {
+      if (!g.parentKey || depth > 8) return 0;
+      const p = byKey.get(g.parentKey);
+      return p ? hopOf(p, depth + 1) + 1 : 0;
+    };
+    for (const g of list) hops.set(g.key, hopOf(g));
+    ghostHop = hops;
     // Fan each anchor-group's ghosts evenly around its base (seed node, or
-    // parent ghost for chain children); recomputed on every list change so
-    // placement stays deterministic.
+    // parent ghost for chain children); the fan is only the SEED layout — the
+    // mini-sim below relaxes overlaps from there.
     const groups = new Map<string, GhostStar[]>();
     for (const g of list) {
       const k = `${g.seedId}|${g.parentKey ?? ""}`;
@@ -333,35 +349,147 @@
       const child = !!gs[0]?.parentKey; // chain children: tighter fan, offset angle
       gs.forEach((g, i) => {
         const angle = -Math.PI / 2 + (i * TAU) / Math.max(n, 7) + (child ? 0.35 : 0);
-        anchors.set(g.key, { angle, dist: child ? 78 + (i % 2) * 36 : 95 + (i % 2) * 44 });
+        anchors.set(g.key, { angle, dist: child ? 82 + (i % 2) * 38 : 95 + (i % 2) * 44 });
       });
     }
     ghostAnchor = anchors;
-    // Keep the open card in sync (added flag) or close it if its ghost vanished.
-    if (ghostCard) ghostCard = list.find((g) => g.key === ghostCard!.key) ?? null;
+    seedGhostPositions();
+    // Keep the open card in sync (added flag) or close it if its ghost
+    // vanished. Untracked: ghostCard is $state — reading it here would make
+    // every card open/close re-run this effect (and re-heat the sim).
+    untrack(() => {
+      if (ghostCard) ghostCard = list.find((g) => g.key === ghostCard!.key) ?? null;
+    });
     schedule();
   });
-  /** World position of a ghost: offset from its base — the seed node, or the
-   *  parent ghost (resolved recursively, bounded). Null if the base is gone. */
-  function ghostWorld(g: GhostStar, depth = 0): { x: number; y: number } | null {
-    if (depth > 8) return null; // anti-cycle guard on malformed chains
-    const a = ghostAnchor.get(g.key);
-    if (!a) return null;
-    let bx: number;
-    let by: number;
-    if (g.parentKey) {
-      const p = ghostByKey.get(g.parentKey);
-      const w = p ? ghostWorld(p, depth + 1) : null;
-      if (!w) return null;
-      bx = w.x;
-      by = w.y;
-    } else {
-      const i = idToIdx.get(g.seedId);
-      if (i === undefined) return null;
-      bx = nodes[i].x;
-      by = nodes[i].y;
+  /** (Re)seed sim positions: NEW ghosts start on their fan point (parents
+   *  precede children in the list, so chains resolve in one pass); settled
+   *  ghosts keep their relaxed position; ghosts whose base is GONE (seed node
+   *  left the graph) are dropped — hidden, like the pre-sim behavior. Also
+   *  called from rebuild(): on remount this effect runs BEFORE the graph is
+   *  built (idToIdx still empty), so rebuild must re-seed once nodes exist. */
+  function seedGhostPositions() {
+    const list = ghosts ?? [];
+    const next = new Map<string, { x: number; y: number; vx: number; vy: number }>();
+    let changed = false;
+    for (const g of list) {
+      const a = ghostAnchor.get(g.key);
+      if (!a) continue;
+      // The base must be resolvable NOW — otherwise the ghost stays hidden.
+      let bx: number;
+      let by: number;
+      if (g.parentKey) {
+        const pp = next.get(g.parentKey);
+        if (!pp) continue;
+        bx = pp.x;
+        by = pp.y;
+      } else {
+        const i = idToIdx.get(g.seedId);
+        if (i === undefined) continue;
+        bx = nodes[i].x;
+        by = nodes[i].y;
+      }
+      const prev = ghostPos.get(g.key);
+      if (prev) {
+        next.set(g.key, prev);
+        continue;
+      }
+      changed = true;
+      next.set(g.key, { x: bx + Math.cos(a.angle) * a.dist, y: by + Math.sin(a.angle) * a.dist, vx: 0, vy: 0 });
     }
-    return { x: bx + Math.cos(a.angle) * a.dist, y: by + Math.sin(a.angle) * a.dist };
+    if (next.size !== ghostPos.size) changed = true;
+    ghostPos = next;
+    if (changed) ghostAlpha = 1; // re-relax only when the population changed
+  }
+  /** World position of a ghost: its simulated position. Null = not placeable. */
+  function ghostWorld(g: GhostStar): { x: number; y: number } | null {
+    const p = ghostPos.get(g.key);
+    return p ? { x: p.x, y: p.y } : null;
+  }
+  /** World position of a ghost's base: the parent ghost, or the seed node. */
+  function ghostBase(g: GhostStar): { x: number; y: number } | null {
+    if (g.parentKey) {
+      const pp = ghostPos.get(g.parentKey);
+      return pp ? { x: pp.x, y: pp.y } : null;
+    }
+    const i = idToIdx.get(g.seedId);
+    return i === undefined ? null : { x: nodes[i].x, y: nodes[i].y };
+  }
+  /** One relaxation step of the ghost mini-sim (spring to base at the ring
+   *  distance, ghost↔ghost repulsion, clearance from library stars). Cheap:
+   *  ghosts are few and library nodes are only pushed AGAINST, never moved. */
+  function ghostTick() {
+    const list = ghosts ?? [];
+    if (!list.length) {
+      ghostAlpha = 0;
+      return;
+    }
+    const entries: { g: GhostStar; p: { x: number; y: number; vx: number; vy: number } }[] = [];
+    for (const g of list) {
+      const p = ghostPos.get(g.key);
+      if (p) entries.push({ g, p });
+    }
+    for (const { g, p } of entries) {
+      const a = ghostAnchor.get(g.key);
+      const base = ghostBase(g);
+      if (!a || !base) continue;
+      const dx = p.x - base.x;
+      const dy = p.y - base.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const f = (d - a.dist) * 0.08; // spring toward the ring radius (any direction)
+      p.vx -= (dx / d) * f;
+      p.vy -= (dy / d) * f;
+    }
+    for (let i = 0; i < entries.length; i++) {
+      for (let j = i + 1; j < entries.length; j++) {
+        const A = entries[i].p;
+        const B = entries[j].p;
+        let dx = A.x - B.x;
+        let dy = A.y - B.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 > 16000) continue;
+        if (d2 < 0.01) {
+          dx = 0.37 * (i + 1);
+          dy = 0.53;
+          d2 = dx * dx + dy * dy;
+        }
+        const d = Math.sqrt(d2);
+        const f = Math.min(9, 900 / d2) + (d < 44 ? (44 - d) * 0.35 : 0);
+        const ux = (dx / d) * f;
+        const uy = (dy / d) * f;
+        A.vx += ux;
+        A.vy += uy;
+        B.vx -= ux;
+        B.vy -= uy;
+      }
+    }
+    for (const { p } of entries) {
+      for (const n of nodes) {
+        const dx = p.x - n.x;
+        const dy = p.y - n.y;
+        const d2 = dx * dx + dy * dy;
+        const min = n.r * 2.4 + 26;
+        if (d2 < min * min && d2 > 0.01) {
+          const d = Math.sqrt(d2);
+          const f = (min - d) * 0.3;
+          p.vx += (dx / d) * f;
+          p.vy += (dy / d) * f;
+        }
+      }
+    }
+    for (const { p } of entries) {
+      p.vx *= 0.78;
+      p.vy *= 0.78;
+      const sp = Math.hypot(p.vx, p.vy);
+      if (sp > 28) {
+        p.vx *= 28 / sp;
+        p.vy *= 28 / sp;
+      }
+      p.x += p.vx * ghostAlpha;
+      p.y += p.vy * ghostAlpha;
+    }
+    ghostAlpha *= 0.97;
+    if (ghostAlpha < 0.02) ghostAlpha = 0;
   }
   function hitGhost(sx: number, sy: number): GhostStar | null {
     for (const g of ghosts ?? []) {
@@ -542,6 +670,21 @@
     const [r, g, b] = parseColor(c);
     return `rgba(${r}, ${g}, ${b}, ${a})`;
   }
+  /** Hue (0-360) of a CSS color — anchor for the exploration-chain palette. */
+  function hueOf(color: string): number {
+    const [r, g, b] = parseColor(color).map((v) => v / 255);
+    const mx = Math.max(r, g, b);
+    const mn = Math.min(r, g, b);
+    if (mx === mn) return 210;
+    const d = mx - mn;
+    const h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    return h * 60;
+  }
+  /** Chain color per hop: the accent hue, rotated a step per hop — so each
+   *  exploration generation reads as its own band of the spectrum. */
+  function ghostColor(hop: number, alpha = 1): string {
+    return `hsla(${(hueOf(theme.accent) + hop * 34) % 360}, 62%, 56%, ${alpha})`;
+  }
   function clamp(v: number, lo: number, hi: number): number {
     return v < lo ? lo : v > hi ? hi : v;
   }
@@ -697,6 +840,10 @@
     // a PCA seed a bit more.
     alpha = hadNodes ? 0.25 : anySaved ? 0.5 : 0.85;
     needFit = !hadNodes;
+    // The ghost mini-sim seeds against idToIdx: on remount its effect ran
+    // BEFORE this rebuild (empty graph → nothing placeable), so re-seed now
+    // that the nodes exist. Untracked for the same reason as setFocus below.
+    untrack(() => seedGhostPositions());
     // Refresh (or drop) the pinned card against the fresh graph data. `untrack`
     // is essential: rebuild() runs inside an $effect, and without it the `panel`
     // read + write (and the parent state read by resolve()) would register as
@@ -854,6 +1001,13 @@
     }
     // Keep animating while the search-found pulse is still expanding.
     if (foundId !== null && performance.now() - foundAt < 2600) animating = true;
+    // Exploration mode: relax the ghost mini-sim (following moving seeds while
+    // the main physics is hot) and keep the chain links / pulses alive.
+    if ((ghosts?.length ?? 0) > 0) {
+      if (alpha >= MIN_ALPHA) ghostAlpha = Math.max(ghostAlpha, 0.3);
+      if (ghostAlpha > 0) ghostTick();
+      animating = true;
+    }
     draw();
     if (animating) schedule();
   }
@@ -1000,6 +1154,11 @@
     // otherwise the pinned card's neighborhood (if any) stays lit.
     const hovId = hoverIdx >= 0 && hoverIdx < nodes.length ? nodes[hoverIdx].id : (panel?.id ?? -1);
     const focus = hoverIdx >= 0 ? hoverSet : pinnedSet;
+    // Exploration mode: the library recedes to a dim backdrop, the seeds and
+    // the discovery chains carry the scene.
+    const exploring = (ghosts?.length ?? 0) > 0;
+    const seedSet = exploring ? new Set((ghosts ?? []).map((g) => g.seedId)) : null;
+    const tsec = performance.now() / 1000;
 
     // Nebulae: soft halos over each semantic community, at EVERY zoom — strong
     // from afar (the map reads as thematic areas), a subtle tint up close.
@@ -1007,7 +1166,8 @@
     // SOPRA nodi ed etichette, su targhette leggibili (vedi fine di draw()).
     const nebLabels: { title: string; sub: string; cx: number; cy: number; color: string }[] = [];
     if (clusterMeta.length > 0 && nebulaMode !== "off") {
-      const nebAlpha = zoom < NEBULA_ZOOM ? 0.16 : Math.max(0.06, 0.16 - (zoom - NEBULA_ZOOM) * 0.08);
+      let nebAlpha = zoom < NEBULA_ZOOM ? 0.16 : Math.max(0.06, 0.16 - (zoom - NEBULA_ZOOM) * 0.08);
+      if (exploring) nebAlpha *= 0.4; // recede during exploration
       const acc: Map<number, { sx: number; sy: number; n: number; r2: number }> = new Map();
       for (const n of nodes) {
         if (n.community < 0) continue;
@@ -1038,7 +1198,7 @@
         c.beginPath();
         c.arc(cx, cy, rr, 0, TAU);
         c.fill();
-        if (nebulaMode === "full" && zoom < 0.9) {
+        if (nebulaMode === "full" && zoom < 0.9 && !exploring) {
           nebLabels.push({
             title: ellipsize(meta.label, 34),
             sub: `${a.n} paper`,
@@ -1070,6 +1230,7 @@
       let al = 0.09 + e.w * 0.3;
       if (focus && a.id !== hovId && b.id !== hovId) al *= 0.18;
       if (matchSet && !matchSet.has(a.id) && !matchSet.has(b.id)) al *= 0.3;
+      if (exploring) al *= 0.35; // library ties recede behind the chains
       c.globalAlpha = al;
       c.lineWidth = 0.7 + e.w * 1.1; // heavier ties read thicker, continuously
       c.beginPath();
@@ -1084,7 +1245,9 @@
       const sy = n.y * zoom + ty;
       const rs = clamp(n.r * zoom, 3, 26);
       if (sx < -34 || sx > vw + 34 || sy < -34 || sy > vh + 34) continue;
-      c.globalAlpha = (focus && !focus.has(n.id)) || (matchSet && !matchSet.has(n.id)) ? 0.18 : 1;
+      let na = (focus && !focus.has(n.id)) || (matchSet && !matchSet.has(n.id)) ? 0.18 : 1;
+      if (seedSet && !seedSet.has(n.id)) na = Math.min(na, 0.32); // backdrop during exploration
+      c.globalAlpha = na;
       // Soft glow behind the star, in its own color: the "shine" that makes the
       // sky read as stars instead of dots (one extra arc: negligible cost).
       const fill = nodeFill(n);
@@ -1147,6 +1310,18 @@
         c.stroke();
         c.setLineDash([]);
       }
+      // Exploration: the seed star wears a slowly revolving "scanner" arc.
+      if (seedSet?.has(n.id)) {
+        const a0s = c.globalAlpha;
+        c.globalAlpha = 0.85;
+        c.strokeStyle = theme.accent;
+        c.lineWidth = 1.6;
+        const start = (tsec * 1.5) % TAU;
+        c.beginPath();
+        c.arc(sx, sy, rs + 9, start, start + TAU * 0.7);
+        c.stroke();
+        c.globalAlpha = a0s;
+      }
     }
     c.globalAlpha = 1;
 
@@ -1190,33 +1365,45 @@
         const gx = w.x * zoom + tx;
         const gy = w.y * zoom + ty;
         if (gx < -60 || gx > vw + 60 || gy < -40 || gy > vh + 40) continue;
-        // Dashed tie to the ghost's base: the seed node, or — for exploration
-        // chains — the ghost it was discovered from.
-        let base: { x: number; y: number } | null = null;
-        if (g.parentKey) {
-          const p = ghostByKey.get(g.parentKey);
-          base = p ? ghostWorld(p) : null;
-        } else {
-          const i = idToIdx.get(g.seedId);
-          if (i !== undefined) base = { x: nodes[i].x, y: nodes[i].y };
-        }
+        const hop = ghostHop.get(g.key) ?? 0;
+        const col = ghostColor(hop);
+        // Curved, gently flowing tie to the ghost's base (the seed node, or —
+        // for exploration chains — the ghost it was discovered from). The dash
+        // offset drifts with time: the chain reads as a live signal.
+        const base = ghostBase(g);
         if (base) {
-          c.setLineDash([3, 4]);
-          c.strokeStyle = withAlpha(theme.accent, 0.4);
-          c.lineWidth = 1;
+          const bx = base.x * zoom + tx;
+          const by = base.y * zoom + ty;
+          const mx = (bx + gx) / 2;
+          const my = (by + gy) / 2;
+          const ddx = gx - bx;
+          const ddy = gy - by;
+          const dl = Math.hypot(ddx, ddy) || 1;
+          c.setLineDash([4, 5]);
+          c.lineDashOffset = -((tsec * 22) % 9);
+          c.strokeStyle = ghostColor(hop, 0.55);
+          c.lineWidth = 1.2;
           c.beginPath();
-          c.moveTo(base.x * zoom + tx, base.y * zoom + ty);
-          c.lineTo(gx, gy);
+          c.moveTo(bx, by);
+          c.quadraticCurveTo(mx - (ddy / dl) * 16, my + (ddx / dl) * 16, gx, gy);
           c.stroke();
+          c.lineDashOffset = 0;
         }
+        // The discovery itself: a softly pulsing, glowing dashed star in its
+        // hop color (each generation of the chain shifts hue).
+        const pr = 6.5 + Math.sin(tsec * 2.1 + gx * 0.05) * 0.7;
+        c.save();
+        c.shadowColor = col;
+        c.shadowBlur = 12;
         c.setLineDash([2.5, 3]);
-        c.strokeStyle = g.added || g.inLibrary ? "#2e9e63" : withAlpha(theme.accent, 0.8);
-        c.fillStyle = withAlpha(theme.surface, 0.55);
-        c.lineWidth = 1.4;
+        c.strokeStyle = g.added || g.inLibrary ? "#2e9e63" : col;
+        c.fillStyle = withAlpha(theme.surface, 0.6);
+        c.lineWidth = 1.5;
         c.beginPath();
-        c.arc(gx, gy, 6.5, 0, TAU);
+        c.arc(gx, gy, pr, 0, TAU);
         c.fill();
         c.stroke();
+        c.restore();
         c.setLineDash([]);
         if (g.added || g.inLibrary) {
           c.strokeStyle = "#2e9e63";
@@ -1259,7 +1446,8 @@
         const sy = n.y * zoom + ty;
         if (sx < -140 || sx > vw + 140 || sy < -40 || sy > vh + 40) continue;
         const rs = clamp(n.r * zoom, 3, 26);
-        const la = focus && !focus.has(id) ? 0.3 : 1;
+        let la = focus && !focus.has(id) ? 0.3 : 1;
+        if (seedSet && !seedSet.has(id) && id !== hovId) la = Math.min(la, 0.35); // backdrop while exploring
         const label = ellipsize(n.title || "Senza titolo", 28);
         const w = c.measureText(label).width;
         const lx = sx - w / 2;
@@ -1677,7 +1865,7 @@
       {#if onExplore && panel.kind === "doc"}
         <div class="card-sec">Esplora dintorni (online)</div>
         <div class="card-explore">
-          <button onclick={() => onExplore(panel!.id, "citations")} title="Chi cita e chi è citato da questo paper (OpenAlex) — serve il DOI">Citazioni</button>
+          <button onclick={() => onExplore(panel!.id, "citations")} title="Chi cita e chi è citato da questo paper (OpenAlex) — via DOI, o per titolo se manca">Citazioni</button>
           <button onclick={() => onExplore(panel!.id, "similar")} title="Paper simili per argomento (OpenAlex)">Simili</button>
           <button onclick={() => onExplore(panel!.id, "author")} title="Altri lavori del primo autore">Autore</button>
         </div>
@@ -1702,7 +1890,7 @@
       {#if onGhostExplore}
         <div class="card-sec">Esplora da questa scoperta</div>
         <div class="card-explore">
-          <button disabled={!ghostCard.doi} onclick={() => onGhostExplore(ghostCard!.key, "citations")} title={ghostCard.doi ? "Chi cita e chi è citato da questa scoperta (OpenAlex)" : "Questa scoperta non ha un DOI da esplorare"}>Citazioni</button>
+          <button onclick={() => onGhostExplore(ghostCard!.key, "citations")} title="Chi cita e chi è citato da questa scoperta (OpenAlex)">Citazioni</button>
           <button onclick={() => onGhostExplore(ghostCard!.key, "similar")} title="Paper simili per argomento (OpenAlex)">Simili</button>
           <button disabled={!ghostCard.author} onclick={() => onGhostExplore(ghostCard!.key, "author")} title={ghostCard.author ? `Altri lavori di ${ghostCard.author}` : "Autore non noto per questa scoperta"}>Autore</button>
         </div>

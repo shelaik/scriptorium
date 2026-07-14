@@ -440,9 +440,20 @@ export interface CitationNeighbors {
   citations: SearchResult[];
   seed_unresolved: boolean;
 }
-/** OpenAlex references (cited by this paper) + citing papers, for a DOI. */
-export const exploreCitations = (doi: string) =>
-  invoke<CitationNeighbors>("explore_citations", { doi });
+/** How to name the snowball seed on OpenAlex: id (exact), DOI (exact), or
+ *  title (accepted only on the strict title gate). */
+export interface ExploreSeed {
+  doi?: string | null;
+  openalexId?: string | null;
+  title?: string | null;
+}
+/** OpenAlex references (cited by this paper) + citing papers. */
+export const exploreCitations = (seed: ExploreSeed) =>
+  invoke<CitationNeighbors>("explore_citations", {
+    doi: seed.doi ?? null,
+    openalexId: seed.openalexId ?? null,
+    title: seed.title ?? null,
+  });
 
 // ----- AI (Ollama / LM Studio) — optional -----
 export type AiProvider = "ollama" | "lmstudio";

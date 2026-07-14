@@ -6060,11 +6060,32 @@ pub async fn discover_search(
 /// are already in the library. Each neighbour is a `SearchResult`, so the UI can
 /// add it with the existing `discover_add`. Network-gated like `discover_search`.
 #[tauri::command]
-pub async fn explore_citations(app: AppHandle, doi: String) -> Result<discovery::CitationNeighbors, String> {
-    let doi = doi.trim().to_string();
-    if doi.is_empty() {
-        return Err("Serve un DOI per esplorare le citazioni di questo documento".into());
-    }
+pub async fn explore_citations(
+    app: AppHandle,
+    doi: Option<String>,
+    openalex_id: Option<String>,
+    title: Option<String>,
+) -> Result<discovery::CitationNeighbors, String> {
+    let doi = doi.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+    let oa_id = openalex_id.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+    let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    // Seed priority: an OpenAlex id names the work exactly (ghost stars always
+    // carry one); a DOI is exact too; a title is the gated last resort.
+    let wref = if let Some(x) = oa_id.as_deref() {
+        discovery::WorkRef::Id(x)
+    } else if let Some(d) = doi.as_deref() {
+        discovery::WorkRef::Doi(d)
+    } else if let Some(t) = title.as_deref() {
+        // The strict gate needs a title with some substance: an ultra-short one
+        // would only be accepted on exact equality, but the search itself gets
+        // too noisy — refuse HONESTLY instead of pretending nothing was given.
+        if t.chars().count() < 8 {
+            return Err("Senza DOI serve un titolo di almeno 8 caratteri per l'aggancio sicuro su OpenAlex".into());
+        }
+        discovery::WorkRef::Title(t)
+    } else {
+        return Err("Serve un DOI, un id OpenAlex o almeno un titolo per esplorare le citazioni".into());
+    };
     let (enabled, key, email) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
@@ -6078,7 +6099,7 @@ pub async fn explore_citations(app: AppHandle, doi: String) -> Result<discovery:
         return Err("La ricerca online è disattivata (abilitala nelle impostazioni)".into());
     }
     let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
-    let mut nb = discovery::openalex_neighbors(&client, &doi, &key, 40)
+    let mut nb = discovery::openalex_neighbors(&client, wref, &key, 40)
         .await
         .map_err(|e| e.to_string())?;
 

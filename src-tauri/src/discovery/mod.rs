@@ -410,12 +410,23 @@ async fn fetch_works(client: &reqwest::Client, url: &str) -> Result<Vec<SearchRe
     Ok(body["results"].as_array().map(|a| a.iter().map(openalex_to_result).collect()).unwrap_or_default())
 }
 
-/// "Snowball" neighbours of a paper identified by `doi`: the works it references
-/// (backward) and the works that cite it (forward, ranked by citation count).
-/// Both come from OpenAlex. `max` caps each list. Network-gated by the caller.
+/// How to identify the snowball seed work on OpenAlex.
+pub enum WorkRef<'a> {
+    Doi(&'a str),
+    /// A bare OpenAlex work id ("W123…") — what discovery hits carry as `external_id`.
+    Id(&'a str),
+    /// Title search, accepted ONLY when a result passes the strict title gate
+    /// (never a near-neighbour's citation graph).
+    Title(&'a str),
+}
+
+/// "Snowball" neighbours of a paper: the works it references (backward) and the
+/// works that cite it (forward, ranked by citation count). Both come from
+/// OpenAlex; the seed can be named by DOI, OpenAlex id, or (gated) title.
+/// `max` caps each list. Network-gated by the caller.
 pub async fn openalex_neighbors(
     client: &reqwest::Client,
-    doi: &str,
+    wref: WorkRef<'_>,
     api_key: &str,
     max: usize,
 ) -> Result<CitationNeighbors> {
@@ -429,19 +440,33 @@ pub async fn openalex_neighbors(
     // batch more than that for the backward request.
     let max = max.clamp(1, 50);
 
-    // 1. Resolve the seed work by DOI to get its id + referenced_works. Use the
-    //    `filter=doi:` query form (not a path lookup): DOIs contain slashes that
-    //    break percent-encoded path routing, but encode cleanly as a query value.
-    let doi_clean = doi
-        .trim()
-        .trim_start_matches("https://doi.org/")
-        .trim_start_matches("http://doi.org/")
-        .trim_start_matches("doi:");
-    let seed_url = format!(
-        "https://api.openalex.org/works?filter=doi:{}&per-page=1&select=id,referenced_works{}",
-        enc(doi_clean),
-        key_part
-    );
+    // 1. Resolve the seed work (id + referenced_works).
+    let seed_url = match &wref {
+        // The `filter=doi:` query form (not a path lookup): DOIs contain slashes
+        // that break percent-encoded path routing, but encode cleanly as a value.
+        WorkRef::Doi(doi) => {
+            let doi_clean = doi
+                .trim()
+                .trim_start_matches("https://doi.org/")
+                .trim_start_matches("http://doi.org/")
+                .trim_start_matches("doi:");
+            format!(
+                "https://api.openalex.org/works?filter=doi:{}&per-page=1&select=id,referenced_works{}",
+                enc(doi_clean),
+                key_part
+            )
+        }
+        WorkRef::Id(id) => format!(
+            "https://api.openalex.org/works?filter=openalex:{}&per-page=1&select=id,referenced_works{}",
+            enc(id.trim()),
+            key_part
+        ),
+        WorkRef::Title(t) => format!(
+            "https://api.openalex.org/works?search={}&per-page=8&select=id,title,referenced_works{}",
+            enc(t.trim()),
+            key_part
+        ),
+    };
     let resp = client.get(&seed_url).send().await.context("OpenAlex seed request")?;
     if resp.status().as_u16() == 403 || resp.status().as_u16() == 401 {
         anyhow::bail!("OpenAlex richiede una chiave API valida (HTTP {})", resp.status());
@@ -450,7 +475,23 @@ pub async fn openalex_neighbors(
         anyhow::bail!("OpenAlex HTTP {}", resp.status());
     }
     let body: Value = resp.json().await.context("OpenAlex seed JSON")?;
-    let seed = body["results"].get(0).cloned().unwrap_or(Value::Null);
+    let seed = match &wref {
+        // Title seeds must pass the strict gate: exploring the citation graph of
+        // a DIFFERENT paper would be worse than refusing.
+        WorkRef::Title(t) => body["results"]
+            .as_array()
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|w| {
+                        w["title"]
+                            .as_str()
+                            .is_some_and(|cand| crate::metadata::strong_title_match(t, cand))
+                    })
+                    .cloned()
+            })
+            .unwrap_or(Value::Null),
+        _ => body["results"].get(0).cloned().unwrap_or(Value::Null),
+    };
     let work_id = openalex_work_id(seed["id"].as_str().unwrap_or("")).to_string();
     if work_id.is_empty() {
         return Ok(CitationNeighbors { references: Vec::new(), citations: Vec::new(), seed_unresolved: true });

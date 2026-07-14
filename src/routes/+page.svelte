@@ -157,6 +157,7 @@
     type PathStep,
     listProjects,
     type ProjectMeta,
+    type ExploreSeed,
     checkUpdate,
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
@@ -617,7 +618,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.19";
+  const APP_VERSION = "0.9.20";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1283,9 +1284,10 @@
   let exploreLoading = $state(false);
   let exploreData = $state<CitationNeighbors | null>(null);
   let exploreTitle = $state("");
-  let exploreSeedDoi = $state(""); // DOI of the paper currently centred in the explorer
+  // Seed of the paper currently centred in the explorer (DOI / OpenAlex id / gated title).
+  let exploreSeed: ExploreSeed | null = null;
   // Breadcrumb of papers visited via «Esplora ↗», so snowballing is non-destructive.
-  let exploreStack = $state<{ doi: string; title: string }[]>([]);
+  let exploreStack = $state<{ seed: ExploreSeed; title: string }[]>([]);
   // «+ PDF»: which neighbour's paste-the-PDF-URL field is open, and its value.
   let pdfInputFor = $state<string | null>(null);
   let pdfUrlInput = $state("");
@@ -1293,14 +1295,14 @@
   function pdfFocus(node: HTMLInputElement) {
     node.focus();
   }
-  /** Re-seed the explorer from a paper's DOI (the seed document or any neighbour). */
-  async function runExplore(doi: string, title: string) {
+  /** Re-seed the explorer (DOI, OpenAlex id, or gated title — the seed doc or any neighbour). */
+  async function runExplore(seed: ExploreSeed, title: string) {
     exploreLoading = true;
     exploreData = null;
     exploreTitle = title;
-    exploreSeedDoi = doi;
+    exploreSeed = seed;
     try {
-      exploreData = await exploreCitations(doi);
+      exploreData = await exploreCitations(seed);
     } catch (e) {
       status = "Errore esplora citazioni: " + e;
       exploreModal = false;
@@ -1309,10 +1311,10 @@
     }
   }
   /** Snowball to a neighbour, remembering the current node so «← Indietro» can return. */
-  async function navExplore(doi: string, title: string) {
+  async function navExplore(seed: ExploreSeed, title: string) {
     mapPop = null;
-    if (exploreSeedDoi) exploreStack = [...exploreStack, { doi: exploreSeedDoi, title: exploreTitle }];
-    await runExplore(doi, title);
+    if (exploreSeed) exploreStack = [...exploreStack, { seed: exploreSeed, title: exploreTitle }];
+    await runExplore(seed, title);
   }
   /** Go back to the previously explored paper. */
   async function backExplore() {
@@ -1320,7 +1322,7 @@
     const prev = exploreStack[exploreStack.length - 1];
     if (!prev) return;
     exploreStack = exploreStack.slice(0, -1);
-    await runExplore(prev.doi, prev.title);
+    await runExplore(prev.seed, prev.title);
   }
   /** Save one neighbour list (references or citations) as a Markdown file with paper links. */
   async function saveNeighborList(kind: "references" | "citations") {
@@ -1366,15 +1368,15 @@
     }
   }
   async function openExplore(d: DocumentItem) {
-    if (!d.doi) {
-      status = "Serve un DOI per esplorare le citazioni — recupera prima i Metadati";
+    if (!d.doi && !(d.title ?? "").trim()) {
+      status = "Serve un DOI o almeno un titolo per esplorare le citazioni";
       return;
     }
     exploreStack = [];
     exploreView = "map";
     mapPop = null;
     exploreModal = true;
-    await runExplore(d.doi, d.title ?? "documento");
+    await runExplore({ doi: d.doi, title: d.title }, d.title ?? "documento");
   }
   /** Add one neighbour to the library (reuses discover_add) and mark it in place. */
   async function addNeighbor(r: SearchResult) {
@@ -3073,8 +3075,8 @@
       label: "Esplora citazioni (online)",
       hint: d.doi
         ? "Snowball su OpenAlex: citazioni da e verso questo paper, aggiungile alla libreria"
-        : "Serve il DOI — recuperalo con «✦ senza metadati» in alto o da Modifica metadati",
-      disabled: !d.doi,
+        : "Snowball su OpenAlex — senza DOI il paper si aggancia per titolo (corrispondenza rigorosa)",
+      disabled: !d.doi && !(d.title ?? "").trim(),
       action: () => openExplore(d),
     });
     const aiKids: RadialItem[] = [
@@ -3629,8 +3631,9 @@
     try {
       let results: SearchResult[] = [];
       if (relation === "citations") {
-        if (!d.doi) throw "Serve il DOI di questo paper (recuperalo con «✦ senza metadati»)";
-        const cn = await exploreCitations(d.doi);
+        if (!d.doi && !(d.title ?? "").trim()) throw "Serve un DOI o almeno un titolo per le citazioni";
+        const cn = await exploreCitations({ doi: d.doi, title: d.title });
+        if (cn.seed_unresolved) throw "OpenAlex non riconosce questo paper (né per DOI né per titolo)";
         results = [...cn.references, ...cn.citations];
       } else if (relation === "similar") {
         if (!(d.title ?? "").trim()) throw "Questo paper non ha un titolo da cercare";
@@ -3689,8 +3692,14 @@
     try {
       let results: SearchResult[] = [];
       if (relation === "citations") {
-        if (!r0.doi) throw "Questa scoperta non ha un DOI da esplorare";
-        const cn = await exploreCitations(r0.doi);
+        // Ghosts come from OpenAlex: their external_id names the work exactly,
+        // so citations work even without a DOI.
+        const cn = await exploreCitations({
+          openalexId: r0.source === "openalex" ? r0.external_id : null,
+          doi: r0.doi,
+          title: r0.title,
+        });
+        if (cn.seed_unresolved) throw "OpenAlex non riconosce questa scoperta";
         results = [...cn.references, ...cn.citations];
       } else if (relation === "similar") {
         if (!(r0.title ?? "").trim()) throw "Questa scoperta non ha un titolo da cercare";
@@ -6505,7 +6514,7 @@
           <button class="hflink small" disabled={addingExt === r.external_id} onclick={() => addNeighbor(r)} title="Aggiungi alla libreria (scarica il PDF se Open Access, altrimenti come riferimento)">{addingExt === r.external_id ? "…" : "+ Aggiungi"}</button>
           <button class="hflink small" class:on={pdfInputFor === r.external_id} onclick={() => { pdfInputFor = pdfInputFor === r.external_id ? null : r.external_id; pdfUrlInput = ""; }} title="Aggiungi questo paper col PDF che stai guardando nel browser: apri il PDF (↗), copia il suo link e incollalo qui">+ PDF</button>
         {/if}
-        {#if r.doi}<button class="hflink small" onclick={() => navExplore(r.doi!, r.title ?? "documento")} title="Esplora le citazioni di questo paper">Esplora ↗</button>{/if}
+        <button class="hflink small" onclick={() => navExplore({ openalexId: r.external_id, doi: r.doi, title: r.title }, r.title ?? "documento")} title="Esplora le citazioni di questo paper">Esplora ↗</button>
         {#if r.url}<button class="hflink small" onclick={() => openInBrowser(r.url!)} title="Apri la pagina del paper">↗</button>{/if}
       </div>
     </li>
@@ -6542,7 +6551,7 @@
           <p class="dimtext">Carico la rete di citazioni…</p>
         {:else if exploreData}
           {#if exploreData.seed_unresolved}
-            <p class="dimtext">OpenAlex non conosce questo paper (DOI non trovato). Prova con un documento che ha un DOI valido.</p>
+            <p class="dimtext">OpenAlex non riconosce questo paper — né per DOI né per titolo (per l'aggancio senza DOI serve un titolo che corrisponda esattamente). Recupera prima i metadati con «✦ senza metadati» o «Recupera metadati…».</p>
           {:else}
             <div class="exbar">
               <div class="seg" role="group" aria-label="Vista esplorazione">
@@ -6604,8 +6613,8 @@
       {:else}
         <button class="medit" disabled={addingExt === mapPop.r.external_id} onclick={() => { const r = mapPop!.r; addNeighbor(r); }} title="Scarica il PDF se Open Access, altrimenti aggiunge come riferimento">{addingExt === mapPop.r.external_id ? "…" : "+ Aggiungi alla libreria"}</button>
       {/if}
+      <button class="medit" onclick={() => { const r = mapPop!.r; mapPop = null; navExplore({ openalexId: r.external_id, doi: r.doi, title: r.title }, r.title ?? "documento"); }} title="Ricentra la mappa su questo paper (← Indietro per tornare)">Esplora da qui</button>
       {#if mapPop.r.doi}
-        <button class="medit" onclick={() => { const r = mapPop!.r; mapPop = null; navExplore(r.doi!, r.title ?? "documento"); }} title="Ricentra la mappa su questo paper (← Indietro per tornare)">Esplora da qui</button>
         <button class="medit" onclick={() => { const doi = mapPop!.r.doi!; mapPop = null; openInBrowser(`https://doi.org/${doi}`); }}>DOI ↗</button>
       {/if}
       {#if mapPop.r.url}
@@ -6963,7 +6972,7 @@
             <li><strong>Clic</strong> = scheda del nodo (con i legami in %, cliccabili); <strong>doppio clic</strong> = apri; <strong>tasto destro</strong> = menu; <strong>Ctrl+clic</strong> = seleziona. Da lontano vedi le <strong>nebulose</strong> — le comunità semantiche con la loro etichetta; da vicino compaiono i badge <strong>✓</strong> (peer-reviewed) e la forcella (codice GitHub).</li>
             <li>In alto a destra: <strong>Cerca nel grafo</strong> (bastano 2-3 lettere del titolo o di un autore → candidati suggeriti; Invio o clic evidenzia la stella con un alone pulsante e centra la vista lì; × o Esc pulisce), <strong>Colora per</strong> (Tag dominante / Comunità semantiche / Anno / Stato lettura), <strong>Nebulose</strong> e il pannello <strong>⚙</strong> (Legami per nodo, Soglia somiglianza).</li>
             <li><strong>Esplora dintorni (online)</strong>, nella scheda di una stella: <em>Citazioni</em> / <em>Simili</em> / <em>Autore</em> → i risultati appaiono come <strong>stelle fantasma</strong> tratteggiate attorno a quella; clic → «Aggiungi alla libreria». Entrano nel grafo al prossimo aggiornamento dell'indice.</li>
-            <li><strong>Catena di esplorazione</strong>: anche la scheda di una <em>stella fantasma</em> ha Citazioni / Simili / Autore — le nuove scoperte si agganciano a quella, in catena (snowball), così scavi di paper in paper senza aggiungere nulla finché non trovi quello giusto.</li>
+            <li><strong>Catena di esplorazione</strong>: anche la scheda di una <em>stella fantasma</em> ha Citazioni / Simili / Autore — le nuove scoperte si agganciano a quella, in catena (snowball), così scavi di paper in paper senza aggiungere nulla finché non trovi quello giusto. Mentre esplori la mappa entra in <strong>modalità esplorazione</strong>: la libreria si attenua, i seed hanno un anello «scanner», ogni generazione della catena ha il suo colore e i collegamenti scorrono animati; le catene si dispongono da sole senza sovrapporsi. <strong>Citazioni</strong> funziona anche senza DOI (id OpenAlex per le scoperte; titolo con corrispondenza rigorosa per i tuoi paper).</li>
           </ul>
         </div>
 
