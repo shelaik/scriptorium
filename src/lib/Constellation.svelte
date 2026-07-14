@@ -346,17 +346,104 @@
     return null;
   }
 
-  /** Glide the camera so the node is centered (zoom unchanged). */
-  function panToNode(id: number) {
+  /** Glide the camera so the node is centered; with `minZoom` also zooms in
+   *  (never out) so the star and its label are readable after a search. */
+  function panToNode(id: number, minZoom?: number) {
     const i = idToIdx.get(id);
     if (i === undefined) return;
     const n = nodes[i];
+    const z = minZoom ? clamp(Math.max(zoom, minZoom), 0.25, 3) : zoom;
     camAnim = {
       t0: performance.now(),
       from: [zoom, tx, ty],
-      to: [zoom, vw / 2 - n.x * zoom, vh / 2 - n.y * zoom],
+      to: [z, vw / 2 - n.x * z, vh / 2 - n.y * z],
     };
     schedule();
+  }
+
+  // ----- Ricerca nel grafo: casella HUD con candidati + highlight sulla mappa -----
+  interface SearchHit {
+    id: number;
+    title: string;
+    year: number | null;
+    kind: "doc" | "note";
+  }
+  let searchQ = $state("");
+  let searchList = $state<SearchHit[]>([]);
+  let searchOpen = $state(false);
+  let searchSel = $state(0);
+  // Read by draw() every frame: plain non-reactive vars, like hoverSet/pinnedSet.
+  let matchSet: Set<number> | null = null; // nodes matching while typing (rings + dim others)
+  let foundId: number | null = null; // confirmed pick: pulsing halo
+  let foundAt = 0;
+
+  /** Accent-insensitive lowercase fold (Poincaré → poincare), for matching. */
+  function foldq(s: string): string {
+    return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  }
+  /** Candidates among the LOADED graph nodes: title prefix first, then title
+   *  substring, then author match (via the parent's resolve). Max 8. */
+  function hitsFor(qRaw: string): SearchHit[] {
+    const q = foldq(qRaw.trim());
+    if (q.length < 2) return [];
+    const starts: SearchHit[] = [];
+    const subs: SearchHit[] = [];
+    const auth: SearchHit[] = [];
+    for (const n of nodes) {
+      const t = foldq(n.title || "");
+      const hit: SearchHit = { id: n.id, title: n.title || "Senza titolo", year: n.year, kind: n.kind };
+      if (t.startsWith(q)) starts.push(hit);
+      else if (t.includes(q)) subs.push(hit);
+      else if (n.kind === "doc" && resolve?.(n.id)?.authors?.some((a) => foldq(a).includes(q))) auth.push(hit);
+    }
+    return [...starts, ...subs, ...auth].slice(0, 8);
+  }
+  function onSearchInput() {
+    searchOpen = true;
+    searchSel = 0;
+    searchList = hitsFor(searchQ);
+    matchSet = searchList.length ? new Set(searchList.map((h) => h.id)) : null;
+    if (searchQ.trim().length === 0) {
+      matchSet = null;
+      foundId = null;
+      searchOpen = false;
+    }
+    schedule();
+  }
+  function pickSearchHit(h: SearchHit) {
+    searchOpen = false;
+    searchQ = h.title;
+    matchSet = null;
+    foundId = h.id;
+    foundAt = performance.now();
+    setFocus(h.id);
+    panToNode(h.id, 1.1);
+    schedule();
+  }
+  function clearSearch() {
+    searchQ = "";
+    searchList = [];
+    searchOpen = false;
+    searchSel = 0;
+    matchSet = null;
+    foundId = null;
+    schedule();
+  }
+  function onSearchKey(e: KeyboardEvent) {
+    e.stopPropagation(); // typing must never trigger the app's global shortcuts
+    if (e.key === "ArrowDown" && searchList.length) {
+      e.preventDefault();
+      searchSel = (searchSel + 1) % searchList.length;
+    } else if (e.key === "ArrowUp" && searchList.length) {
+      e.preventDefault();
+      searchSel = (searchSel - 1 + searchList.length) % searchList.length;
+    } else if (e.key === "Enter") {
+      const h = searchList[searchSel] ?? searchList[0];
+      if (h) pickSearchHit(h);
+    } else if (e.key === "Escape") {
+      clearSearch();
+      (e.currentTarget as HTMLInputElement | null)?.blur();
+    }
   }
 
   const showMap = $derived(graph !== null && graph.embedded >= 2 && graph.nodes.length > 0);
@@ -450,8 +537,10 @@
     dragIdx = -1;
     repCursor = 0;
     tip = null;
+    matchSet = null; // stale ids: the highlight recomputes on the next keystroke
     if (!g || g.embedded < 2 || g.nodes.length === 0) {
       alpha = 0;
+      foundId = null;
       untrack(() => setFocus(null));
       schedule();
       return;
@@ -572,6 +661,7 @@
     const years = g.nodes.map((n) => n.year).filter((y): y is number => y !== null);
     yearMin = years.length ? Math.min(...years) : 0;
     yearMax = years.length ? Math.max(...years) : 0;
+    if (foundId !== null && !idToIdx.has(foundId)) foundId = null; // the found star left the graph
     fx = new Float32Array(nodes.length);
     fy = new Float32Array(nodes.length);
     // Re-heat gently on refresh; on first build, saved positions get a real
@@ -734,6 +824,8 @@
       if (t >= 1) camAnim = null;
       else animating = true;
     }
+    // Keep animating while the search-found pulse is still expanding.
+    if (foundId !== null && performance.now() - foundAt < 2600) animating = true;
     draw();
     if (animating) schedule();
   }
@@ -949,6 +1041,7 @@
         continue;
       let al = 0.09 + e.w * 0.3;
       if (focus && a.id !== hovId && b.id !== hovId) al *= 0.18;
+      if (matchSet && !matchSet.has(a.id) && !matchSet.has(b.id)) al *= 0.3;
       c.globalAlpha = al;
       c.lineWidth = 0.7 + e.w * 1.1; // heavier ties read thicker, continuously
       c.beginPath();
@@ -963,7 +1056,7 @@
       const sy = n.y * zoom + ty;
       const rs = clamp(n.r * zoom, 3, 26);
       if (sx < -34 || sx > vw + 34 || sy < -34 || sy > vh + 34) continue;
-      c.globalAlpha = focus && !focus.has(n.id) ? 0.18 : 1;
+      c.globalAlpha = (focus && !focus.has(n.id)) || (matchSet && !matchSet.has(n.id)) ? 0.18 : 1;
       // Soft glow behind the star, in its own color: the "shine" that makes the
       // sky read as stars instead of dots (one extra arc: negligible cost).
       const fill = nodeFill(n);
@@ -1016,8 +1109,48 @@
         if (n.peer) drawCheckBadge(c, sx + rs * 0.85, sy + rs * 0.85, br);
         if (n.gh) drawForkBadge(c, sx - rs * 0.85, sy + rs * 0.85, br);
       }
+      // Search: a dashed accent ring marks every candidate while typing.
+      if (matchSet?.has(n.id)) {
+        c.setLineDash([4, 3]);
+        c.strokeStyle = theme.accent;
+        c.lineWidth = 1.8;
+        c.beginPath();
+        c.arc(sx, sy, rs + 6.5, 0, TAU);
+        c.stroke();
+        c.setLineDash([]);
+      }
     }
     c.globalAlpha = 1;
+
+    // Search: the confirmed find gets an expanding pulse (~2.6s), then a steady
+    // dashed halo until the search is cleared — so the eye lands on it.
+    if (foundId !== null) {
+      const fi = idToIdx.get(foundId);
+      if (fi !== undefined) {
+        const n = nodes[fi];
+        const sx = n.x * zoom + tx;
+        const sy = n.y * zoom + ty;
+        const rs = clamp(n.r * zoom, 3, 26);
+        const age = (performance.now() - foundAt) / 1000;
+        c.save();
+        c.strokeStyle = theme.accent;
+        if (age < 2.6) {
+          const ph = (age * 1.4) % 1;
+          c.globalAlpha = 0.8 * (1 - ph);
+          c.lineWidth = 2.2;
+          c.beginPath();
+          c.arc(sx, sy, rs + 6 + ph * 26, 0, TAU);
+          c.stroke();
+        }
+        c.globalAlpha = 0.9;
+        c.lineWidth = 2;
+        c.setLineDash([5, 4]);
+        c.beginPath();
+        c.arc(sx, sy, rs + 6, 0, TAU);
+        c.stroke();
+        c.restore();
+      }
+    }
 
     // Ghost stars: dashed discoveries anchored around their seed.
     if (ghosts && ghosts.length > 0) {
@@ -1073,6 +1206,9 @@
       labelIds.add(hovId);
       for (const nb of adj.get(hovId) ?? []) labelIds.add(nb);
     }
+    // Search candidates and the confirmed find are always labelled.
+    if (matchSet) for (const id of matchSet) labelIds.add(id);
+    if (foundId !== null) labelIds.add(foundId);
     if (zoom > 0.55) for (const id of topLabelIds) labelIds.add(id);
     if (zoom > 1.6) for (const n of nodes) labelIds.add(n.id);
     if (labelIds.size > 0) {
@@ -1394,6 +1530,43 @@
     </div>
     <div class="chip legend">clic = scheda · doppio clic = apri · ✦ preferito · ◆ appunto · da vicino: ✓ peer-reviewed, ⑂ GitHub</div>
     <div class="hud">
+      <div class="srch">
+        <input
+          class="srchin"
+          placeholder="Cerca nel grafo…"
+          bind:value={searchQ}
+          oninput={onSearchInput}
+          onkeydown={onSearchKey}
+          onfocus={() => { if (searchList.length) searchOpen = true; }}
+          onblur={() => (searchOpen = false)}
+          title="Trova un paper o un appunto nel grafo: digita qualche lettera del titolo (o di un autore), scegli il candidato e la vista si centra lì"
+        />
+        {#if searchQ}
+          <button class="srchx" onmousedown={(e) => { e.preventDefault(); clearSearch(); }} title="Pulisci la ricerca (togli anche l'evidenziazione)">×</button>
+        {/if}
+        {#if searchOpen && searchList.length}
+          <ul class="srchlist" role="listbox" aria-label="Candidati">
+            {#each searchList as h, i (h.id)}
+              <li>
+                <button
+                  class="srchit"
+                  class:selrow={i === searchSel}
+                  role="option"
+                  aria-selected={i === searchSel}
+                  onmousedown={(e) => { e.preventDefault(); pickSearchHit(h); }}
+                  onmouseenter={() => (searchSel = i)}
+                >
+                  <span class="srchkind" style:color={h.kind === "note" ? NOTE_FILL : "var(--accent)"}>{h.kind === "note" ? "◆" : "●"}</span>
+                  <span class="srchtitle">{h.title}</span>
+                  {#if h.year !== null}<span class="srchyear">{h.year}</span>{/if}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {:else if searchOpen && searchQ.trim().length >= 2}
+          <div class="srchlist srchnone">Niente nel grafo (ci sono solo i documenti con indice semantico).</div>
+        {/if}
+      </div>
       <select class="hudsel" bind:value={colorMode} title="Colora le stelle per…">
         {#each COLOR_MODES as m (m.value)}<option value={m.value}>{m.label}</option>{/each}
       </select>
@@ -1617,6 +1790,73 @@
     cursor: pointer;
   }
   .hudsel:hover { color: var(--accent); border-color: var(--accent-soft2); }
+  /* Search box + candidate dropdown (leftmost in the HUD). */
+  .srch { position: relative; }
+  .srchin {
+    height: 26px;
+    width: 160px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm, 8px);
+    background: color-mix(in srgb, var(--surface) 80%, transparent);
+    backdrop-filter: blur(6px);
+    color: var(--text);
+    font-size: 11.5px;
+    padding: 0 22px 0 9px;
+    outline: none;
+  }
+  .srchin::placeholder { color: var(--faint); }
+  .srchin:focus { border-color: var(--accent); }
+  .srchx {
+    position: absolute;
+    right: 3px;
+    top: 4px;
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: var(--faint);
+    font-size: 13px;
+    line-height: 1;
+    padding: 0;
+  }
+  .srchx:hover { color: var(--danger); }
+  .srchlist {
+    position: absolute;
+    top: 30px;
+    left: 0;
+    z-index: 6;
+    width: 290px;
+    max-height: 302px;
+    overflow-y: auto;
+    margin: 0;
+    padding: 4px;
+    list-style: none;
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md, 11px);
+    box-shadow: var(--shadow-md, 0 4px 16px rgba(20, 22, 28, 0.09));
+  }
+  .srchnone { padding: 8px 10px; font-size: 11.5px; color: var(--faint); }
+  .srchit {
+    display: flex;
+    gap: 7px;
+    align-items: baseline;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: none;
+    cursor: pointer;
+    padding: 5px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .srchit.selrow { background: var(--accent-soft, rgba(43, 74, 120, 0.1)); }
+  .srchkind { flex: none; font-size: 9px; }
+  .srchtitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srchyear { flex: none; font-size: 10.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
   /* Density tuning panel, anchored below the HUD (top-right). */
   .tune {
     position: absolute;

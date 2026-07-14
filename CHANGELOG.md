@@ -2,6 +2,9 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.15 — Cerca nella Costellazione
+- **Casella «Cerca nel grafo…»** nella HUD della vista a grafo (accanto a Colora per / Nebulose): da 2-3 lettere suggerisce fino a 8 candidati (titolo, poi autori; anche gli appunti ◆). Mentre digiti i nodi corrispondenti si **evidenziano** (anello tratteggiato, il resto si attenua); Invio o clic **centra la vista** sulla stella con un alone pulsante e apre la sua scheda. × o Esc pulisce. Trova solo ciò che è nel grafo (documenti con indice semantico).
+
 ## 0.9.14 — Recupero metadati: in blocco + per documento con conferma
 - **«✦ senza metadati» potenziato**: il recupero in blocco copre tutti i documenti incompleti (titolo/anno/autori mancanti, non più solo quelli senza DOI), recupera i paper arXiv dall'**id nel nome del file** (funziona anche sulle scansioni senza testo) e mostra **barra di avanzamento con Stop**. Precision-first invariato: si applica solo un abbinamento sicuro.
 - **«Recupera metadati…» sulla scheda** (tasto destro / ⋯ → Organizza; «Trova…» in Salute libreria): ricerca **estesa** su Crossref, arXiv e OpenAlex, più ogni DOI/arXiv stampato nel PDF e nel nome del file; i **candidati** mostrano le prove riscontrate nel PDF (titolo, autori, anno, DOI) e applichi tu quello giusto — o incolli un DOI/arXiv. I probabili duplicati (DOI già in libreria) sono segnalati.

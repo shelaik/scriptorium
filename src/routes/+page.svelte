@@ -614,7 +614,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.14";
+  const APP_VERSION = "0.9.15";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -6820,7 +6820,7 @@
           <ul>
             <li>Barra → Vista → <strong>Costellazione</strong>: ogni <strong>stella</strong> è un documento, i <strong>rombi viola</strong> sono i tuoi appunti, i legami sono la <strong>somiglianza di significato</strong>. Serve l'<strong>Indice semantico</strong>; i documenti nuovi entrano al prossimo aggiornamento dell'indice. Le posizioni si ricordano tra le sessioni.</li>
             <li><strong>Clic</strong> = scheda del nodo (con i legami in %, cliccabili); <strong>doppio clic</strong> = apri; <strong>tasto destro</strong> = menu; <strong>Ctrl+clic</strong> = seleziona. Da lontano vedi le <strong>nebulose</strong> — le comunità semantiche con la loro etichetta; da vicino compaiono i badge <strong>✓</strong> (peer-reviewed) e la forcella (codice GitHub).</li>
-            <li>In alto a destra: <strong>Colora per</strong> (Tag dominante / Comunità semantiche / Anno / Stato lettura) e il pannello <strong>⚙</strong> (Legami per nodo, Soglia somiglianza).</li>
+            <li>In alto a destra: <strong>Cerca nel grafo</strong> (bastano 2-3 lettere del titolo o di un autore → candidati suggeriti; Invio o clic evidenzia la stella con un alone pulsante e centra la vista lì; × o Esc pulisce), <strong>Colora per</strong> (Tag dominante / Comunità semantiche / Anno / Stato lettura), <strong>Nebulose</strong> e il pannello <strong>⚙</strong> (Legami per nodo, Soglia somiglianza).</li>
             <li><strong>Esplora dintorni (online)</strong>, nella scheda di una stella: <em>Citazioni</em> / <em>Simili</em> / <em>Autore</em> → i risultati appaiono come <strong>stelle fantasma</strong> tratteggiate attorno a quella; clic → «Aggiungi alla libreria». Entrano nel grafo al prossimo aggiornamento dell'indice.</li>
           </ul>
         </div>
