@@ -617,7 +617,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.18";
+  const APP_VERSION = "0.9.19";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -3599,6 +3599,10 @@
     inLibrary: boolean;
     added: boolean;
     result: SearchResult;
+    /** Ghost this one was discovered from (exploration chain); null = from the seed node. */
+    parentKey: string | null;
+    doi: string | null;
+    author: string | null;
   }
   let mapGhosts = $state<MapGhost[]>([]);
   let ghostBusy = $state(false);
@@ -3652,6 +3656,9 @@
           inLibrary: r.in_library,
           added: false,
           result: r,
+          parentKey: null,
+          doi: r.doi ?? null,
+          author: r.authors?.[0] ?? null,
         });
         if (fresh.length >= 12) break; // keep the fan readable
       }
@@ -3659,6 +3666,66 @@
       status = fresh.length
         ? `${fresh.length} ${fresh.length === 1 ? "stella fantasma trovata" : "stelle fantasma trovate"} — tratteggiate attorno al paper`
         : "Nessun nuovo risultato per questa relazione";
+    } catch (e) {
+      status = "Esplorazione non riuscita: " + e;
+    } finally {
+      ghostBusy = false;
+    }
+  }
+  /** Explore onward FROM a ghost (snowball chain): the new discoveries anchor
+   *  to that ghost, so you can keep digging without adding anything first. */
+  async function exploreFromGhost(key: string, relation: "citations" | "similar" | "author") {
+    if (ghostBusy) return;
+    const g = mapGhosts.find((x) => x.key === key);
+    if (!g) return;
+    const r0 = g.result;
+    ghostBusy = true;
+    status =
+      relation === "citations"
+        ? "Cerco citazioni collegate…"
+        : relation === "similar"
+          ? "Cerco paper simili…"
+          : "Cerco altri lavori dell'autore…";
+    try {
+      let results: SearchResult[] = [];
+      if (relation === "citations") {
+        if (!r0.doi) throw "Questa scoperta non ha un DOI da esplorare";
+        const cn = await exploreCitations(r0.doi);
+        results = [...cn.references, ...cn.citations];
+      } else if (relation === "similar") {
+        if (!(r0.title ?? "").trim()) throw "Questa scoperta non ha un titolo da cercare";
+        results = await discoverSearch(r0.title!, "openalex", { author: null, yearFrom: null, yearTo: null, oaOnly: false, sort: "relevance" });
+        results = results.filter((x) => !r0.doi || (x.doi ?? "") !== r0.doi); // not the ghost itself
+      } else {
+        const author = r0.authors?.[0];
+        if (!author) throw "Questa scoperta non ha autori registrati";
+        results = await discoverSearch(author, "openalex", { author, yearFrom: null, yearTo: null, oaOnly: false, sort: "relevance" });
+      }
+      const existing = new Set(mapGhosts.map((x) => x.key));
+      const fresh: MapGhost[] = [];
+      for (const r of results) {
+        const k = r.external_id || r.doi || r.title || "";
+        if (!k || existing.has(k)) continue;
+        existing.add(k);
+        fresh.push({
+          key: k,
+          seedId: g.seedId,
+          title: r.title ?? "Senza titolo",
+          year: r.year,
+          venue: r.venue,
+          inLibrary: r.in_library,
+          added: false,
+          result: r,
+          parentKey: key,
+          doi: r.doi ?? null,
+          author: r.authors?.[0] ?? null,
+        });
+        if (fresh.length >= 10) break; // keep the chain readable
+      }
+      mapGhosts = [...mapGhosts, ...fresh];
+      status = fresh.length
+        ? `${fresh.length} nuove scoperte, in catena da «${g.title.slice(0, 48)}»`
+        : "Nessun nuovo risultato da questa scoperta";
     } catch (e) {
       status = "Esplorazione non riuscita: " + e;
     } finally {
@@ -5778,6 +5845,7 @@
               ghosts={mapGhosts}
               onExplore={(id, rel) => exploreFromNode(id, rel)}
               onGhostAdd={(key) => addGhostToLibrary(key)}
+              onGhostExplore={(key, rel) => exploreFromGhost(key, rel)}
               onGhostsClear={() => (mapGhosts = [])}
               resolve={(id) => {
                 const d = displayed.find((x) => x.id === id) ?? docs.find((x) => x.id === id) ?? recentDocs.find((x) => x.id === id);
@@ -6895,6 +6963,7 @@
             <li><strong>Clic</strong> = scheda del nodo (con i legami in %, cliccabili); <strong>doppio clic</strong> = apri; <strong>tasto destro</strong> = menu; <strong>Ctrl+clic</strong> = seleziona. Da lontano vedi le <strong>nebulose</strong> — le comunità semantiche con la loro etichetta; da vicino compaiono i badge <strong>✓</strong> (peer-reviewed) e la forcella (codice GitHub).</li>
             <li>In alto a destra: <strong>Cerca nel grafo</strong> (bastano 2-3 lettere del titolo o di un autore → candidati suggeriti; Invio o clic evidenzia la stella con un alone pulsante e centra la vista lì; × o Esc pulisce), <strong>Colora per</strong> (Tag dominante / Comunità semantiche / Anno / Stato lettura), <strong>Nebulose</strong> e il pannello <strong>⚙</strong> (Legami per nodo, Soglia somiglianza).</li>
             <li><strong>Esplora dintorni (online)</strong>, nella scheda di una stella: <em>Citazioni</em> / <em>Simili</em> / <em>Autore</em> → i risultati appaiono come <strong>stelle fantasma</strong> tratteggiate attorno a quella; clic → «Aggiungi alla libreria». Entrano nel grafo al prossimo aggiornamento dell'indice.</li>
+            <li><strong>Catena di esplorazione</strong>: anche la scheda di una <em>stella fantasma</em> ha Citazioni / Simili / Autore — le nuove scoperte si agganciano a quella, in catena (snowball), così scavi di paper in paper senza aggiungere nulla finché non trovi quello giusto.</li>
           </ul>
         </div>
 
@@ -6996,7 +7065,7 @@
           <ul>
             <li>Cartella dell'app: <code>%APPDATA%\com.pdfmanage.app</code> — <code>pdfmanage.db</code> (il catalogo), <code>papers/</code> (i PDF scaricati; quelli importati dal disco <em>restano dove sono</em>), <code>notes/</code> (gli appunti .md + <code>assets/</code>), <code>projects/</code> (i progetti LaTeX), <code>thumbnails/</code> e i modelli locali (<code>mathocr</code>, <code>tablestruct</code>, <code>fastembed_cache</code>).</li>
             <li>Appunti e progetti sono <strong>file veri</strong>: modificarli da fuori è previsto. <strong>Backup libreria</strong> (barra) fa una copia completa; <strong>Esporta</strong> produce citazioni (BibTeX/RIS/CSL) o note per <strong>Obsidian</strong>.</li>
-            <li><strong>Terminale</strong> integrato (&gt;_, es. per <code>claude code</code>); la CLI <code>scriptorium-cli</code> interroga la libreria da fuori (sola lettura). Il <strong>connettore browser</strong> per «Aggancia» è un servizio solo-locale, spegnibile in Impostazioni. <strong>11 temi</strong> in Aspetto.</li>
+            <li><strong>Terminale</strong> integrato (&gt;_, es. per <code>claude code</code>); la CLI <code>scriptorium-cli</code> interroga da fuori, in sola lettura, libreria <em>e</em> Appunti <em>e</em> progetti LaTeX (<code>query</code>, <code>bib</code>, <code>notes</code>, <code>note</code>, <code>search-notes</code>, <code>projects</code>, <code>stats</code>…). Il <strong>connettore browser</strong> per «Aggancia» è un servizio solo-locale, spegnibile in Impostazioni. <strong>11 temi</strong> in Aspetto.</li>
           </ul>
         </div>
 

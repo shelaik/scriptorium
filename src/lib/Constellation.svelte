@@ -57,6 +57,12 @@
     venue: string | null;
     inLibrary: boolean;
     added: boolean;
+    /** Ghost this one was discovered FROM (exploration chain); null/absent = anchored to the seed node. */
+    parentKey?: string | null;
+    /** DOI, when known — enables "Citazioni" on the ghost card. */
+    doi?: string | null;
+    /** First author, when known — enables "Autore" on the ghost card. */
+    author?: string | null;
   }
   type ExploreRelation = "citations" | "similar" | "author";
 
@@ -76,6 +82,7 @@
     ghosts,
     onExplore,
     onGhostAdd,
+    onGhostExplore,
     onGhostsClear,
   }: {
     graph: SimilarityGraph | null;
@@ -99,6 +106,8 @@
     onExplore?: (id: number, relation: ExploreRelation) => void;
     /** Add a ghost's paper to the library. */
     onGhostAdd?: (key: string) => void;
+    /** Explore onward FROM a ghost (snowball chain: new ghosts anchor to it). */
+    onGhostExplore?: (key: string, relation: ExploreRelation) => void;
     /** Dismiss all ghost stars. */
     onGhostsClear?: () => void;
   } = $props();
@@ -300,25 +309,31 @@
     pinnedSet = new Set<number>([id, ...neighbors.map((x) => x.id)]);
     schedule();
   }
-  // ----- Ghost stars: online discoveries anchored around their seed node -----
+  // ----- Ghost stars: online discoveries anchored around their seed node (or,
+  //       in an exploration chain, around the ghost they were discovered from) -----
   let ghostAnchor = new Map<string, { angle: number; dist: number }>();
+  let ghostByKey = new Map<string, GhostStar>();
   let ghostCard = $state<GhostStar | null>(null);
   $effect(() => {
     const list = ghosts ?? [];
-    // Fan each seed's ghosts evenly around it; anchors are recomputed on every
-    // list change (the parent appends), so placement stays deterministic.
-    const bySeed = new Map<number, GhostStar[]>();
+    ghostByKey = new Map(list.map((g) => [g.key, g]));
+    // Fan each anchor-group's ghosts evenly around its base (seed node, or
+    // parent ghost for chain children); recomputed on every list change so
+    // placement stays deterministic.
+    const groups = new Map<string, GhostStar[]>();
     for (const g of list) {
-      let arr = bySeed.get(g.seedId);
-      if (!arr) bySeed.set(g.seedId, (arr = []));
+      const k = `${g.seedId}|${g.parentKey ?? ""}`;
+      let arr = groups.get(k);
+      if (!arr) groups.set(k, (arr = []));
       arr.push(g);
     }
     const anchors = new Map<string, { angle: number; dist: number }>();
-    for (const gs of bySeed.values()) {
+    for (const gs of groups.values()) {
       const n = gs.length;
+      const child = !!gs[0]?.parentKey; // chain children: tighter fan, offset angle
       gs.forEach((g, i) => {
-        const angle = -Math.PI / 2 + (i * TAU) / Math.max(n, 7);
-        anchors.set(g.key, { angle, dist: 95 + (i % 2) * 44 });
+        const angle = -Math.PI / 2 + (i * TAU) / Math.max(n, 7) + (child ? 0.35 : 0);
+        anchors.set(g.key, { angle, dist: child ? 78 + (i % 2) * 36 : 95 + (i % 2) * 44 });
       });
     }
     ghostAnchor = anchors;
@@ -326,14 +341,27 @@
     if (ghostCard) ghostCard = list.find((g) => g.key === ghostCard!.key) ?? null;
     schedule();
   });
-  /** World position of a ghost (anchored to its seed); null if the seed is gone. */
-  function ghostWorld(g: GhostStar): { x: number; y: number } | null {
-    const i = idToIdx.get(g.seedId);
-    if (i === undefined) return null;
+  /** World position of a ghost: offset from its base — the seed node, or the
+   *  parent ghost (resolved recursively, bounded). Null if the base is gone. */
+  function ghostWorld(g: GhostStar, depth = 0): { x: number; y: number } | null {
+    if (depth > 8) return null; // anti-cycle guard on malformed chains
     const a = ghostAnchor.get(g.key);
     if (!a) return null;
-    const s = nodes[i];
-    return { x: s.x + Math.cos(a.angle) * a.dist, y: s.y + Math.sin(a.angle) * a.dist };
+    let bx: number;
+    let by: number;
+    if (g.parentKey) {
+      const p = ghostByKey.get(g.parentKey);
+      const w = p ? ghostWorld(p, depth + 1) : null;
+      if (!w) return null;
+      bx = w.x;
+      by = w.y;
+    } else {
+      const i = idToIdx.get(g.seedId);
+      if (i === undefined) return null;
+      bx = nodes[i].x;
+      by = nodes[i].y;
+    }
+    return { x: bx + Math.cos(a.angle) * a.dist, y: by + Math.sin(a.angle) * a.dist };
   }
   function hitGhost(sx: number, sy: number): GhostStar | null {
     for (const g of ghosts ?? []) {
@@ -1162,14 +1190,22 @@
         const gx = w.x * zoom + tx;
         const gy = w.y * zoom + ty;
         if (gx < -60 || gx > vw + 60 || gy < -40 || gy > vh + 40) continue;
-        const i = idToIdx.get(g.seedId);
-        if (i !== undefined) {
-          const s = nodes[i];
+        // Dashed tie to the ghost's base: the seed node, or — for exploration
+        // chains — the ghost it was discovered from.
+        let base: { x: number; y: number } | null = null;
+        if (g.parentKey) {
+          const p = ghostByKey.get(g.parentKey);
+          base = p ? ghostWorld(p) : null;
+        } else {
+          const i = idToIdx.get(g.seedId);
+          if (i !== undefined) base = { x: nodes[i].x, y: nodes[i].y };
+        }
+        if (base) {
           c.setLineDash([3, 4]);
           c.strokeStyle = withAlpha(theme.accent, 0.4);
           c.lineWidth = 1;
           c.beginPath();
-          c.moveTo(s.x * zoom + tx, s.y * zoom + ty);
+          c.moveTo(base.x * zoom + tx, base.y * zoom + ty);
           c.lineTo(gx, gy);
           c.stroke();
         }
@@ -1663,6 +1699,15 @@
         {ghostCard.year ?? "s.d."}
         {#if ghostCard.venue}· {ghostCard.venue}{/if}
       </div>
+      {#if onGhostExplore}
+        <div class="card-sec">Esplora da questa scoperta</div>
+        <div class="card-explore">
+          <button disabled={!ghostCard.doi} onclick={() => onGhostExplore(ghostCard!.key, "citations")} title={ghostCard.doi ? "Chi cita e chi è citato da questa scoperta (OpenAlex)" : "Questa scoperta non ha un DOI da esplorare"}>Citazioni</button>
+          <button onclick={() => onGhostExplore(ghostCard!.key, "similar")} title="Paper simili per argomento (OpenAlex)">Simili</button>
+          <button disabled={!ghostCard.author} onclick={() => onGhostExplore(ghostCard!.key, "author")} title={ghostCard.author ? `Altri lavori di ${ghostCard.author}` : "Autore non noto per questa scoperta"}>Autore</button>
+        </div>
+        <p class="card-ghosthint">Le nuove stelle si agganciano a questa, in catena — puoi continuare a scavare senza aggiungere nulla.</p>
+      {/if}
       <div class="card-actions">
         {#if ghostCard.inLibrary}
           <span class="ghost-in">✓ Già nella libreria</span>

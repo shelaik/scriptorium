@@ -31,17 +31,28 @@ COMMANDS:
     tags                                  All tags with document counts. JSON.
     stats                                 Library counters. JSON.
     bib  [--tag NAME] [--id N]            Export BibTeX (all, or filtered). Raw .bib to stdout.
-    schema                                Print the stable columns this tool reads (the contract).
+    notes [--limit N]                     List the Appunti vault (.md files: slug/title/modified). JSON.
+    note <slug>                           Print one note's raw Markdown to stdout.
+    search-notes <text> [--limit N]       Search the notes (title+body) with a match excerpt. JSON.
+    projects [--limit N]                  List the LaTeX projects (folders under projects/). JSON.
+    schema                                Print the stable columns/paths this tool reads (the contract).
+    version                               Print the CLI version.
     help                                  This message.
 
 OPTIONS:
     --db <path>   Use a specific database file
                   (default: %APPDATA%\com.pdfmanage.app\pdfmanage.db)
+                  The Appunti vault and the projects live NEXT to it
+                  (<dir>\notes\*.md, <dir>\projects\<slug>\).
 
 Read-only and safe to run while the app is open. Examples:
     scriptorium-cli query "diffusion" --limit 10
     scriptorium-cli list --tag "reinforcement learning" --unread
     scriptorium-cli bib --tag thesis > refs.bib
+    scriptorium-cli notes
+    scriptorium-cli note "attention-notes" > attention.md
+    scriptorium-cli search-notes "gradient"
+    scriptorium-cli projects
     scriptorium-cli stats
 "#;
 
@@ -60,9 +71,15 @@ annotations(id, document_id, page, kind, quote, note, created_at)
 saved_searches(id, name, source, query, author, year_from, year_to, oa_only, sort,
                seen_ids, last_run_at, auto_run)      -- monitored topics
 watch_hits(id, watch_id, external_id, result_json, found_at, state)  -- "Novità" feed
+notes(slug, title, body)     -- shadow copy of the .md vault (kept for FTS)
 settings(key, value)
 
-Query it directly with any SQLite client; this CLI is just convenience + JSON.
+Files next to the database (SOURCE OF TRUTH for writing surfaces):
+<dir>\notes\*.md               -- the Appunti vault (real Markdown files)
+<dir>\notes\assets\            -- images referenced by the notes
+<dir>\projects\<slug>\         -- LaTeX projects (real folders; main.tex, refs.bib)
+
+Query the DB directly with any SQLite client; this CLI is just convenience + JSON.
 Open READ ONLY (e.g. sqlite3 'file:...?mode=ro') to be safe while the app runs.
 "#;
 
@@ -90,6 +107,10 @@ fn main() -> ExitCode {
     }
     if cmd == "schema" {
         print!("{SCHEMA_DOC}");
+        return ExitCode::SUCCESS;
+    }
+    if cmd == "version" || cmd == "--version" || cmd == "-V" {
+        println!("scriptorium-cli {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
 
@@ -123,6 +144,10 @@ fn main() -> ExitCode {
         "tags" => cmd_tags(&conn),
         "stats" => cmd_stats(&conn),
         "bib" => cmd_bib(&conn, rest),
+        "notes" => cmd_notes(&path, rest),
+        "note" => cmd_note(&path, rest),
+        "search-notes" => cmd_search_notes(&conn, rest),
+        "projects" => cmd_projects(&path, rest),
         other => Err(format!("unknown command '{other}'. Try `scriptorium-cli help`.")),
     };
     match result {
@@ -418,6 +443,157 @@ fn cmd_bib(conn: &Connection, args: &[String]) -> Result<(), String> {
         out.push('\n');
     }
     print!("{out}");
+    Ok(())
+}
+
+// ---- Appunti vault + LaTeX projects (read from the FILES, next to the DB) ---
+
+/// The app-data directory: the vault and the projects live next to the DB file.
+fn data_dir_of(db: &PathBuf) -> PathBuf {
+    db.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn epoch_of(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// List the .md notes vault: slug, title (first non-empty line, `#` stripped),
+/// modification time (epoch seconds, newest first) and size.
+fn cmd_notes(db: &PathBuf, args: &[String]) -> Result<(), String> {
+    let limit = limit_of(args, 500) as usize;
+    let dir = data_dir_of(db).join("notes");
+    let mut rows: Vec<(u64, Value)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for ent in rd.filter_map(Result::ok) {
+            let p = ent.path();
+            let is_md = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("md"))
+                .unwrap_or(false);
+            if !is_md || !p.is_file() {
+                continue;
+            }
+            let Some(slug) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+                continue;
+            };
+            let meta = ent.metadata().ok();
+            let modified = meta.as_ref().map(epoch_of).unwrap_or(0);
+            let bytes = meta.map(|m| m.len()).unwrap_or(0);
+            let title = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|body| {
+                    body.lines()
+                        .find(|l| !l.trim().is_empty())
+                        .map(|l| l.trim_start_matches('#').trim().to_string())
+                })
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| slug.clone());
+            rows.push((
+                modified,
+                json!({ "slug": slug, "title": title, "modified_epoch": modified, "bytes": bytes }),
+            ));
+        }
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    let out: Vec<Value> = rows.into_iter().take(limit).map(|(_, v)| v).collect();
+    print_json(&Value::Array(out));
+    Ok(())
+}
+
+/// Print one note's raw Markdown (the .md file is the source of truth).
+fn cmd_note(db: &PathBuf, args: &[String]) -> Result<(), String> {
+    let slug = positional(args).ok_or("note: missing slug (see `scriptorium-cli notes`)")?;
+    if slug.contains('/') || slug.contains('\\') || slug.contains("..") || slug.contains(':') {
+        return Err("note: invalid slug".into());
+    }
+    let p = data_dir_of(db).join("notes").join(format!("{slug}.md"));
+    let body = std::fs::read_to_string(&p).map_err(|_| format!("note: no note '{slug}' at {}", p.display()))?;
+    print!("{body}");
+    Ok(())
+}
+
+/// Case-insensitive char-wise find (1:1 lowercase map keeps indices aligned —
+/// byte offsets from a lowercased COPY would corrupt multi-byte text).
+fn find_ci(hay: &[char], needle: &str) -> Option<usize> {
+    let low = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let n: Vec<char> = needle.chars().map(low).collect();
+    if n.is_empty() || hay.len() < n.len() {
+        return None;
+    }
+    let h: Vec<char> = hay.iter().map(|c| low(*c)).collect();
+    h.windows(n.len()).position(|w| w == n.as_slice())
+}
+
+/// Search the notes' shadow table (title + body) and return a short excerpt
+/// around the first body match.
+fn cmd_search_notes(conn: &Connection, args: &[String]) -> Result<(), String> {
+    let text = positional(args).ok_or("search-notes: missing search text")?;
+    let limit = limit_of(args, 30);
+    let like = format!("%{}%", text);
+    let sql = format!("SELECT slug, title, COALESCE(body,'') FROM notes WHERE title LIKE ?1 OR body LIKE ?1 LIMIT {limit}");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("search-notes: {e} (serve un database creato da Scriptorium ≥ 0.8.7)"))?;
+    let rows: Vec<Value> = stmt
+        .query_map(params![like], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?))
+        })
+        .map_err(e2s)?
+        .filter_map(Result::ok)
+        .map(|(slug, title, body)| {
+            let chars: Vec<char> = body.chars().collect();
+            let excerpt = find_ci(&chars, &text).map(|i| {
+                let start = i.saturating_sub(90);
+                let end = (i + text.chars().count() + 90).min(chars.len());
+                let s: String = chars[start..end].iter().collect();
+                s.split_whitespace().collect::<Vec<_>>().join(" ")
+            });
+            json!({ "slug": slug, "title": title, "excerpt": excerpt })
+        })
+        .collect();
+    print_json(&Value::Array(rows));
+    Ok(())
+}
+
+/// List the LaTeX projects: real folders under projects/, newest first.
+fn cmd_projects(db: &PathBuf, args: &[String]) -> Result<(), String> {
+    let limit = limit_of(args, 200) as usize;
+    let dir = data_dir_of(db).join("projects");
+    let mut rows: Vec<(u64, Value)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for ent in rd.filter_map(Result::ok) {
+            let p = ent.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let Some(slug) = p.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
+                continue;
+            };
+            let modified = ent.metadata().ok().map(|m| epoch_of(&m)).unwrap_or(0);
+            let has_main = p.join("main.tex").is_file();
+            let has_bib = p.join("refs.bib").is_file();
+            let has_pdf = p.join("main.pdf").is_file();
+            rows.push((
+                modified,
+                json!({
+                    "slug": slug,
+                    "path": p.to_string_lossy(),
+                    "modified_epoch": modified,
+                    "has_main_tex": has_main,
+                    "has_refs_bib": has_bib,
+                    "has_pdf": has_pdf,
+                }),
+            ));
+        }
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    let out: Vec<Value> = rows.into_iter().take(limit).map(|(_, v)| v).collect();
+    print_json(&Value::Array(out));
     Ok(())
 }
 

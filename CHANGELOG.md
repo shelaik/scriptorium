@@ -2,6 +2,11 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.19 — CLI estesa + esplorazione a catena dalle stelle fantasma
+- **CLI `scriptorium-cli` aggiornata** (era ferma alla libreria): nuovi comandi `notes` (elenco del vault Appunti .md), `note <slug>` (stampa il Markdown), `search-notes` (ricerca con estratto), `projects` (progetti LaTeX), `version`; `schema` documenta anche i percorsi dei file. Sempre read-only e sicura con l'app aperta; binario allegato alla release.
+- **Costellazione — esplorazione a catena**: anche la scheda di una **stella fantasma** ha Citazioni / Simili / Autore; le nuove scoperte si agganciano a quella (con la linea tratteggiata al genitore), così si scava di paper in paper senza dover aggiungere nulla.
+- README aggiornato (sezione CLI + Scoperta).
+
 ## 0.9.18 — Fix: suggerimenti della ricerca nel grafo
 - Corretto il menù dei candidati di «Cerca nel grafo…»: una regola CSS della barra (`.hud button`, più specifica) schiacciava ogni riga in un quadrato 26×26 col testo che traboccava dal riquadro. Ora le righe sono normali (titoli su due righe, anno a destra) e anche i titoli-nomefile senza spazi vanno a capo. Diagnosi fatta su una pagina di riproduzione renderizzata headless.
 
