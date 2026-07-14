@@ -2,6 +2,10 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.21 — Esplorazione: i nuclei si staccano + fantasmi trascinabili
+- Quando esplori **da** una scoperta, quella stella (con tutto il suo ventaglio) ora **si stacca** dalla stella d'origine: si sposta ad almeno **1,5× il raggio massimo del proprio ventaglio**, nella **direzione più libera** attorno alla base (24 direzioni campionate, evitando stelle della libreria e altre catene, con preferenza verso l'esterno). Le catene di hub si distanziano a cascata: niente più nuclei impilati.
+- Le **stelle fantasma si trascinano**: sposti una scoperta (o un intero nucleo: la sua catena la segue con le molle) e resta dove la lasci. Nessuna funzione o grafica esistente è cambiata.
+
 ## 0.9.20 — Modalità esplorazione nel grafo + citazioni senza DOI
 - **Modalità esplorazione**: mentre ci sono stelle fantasma la Costellazione cambia pelle — la libreria si attenua a fondale, i paper di partenza hanno un anello «scanner» rotante, ogni **hop** della catena ha il suo colore, i collegamenti sono **archi curvi animati** e le scoperte pulsano con un alone. Le catene multi-hop si dispongono da sole: i fantasmi hanno una **mini-fisica** dedicata (si respingono tra loro e stanno alla larga dalle stelle della libreria), quindi niente più sovrapposizioni. La funzionalità esistente non cambia: × per uscire e la mappa torna com'era.
 - **Citazioni «da e per» senza DOI**: l'esplorazione delle citazioni ora aggancia il paper anche per **id OpenAlex** (le scoperte ce l'hanno sempre: mai più «manca il DOI» sui fantasmi) o per **titolo** con corrispondenza rigorosa (per i paper della libreria senza DOI). Vale nel grafo, nel radiale («Esplora citazioni (online)») e nella finestra Esplora citazioni («Esplora da qui» / «Esplora ↗» sempre disponibili).

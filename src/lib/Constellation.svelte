@@ -181,7 +181,8 @@
   let ro: ResizeObserver | null = null;
   let mo: MutationObserver | null = null;
 
-  let ptr = { down: false, startX: 0, startY: 0, moved: false, mode: "pan" as "pan" | "node", nodeIdx: -1, panTx: 0, panTy: 0 };
+  let ptr = { down: false, startX: 0, startY: 0, moved: false, mode: "pan" as "pan" | "node" | "ghost", nodeIdx: -1, ghostKey: null as string | null, panTx: 0, panTy: 0 };
+  let ghostDragKey: string | null = null; // ghost pinned under the cursor while dragging
 
   let tip = $state<{ x: number; y: number; title: string; meta: string } | null>(null);
   let generating = $state(false); // local guard: the "Genera indice" CTA must not double-fire
@@ -317,6 +318,9 @@
   let ghostAnchor = new Map<string, { angle: number; dist: number }>();
   let ghostByKey = new Map<string, GhostStar>();
   let ghostHop = new Map<string, number>(); // chain depth (0 = straight from the seed)
+  let ghostHubs = new Set<string>(); // ghosts that have children (explored FROM)
+  let ghostUserDist = new Map<string, number>(); // ring radii PARKED by the user (drag) — survive anchor rebuilds
+  let relocatedOnce = new Set<string>(); // hubs whose one-shot birth relocation already ran
   let ghostPos = new Map<string, { x: number; y: number; vx: number; vy: number }>();
   let ghostAlpha = 0; // relaxation heat of the ghost mini-sim
   let ghostCard = $state<GhostStar | null>(null);
@@ -352,6 +356,38 @@
         anchors.set(g.key, { angle, dist: child ? 82 + (i % 2) * 38 : 95 + (i % 2) * 44 });
       });
     }
+    // HUBS (ghosts the user explored FROM) get pushed AWAY from their base: at
+    // least 1.5× the reach of their own fan, so a sub-constellation never sits
+    // on top of the star it came from. Iterated so chains of hubs cascade
+    // (a hub whose child is itself a promoted hub needs even more room).
+    ghostHubs = new Set((list.map((g) => g.parentKey).filter(Boolean) as string[]));
+    for (let pass = 0; pass < 4; pass++) {
+      const reach = new Map<string, number>();
+      for (const g of list) {
+        if (!g.parentKey) continue;
+        const a = anchors.get(g.key);
+        if (a) reach.set(g.parentKey, Math.max(reach.get(g.parentKey) ?? 0, a.dist));
+      }
+      let grew = false;
+      for (const [pk, maxRay] of reach) {
+        const a = anchors.get(pk);
+        if (a && a.dist < maxRay * 1.5) {
+          a.dist = maxRay * 1.5;
+          grew = true;
+        }
+      }
+      if (!grew) break;
+    }
+    // User-parked radii OUTLIVE the rebuild (this map is rebuilt from the fan
+    // formula on every ghosts change — without the override, every drag would
+    // silently spring back on the next explore/add). The user's choice wins
+    // over the hub promotion too: they placed it there on purpose.
+    for (const k of [...ghostUserDist.keys()]) if (!byKey.has(k)) ghostUserDist.delete(k);
+    for (const k of [...relocatedOnce]) if (!byKey.has(k)) relocatedOnce.delete(k);
+    for (const [k, dv] of ghostUserDist) {
+      const a = anchors.get(k);
+      if (a) a.dist = dv;
+    }
     ghostAnchor = anchors;
     seedGhostPositions();
     // Keep the open card in sync (added flag) or close it if its ghost
@@ -371,6 +407,8 @@
   function seedGhostPositions() {
     const list = ghosts ?? [];
     const next = new Map<string, { x: number; y: number; vx: number; vy: number }>();
+    // Rigid translation applied to a relocated hub, inherited by its subtree.
+    const shift = new Map<string, { dx: number; dy: number }>();
     let changed = false;
     for (const g of list) {
       const a = ghostAnchor.get(g.key);
@@ -390,16 +428,110 @@
         by = nodes[i].y;
       }
       const prev = ghostPos.get(g.key);
-      if (prev) {
-        next.set(g.key, prev);
+      if (!prev) {
+        changed = true;
+        next.set(g.key, { x: bx + Math.cos(a.angle) * a.dist, y: by + Math.sin(a.angle) * a.dist, vx: 0, vy: 0 });
         continue;
       }
-      changed = true;
-      next.set(g.key, { x: bx + Math.cos(a.angle) * a.dist, y: by + Math.sin(a.angle) * a.dist, vx: 0, vy: 0 });
+      // Carry the parent subtree's rigid translation, so a relocated hub takes
+      // its whole sub-constellation along instead of leaving it behind.
+      const sh = g.parentKey ? shift.get(g.parentKey) : undefined;
+      let nx = prev.x + (sh?.dx ?? 0);
+      let ny = prev.y + (sh?.dy ?? 0);
+      if (g.key === ghostDragKey) {
+        // Never move the star the user is holding (an async explore result
+        // landing mid-drag must not yank it out from under the cursor).
+        nx = prev.x;
+        ny = prev.y;
+      } else if (ghostHubs.has(g.key) && !relocatedOnce.has(g.key) && !ghostUserDist.has(g.key)) {
+        // ONE-SHOT, at hub birth only: a ghost that just gained children sits
+        // on its old tight ring, too close for the fan it now carries —
+        // relocate it onto the promoted ring (≥1.5× its own reach), in the
+        // freest direction. Never re-triggered: the sim's equilibrium can
+        // legitimately rest inside the ring (library-star clearance pushes
+        // harder than the ring spring), and later ring growth is animated by
+        // the spring instead of teleporting. User-parked hubs are respected.
+        relocatedOnce.add(g.key);
+        const cur = Math.hypot(nx - bx, ny - by);
+        if (cur < a.dist - 24) {
+          const ang = freeDirection(g, bx, by, a.dist, next);
+          nx = bx + Math.cos(ang) * a.dist;
+          ny = by + Math.sin(ang) * a.dist;
+        }
+      }
+      if (nx !== prev.x || ny !== prev.y) {
+        shift.set(g.key, { dx: nx - prev.x, dy: ny - prev.y });
+        changed = true;
+        next.set(g.key, { x: nx, y: ny, vx: 0, vy: 0 });
+      } else {
+        next.set(g.key, prev);
+      }
     }
     if (next.size !== ghostPos.size) changed = true;
     ghostPos = next;
-    if (changed) ghostAlpha = 1; // re-relax only when the population changed
+    if (changed) ghostAlpha = 1; // re-relax only when something actually moved
+  }
+  /** The freest direction around (bx,by) at radius `dist` for hub `g`: samples
+   *  24 headings, scores each by the clearance of the landing point from every
+   *  obstacle (library stars + ghosts OUTSIDE g's own subtree, which moves with
+   *  it), with a small bonus for continuing OUTWARD along base's own heading —
+   *  chains keep flowing away from the core instead of folding back onto it. */
+  function freeDirection(
+    g: GhostStar,
+    bx: number,
+    by: number,
+    dist: number,
+    next: Map<string, { x: number; y: number; vx: number; vy: number }>,
+  ): number {
+    // g's subtree (itself + descendants) is not an obstacle: it relocates too.
+    const mine = new Set<string>([g.key]);
+    let grewTree = true;
+    while (grewTree) {
+      grewTree = false;
+      for (const o of ghosts ?? []) {
+        if (o.parentKey && mine.has(o.parentKey) && !mine.has(o.key)) {
+          mine.add(o.key);
+          grewTree = true;
+        }
+      }
+    }
+    // Outward heading: away from the base's own base (grandparent), or from
+    // the graph origin when the chain starts at a library star.
+    let awayAng: number;
+    const parent = g.parentKey ? ghostByKey.get(g.parentKey) : undefined;
+    const gb = parent ? ghostBase(parent) : null;
+    if (gb && (gb.x !== bx || gb.y !== by)) {
+      awayAng = Math.atan2(by - gb.y, bx - gb.x);
+    } else {
+      awayAng = Math.atan2(by, bx); // from the map's center of gravity (origin)
+    }
+    let best = awayAng;
+    let bestScore = -Infinity;
+    for (let k = 0; k < 24; k++) {
+      const ang = (k * TAU) / 24;
+      const px = bx + Math.cos(ang) * dist;
+      const py = by + Math.sin(ang) * dist;
+      let clear = Infinity;
+      for (const n of nodes) {
+        const d = Math.hypot(px - n.x, py - n.y);
+        if (d < clear) clear = d;
+      }
+      for (const o of ghosts ?? []) {
+        if (mine.has(o.key)) continue;
+        // Same-pass positions first: a sibling hub relocated moments ago must
+        // count as an obstacle at its NEW place, not its old one.
+        const op = next.get(o.key) ?? ghostPos.get(o.key);
+        if (!op) continue;
+        const d = Math.hypot(px - op.x, py - op.y);
+        if (d < clear) clear = d;
+      }
+      const score = Math.min(clear, 600) + 0.25 * dist * Math.cos(ang - awayAng);
+      if (score > bestScore) {
+        bestScore = score;
+        best = ang;
+      }
+    }
+    return best;
   }
   /** World position of a ghost: its simulated position. Null = not placeable. */
   function ghostWorld(g: GhostStar): { x: number; y: number } | null {
@@ -477,7 +609,12 @@
         }
       }
     }
-    for (const { p } of entries) {
+    for (const { g, p } of entries) {
+      if (g.key === ghostDragKey) {
+        p.vx = 0;
+        p.vy = 0;
+        continue; // pinned under the cursor
+      }
       p.vx *= 0.78;
       p.vy *= 0.78;
       const sp = Math.hypot(p.vx, p.vy);
@@ -1556,13 +1693,15 @@
   function onPointerDown(e: PointerEvent) {
     if (e.button !== 0) return;
     const i = hitTest(e.offsetX, e.offsetY);
+    const gh = i < 0 ? hitGhost(e.offsetX, e.offsetY) : null;
     ptr = {
       down: true,
       startX: e.offsetX,
       startY: e.offsetY,
       moved: false,
-      mode: i >= 0 ? "node" : "pan",
+      mode: i >= 0 ? "node" : gh ? "ghost" : "pan",
       nodeIdx: i,
+      ghostKey: gh?.key ?? null,
       panTx: tx,
       panTy: ty,
     };
@@ -1594,6 +1733,9 @@
       if (ptr.mode === "node") {
         dragIdx = ptr.nodeIdx;
         tip = null;
+      } else if (ptr.mode === "ghost") {
+        ghostDragKey = ptr.ghostKey;
+        tip = null;
       }
     }
     if (!ptr.moved) return;
@@ -1604,6 +1746,28 @@
       n.vx = 0;
       n.vy = 0;
       reheat(0.5);
+    } else if (ptr.mode === "ghost" && ptr.ghostKey) {
+      // Drag a ghost: reposition the star AND retune its ring to the dragged
+      // radius so the spring holds it where the user leaves it — the subtree
+      // follows on its own springs. This is how a tangled sub-constellation
+      // gets parked wherever there is room.
+      const p = ghostPos.get(ptr.ghostKey);
+      const g = ghostByKey.get(ptr.ghostKey);
+      if (p && g) {
+        p.x = (e.offsetX - tx) / zoom;
+        p.y = (e.offsetY - ty) / zoom;
+        p.vx = 0;
+        p.vy = 0;
+        const a = ghostAnchor.get(ptr.ghostKey);
+        const base = ghostBase(g);
+        if (a && base) {
+          const parked = Math.max(40, Math.hypot(p.x - base.x, p.y - base.y));
+          a.dist = parked;
+          ghostUserDist.set(ptr.ghostKey, parked); // survives anchor rebuilds
+        }
+        ghostAlpha = Math.max(ghostAlpha, 0.5);
+        schedule();
+      }
     } else {
       tx = ptr.panTx + dx;
       ty = ptr.panTy + dy;
@@ -1616,10 +1780,15 @@
     const idx = ptr.nodeIdx;
     ptr.down = false;
     dragIdx = -1; // release unpins: the sim takes the node back
+    if (ghostDragKey && ptr.moved) ghostAlpha = Math.max(ghostAlpha, 0.6); // let the chain settle after release
+    ghostDragKey = null;
     canvas.style.cursor = hoverIdx >= 0 ? "pointer" : "default";
     if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     if (wasClick) {
-      const ghost = idx < 0 ? hitGhost(e.offsetX, e.offsetY) : null;
+      // Prefer the ghost hit at pointerDOWN: a re-hit at the up position can
+      // miss by a pixel and would silently swallow the click.
+      const ghost =
+        idx < 0 ? (ptr.ghostKey ? (ghostByKey.get(ptr.ghostKey) ?? null) : hitGhost(e.offsetX, e.offsetY)) : null;
       if (idx >= 0 && idx < nodes.length) {
         const id = nodes[idx].id;
         ghostCard = null;
@@ -1894,7 +2063,7 @@
           <button onclick={() => onGhostExplore(ghostCard!.key, "similar")} title="Paper simili per argomento (OpenAlex)">Simili</button>
           <button disabled={!ghostCard.author} onclick={() => onGhostExplore(ghostCard!.key, "author")} title={ghostCard.author ? `Altri lavori di ${ghostCard.author}` : "Autore non noto per questa scoperta"}>Autore</button>
         </div>
-        <p class="card-ghosthint">Le nuove stelle si agganciano a questa, in catena — puoi continuare a scavare senza aggiungere nulla.</p>
+        <p class="card-ghosthint">Le nuove stelle si agganciano a questa, in catena — puoi continuare a scavare senza aggiungere nulla. Trascina una scoperta per spostarla: il suo gruppo la segue.</p>
       {/if}
       <div class="card-actions">
         {#if ghostCard.inLibrary}
