@@ -1755,7 +1755,10 @@
     display: flex;
     gap: 6px;
   }
-  .hud button {
+  /* SOLO i bottoni diretti della barra: `.hud button` (0,1,1) vinceva per
+     specificità su `.srchit` (0,1,0) e schiacciava le righe del dropdown di
+     ricerca in quadrati 26×26 col testo traboccante. */
+  .hud > button {
     width: 26px;
     height: 26px;
     display: grid;
@@ -1770,11 +1773,11 @@
     cursor: pointer;
     padding: 0;
   }
-  .hud button:hover {
+  .hud > button:hover {
     color: var(--accent);
     border-color: var(--accent-soft2);
   }
-  .hud button.on {
+  .hud > button.on {
     color: var(--accent);
     border-color: var(--accent);
   }
@@ -1847,14 +1850,17 @@
     gap: 8px;
     align-items: flex-start;
     width: 100%;
+    box-sizing: border-box;
     text-align: left;
     border: none;
     background: none;
     cursor: pointer;
     padding: 6px 9px;
     border-radius: 7px;
+    font-family: inherit;
     font-size: 12px;
     color: var(--text);
+    overflow: hidden;
   }
   .srchit.selrow { background: var(--accent-soft, rgba(43, 74, 120, 0.1)); }
   .srchkind { flex: none; font-size: 9px; padding-top: 3px; }
@@ -1862,6 +1868,7 @@
     flex: 1;
     min-width: 0;
     line-height: 1.35;
+    overflow-wrap: anywhere; /* anche i titoli-nomefile senza spazi vanno a capo */
     display: -webkit-box;
     -webkit-line-clamp: 2; /* i titoli lunghi vanno su due righe, poi … */
     line-clamp: 2;

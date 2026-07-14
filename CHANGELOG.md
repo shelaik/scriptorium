@@ -2,6 +2,9 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.18 — Fix: suggerimenti della ricerca nel grafo
+- Corretto il menù dei candidati di «Cerca nel grafo…»: una regola CSS della barra (`.hud button`, più specifica) schiacciava ogni riga in un quadrato 26×26 col testo che traboccava dal riquadro. Ora le righe sono normali (titoli su due righe, anno a destra) e anche i titoli-nomefile senza spazi vanno a capo. Diagnosi fatta su una pagina di riproduzione renderizzata headless.
+
 ## 0.9.17 — Trova PDF con candidati
 - **«Trova PDF…» ora mostra i candidati** invece di fallire in silenzio: cerca per identificativo (arXiv, DOI → Unpaywall/OpenAlex/Semantic Scholar) e **per titolo** su arXiv, OpenAlex, Semantic Scholar e Crossref; ogni candidato arriva con le prove (titolo identico/simile, autori coincidenti, anno) e i pulsanti **«Scarica e allega»** e **«Apri pagina»** (per controllare nel browser). In fondo, il campo per allegare un link diretto. Se un candidato non è scaricabile, la finestra resta aperta e provi il prossimo.
 - Il recupero **automatico** (selezione multipla e in blocco) ora cerca per titolo anche su **arXiv** e **Semantic Scholar** (sempre col gate rigoroso): il caso «lo trovavo a mano su arXiv» ora lo trova da solo.
