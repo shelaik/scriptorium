@@ -2,6 +2,11 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.22 — Server MCP
+- Nuovo binario **`scriptorium-mcp`**: server **MCP** locale (stdio, read-only, gemello della CLI) che porta la libreria dentro **Claude Desktop / Claude Code** e qualsiasi client MCP — 9 strumenti: `search_library`, `list_documents`, `get_document`, `get_bibtex`, `list_notes`, `get_note`, `search_notes`, `list_projects`, `library_stats`. Nessun servizio in background: lo avvia il client quando serve. Allegato alle Release.
+- Nuova scheda **Impostazioni → CLI e MCP**: percorsi dei binari con verifica di presenza e configurazione pronta da copiare (comando `claude mcp add` e voce per `claude_desktop_config.json`).
+- README riscritto nella sezione CLI/MCP.
+
 ## 0.9.21 — Esplorazione: i nuclei si staccano + fantasmi trascinabili
 - Quando esplori **da** una scoperta, quella stella (con tutto il suo ventaglio) ora **si stacca** dalla stella d'origine: si sposta ad almeno **1,5× il raggio massimo del proprio ventaglio**, nella **direzione più libera** attorno alla base (24 direzioni campionate, evitando stelle della libreria e altre catene, con preferenza verso l'esterno). Le catene di hub si distanziano a cascata: niente più nuclei impilati.
 - Le **stelle fantasma si trascinano**: sposti una scoperta (o un intero nucleo: la sua catena la segue con le molle) e resta dove la lasci. Nessuna funzione o grafica esistente è cambiata.

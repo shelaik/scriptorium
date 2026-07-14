@@ -13,6 +13,7 @@ Tutto vive sul tuo computer: i PDF, il catalogo (SQLite), gli appunti (file `.md
 - **Scoperta**: ricerca su arXiv/OpenAlex/ADS/Semantic Scholar/…, ricerche salvate con campana **Novità**, mappa delle citazioni, **Costellazione** (la libreria come grafo semantico: comunità, cerca-nel-grafo, stelle fantasma da OpenAlex con **esplorazione a catena** dalle scoperte stesse, appunti nel grafo).
 - **AI locale** (opzionale): riassunti, tag automatici, lente di lettura, «Chiedi alla libreria» con fonti, confronti e rassegne. Nessun dato esce dal PC.
 - **Interfaccia «Orbita»**: barra strumenti + **menu radiale** (tasto destro) + **palette comandi** (Ctrl+K) che pescano dallo stesso registro; guida integrata a schede con FAQ, in finestra flottante.
+- **Da fuori**: CLI (`scriptorium-cli`) e **server MCP** (`scriptorium-mcp`) read-only per terminale, script, Claude Desktop/Code — vedi la sezione dedicata.
 
 ## Installazione
 
@@ -36,15 +37,26 @@ Requisiti: Node 20+, Rust stable, WebView2. I modelli locali (embedding, math-OC
 
 `%APPDATA%\com.pdfmanage.app\` → `pdfmanage.db` (catalogo), `papers/` (PDF scaricati; quelli importati dal disco restano dove sono), `notes/` (appunti .md), `projects/` (LaTeX), `backups/` (copie automatiche del DB a ogni aggiornamento di versione), modelli locali.
 
-## CLI
+## CLI e server MCP
 
-`scriptorium-cli` è un binario separato, **read-only** e sicuro da usare mentre l'app è aperta (il DB è SQLite in WAL): interroga libreria, Appunti e progetti LaTeX da terminale — comodo per script e per Claude Code. Comandi: `query`, `list`, `show`, `tags`, `stats`, `bib` (BibTeX), `notes` / `note <slug>` / `search-notes` (il vault .md), `projects`, `schema`. Output JSON. Si compila con:
+Due binari compagni, **read-only** e sicuri da usare mentre l'app è aperta (il DB è SQLite in WAL). Entrambi sono allegati alle **Release**; percorsi e configurazione pronti da copiare in **Impostazioni → CLI e MCP**.
+
+**`scriptorium-cli`** — interroga libreria, Appunti e progetti LaTeX da terminale, output JSON (comodo per script e Claude Code): `query`, `list`, `show`, `tags`, `stats`, `bib` (BibTeX), `notes` / `note <slug>` / `search-notes` (il vault .md), `projects`, `schema`, `version`.
+
+**`scriptorium-mcp`** — server **MCP** locale (stdio, niente porte né processi in background: lo avvia il client quando serve) che porta gli stessi dati dentro **Claude Desktop / Claude Code** e qualsiasi client MCP, con 9 strumenti: `search_library`, `list_documents`, `get_document`, `get_bibtex`, `list_notes`, `get_note`, `search_notes`, `list_projects`, `library_stats`. Registrazione in Claude Code:
 
 ```
-cargo build --release --bin scriptorium-cli --features cli   # da src-tauri/
+claude mcp add scriptorium -- "%LOCALAPPDATA%\Scriptorium\scriptorium-mcp.exe"
 ```
 
-(oppure scarica `scriptorium-cli.exe` dalle Release, quando allegato).
+(in Claude Desktop: voce `"scriptorium": { "command": "<percorso>\\scriptorium-mcp.exe" }` sotto `mcpServers`).
+
+Compilazione dal sorgente (da `src-tauri/`):
+
+```
+cargo build --release --bin scriptorium-cli --features cli
+cargo build --release --bin scriptorium-mcp --features mcp
+```
 
 ## Note
 

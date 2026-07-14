@@ -158,6 +158,8 @@
     listProjects,
     type ProjectMeta,
     type ExploreSeed,
+    type CompanionPaths,
+    companionPaths,
     checkUpdate,
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
@@ -618,9 +620,30 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.21";
+  const APP_VERSION = "0.9.22";
   const APP_YEAR = "2026";
-  let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
+  let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
+  // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
+  let companions = $state<CompanionPaths | null>(null);
+  async function loadCompanions() {
+    try {
+      companions = await companionPaths();
+    } catch (e) {
+      status = "Errore percorsi: " + e;
+    }
+  }
+  const mcpAddCmd = $derived(companions ? `claude mcp add scriptorium -- "${companions.mcp}"` : "");
+  const mcpJsonSnippet = $derived(
+    companions ? `"scriptorium": { "command": ${JSON.stringify(companions.mcp)} }` : "",
+  );
+  async function copyPlain(text: string, okMsg: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      status = okMsg;
+    } catch {
+      status = "Copia non riuscita";
+    }
+  }
   let obsidianVault = $state("");
   let exportingObsidian = $state(false);
   let discEnabled = $state(false);
@@ -7074,7 +7097,7 @@
           <ul>
             <li>Cartella dell'app: <code>%APPDATA%\com.pdfmanage.app</code> — <code>pdfmanage.db</code> (il catalogo), <code>papers/</code> (i PDF scaricati; quelli importati dal disco <em>restano dove sono</em>), <code>notes/</code> (gli appunti .md + <code>assets/</code>), <code>projects/</code> (i progetti LaTeX), <code>thumbnails/</code> e i modelli locali (<code>mathocr</code>, <code>tablestruct</code>, <code>fastembed_cache</code>).</li>
             <li>Appunti e progetti sono <strong>file veri</strong>: modificarli da fuori è previsto. <strong>Backup libreria</strong> (barra) fa una copia completa; <strong>Esporta</strong> produce citazioni (BibTeX/RIS/CSL) o note per <strong>Obsidian</strong>.</li>
-            <li><strong>Terminale</strong> integrato (&gt;_, es. per <code>claude code</code>); la CLI <code>scriptorium-cli</code> interroga da fuori, in sola lettura, libreria <em>e</em> Appunti <em>e</em> progetti LaTeX (<code>query</code>, <code>bib</code>, <code>notes</code>, <code>note</code>, <code>search-notes</code>, <code>projects</code>, <code>stats</code>…). Il <strong>connettore browser</strong> per «Aggancia» è un servizio solo-locale, spegnibile in Impostazioni. <strong>11 temi</strong> in Aspetto.</li>
+            <li><strong>Terminale</strong> integrato (&gt;_, es. per <code>claude code</code>); la CLI <code>scriptorium-cli</code> interroga da fuori, in sola lettura, libreria <em>e</em> Appunti <em>e</em> progetti LaTeX (<code>query</code>, <code>bib</code>, <code>notes</code>, <code>note</code>, <code>search-notes</code>, <code>projects</code>, <code>stats</code>…). Il <strong>server MCP</strong> <code>scriptorium-mcp</code> porta gli stessi dati (9 strumenti, sola lettura) dentro <strong>Claude Desktop / Claude Code</strong> e qualsiasi client MCP: config pronta da copiare in <strong>Impostazioni → CLI e MCP</strong>. Il <strong>connettore browser</strong> per «Aggancia» è un servizio solo-locale, spegnibile in Impostazioni. <strong>11 temi</strong> in Aspetto.</li>
           </ul>
         </div>
 
@@ -7140,6 +7163,7 @@
             <button class="setnavitem" class:active={settingsTab === "ai"} onclick={() => (settingsTab = "ai")}>AI locale</button>
             <button class="setnavitem" class:active={settingsTab === "obsidian"} onclick={() => (settingsTab = "obsidian")}>Obsidian</button>
             <button class="setnavitem" class:active={settingsTab === "connector"} onclick={() => { settingsTab = "connector"; loadConnector(); }}>Connettore browser</button>
+            <button class="setnavitem" class:active={settingsTab === "mcp"} onclick={() => { settingsTab = "mcp"; loadCompanions(); }}>CLI e MCP</button>
             <button class="setnavitem" class:active={settingsTab === "backup"} onclick={() => (settingsTab = "backup")}>Backup</button>
             <button class="setnavitem" class:active={settingsTab === "maint"} onclick={() => (settingsTab = "maint")}>Manutenzione</button>
           </nav>
@@ -7303,6 +7327,46 @@
                 comparirà il suggerimento in basso a destra. Gli appunti vengono letti solo quando l'app torna in primo
                 piano e non lasciano mai il tuo computer; non parte nulla finché non clicchi «Aggancia».
               </p>
+            {:else if settingsTab === "mcp"}
+              <p class="dimtext">
+                Due compagni <strong>in sola lettura</strong> per usare la libreria da fuori (sicuri anche con l'app
+                aperta): la <strong>CLI</strong> per il terminale e il <strong>server MCP</strong> per Claude Desktop /
+                Claude Code e qualsiasi client MCP. Nessun servizio resta in ascolto: è il client ad avviare il
+                processo quando serve e a chiuderlo a fine sessione.
+              </p>
+              {#if companions}
+                <div class="setlbl">
+                  Server MCP — registralo in Claude Code con questo comando
+                  <div class="airow">
+                    <input readonly value={mcpAddCmd} />
+                    <button class="ghost small" onclick={() => copyPlain(mcpAddCmd, "Comando copiato ✓")}>Copia</button>
+                  </div>
+                  <span class="sethint">
+                    {companions.mcp_exists ? "✓ binario presente accanto all'app" : "⚠ binario non trovato — scarica scriptorium-mcp.exe dalle Release e mettilo accanto all'app"}
+                    — 9 strumenti: ricerca libreria, schede, BibTeX, appunti, ricerca appunti, progetti LaTeX, statistiche. Solo lettura.
+                  </span>
+                </div>
+                <div class="setlbl">
+                  Per Claude Desktop: aggiungi questa voce in <code>claude_desktop_config.json</code> → <code>"mcpServers"</code>
+                  <div class="airow">
+                    <input readonly value={mcpJsonSnippet} />
+                    <button class="ghost small" onclick={() => copyPlain(mcpJsonSnippet, "Config copiata ✓")}>Copia</button>
+                  </div>
+                </div>
+                <div class="setlbl">
+                  CLI da terminale (query, list, show, bib, notes, note, search-notes, projects, stats)
+                  <div class="airow">
+                    <input readonly value={companions.cli} />
+                    <button class="ghost small" onclick={() => copyPlain(companions!.cli, "Percorso copiato ✓")}>Copia</button>
+                  </div>
+                  <span class="sethint">
+                    {companions.cli_exists ? "✓ binario presente accanto all'app" : "⚠ binario non trovato — scarica scriptorium-cli.exe dalle Release"}
+                    — <code>scriptorium-cli help</code> per tutti i comandi; output JSON, comodo per script e Claude Code.
+                  </span>
+                </div>
+              {:else}
+                <p class="dimtext">Carico i percorsi…</p>
+              {/if}
             {:else if settingsTab === "backup"}
               <p class="dimtext">Salva una copia completa (database + PDF + miniature) in una cartella a tua scelta.</p>
               <button class="ghost" onclick={doBackup}>Scegli cartella e salva backup…</button>

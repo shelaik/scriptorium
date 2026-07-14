@@ -144,6 +144,7 @@ pub fn run() {
             commands::apply_meta_candidate,
             commands::pdf_candidates,
             commands::attach_pdf_candidate,
+            commands::companion_paths,
             commands::embedding_status,
             commands::generate_embeddings,
             commands::cancel_embeddings,

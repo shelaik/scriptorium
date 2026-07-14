@@ -512,6 +512,34 @@ pub async fn repair_metadata(app: AppHandle) -> Result<RepairSummary, String> {
     Ok(sum)
 }
 
+// ===== Compagni headless (CLI + server MCP) =====
+
+/// Paths of the companion binaries next to the running app, for the Settings
+/// "CLI e MCP" card — the frontend cannot resolve the install dir on its own.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CompanionPaths {
+    pub dir: String,
+    pub cli: String,
+    pub mcp: String,
+    pub cli_exists: bool,
+    pub mcp_exists: bool,
+}
+
+#[tauri::command]
+pub fn companion_paths() -> Result<CompanionPaths, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe.parent().ok_or_else(|| "cartella dell'eseguibile non trovata".to_string())?;
+    let cli = dir.join("scriptorium-cli.exe");
+    let mcp = dir.join("scriptorium-mcp.exe");
+    Ok(CompanionPaths {
+        dir: dir.to_string_lossy().into_owned(),
+        cli: cli.to_string_lossy().into_owned(),
+        mcp: mcp.to_string_lossy().into_owned(),
+        cli_exists: cli.is_file(),
+        mcp_exists: mcp.is_file(),
+    })
+}
+
 // ===== Recupero metadati: bulk sui documenti "magri" + candidati per documento =====
 
 /// Progress event payload emitted during the bulk metadata recovery.

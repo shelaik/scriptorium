@@ -106,6 +106,17 @@ export interface PdfProbe {
   title: string | null;
   candidates: PdfCandidate[];
 }
+// ----- Headless companions (CLI + MCP server) -----
+export interface CompanionPaths {
+  dir: string;
+  cli: string;
+  mcp: string;
+  cli_exists: boolean;
+  mcp_exists: boolean;
+}
+/** Install-dir paths of scriptorium-cli.exe / scriptorium-mcp.exe (Settings card). */
+export const companionPaths = () => invoke<CompanionPaths>("companion_paths");
+
 /** Extensive PDF-candidate search (identifiers + title on arXiv/OpenAlex/S2/Crossref). */
 export const pdfCandidates = (id: number) => invoke<PdfProbe>("pdf_candidates", { id });
 /** Download and attach a user-chosen candidate. "attached"|"already"|"duplicate"|"not_found". */

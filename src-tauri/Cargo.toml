@@ -1,6 +1,6 @@
 [package]
 name = "pdfmanage"
-version = "0.9.21"
+version = "0.9.22"
 description = "Lean, fast, local-first PDF & reference manager"
 authors = ["you"]
 edition = "2021"
@@ -21,6 +21,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # (the GUI release) never compiles it — build it explicitly with
 # `cargo build --release --bin scriptorium-cli --features cli`.
 cli = []
+# Gates the local MCP server companion binary (same rationale):
+# `cargo build --release --bin scriptorium-mcp --features mcp`.
+mcp = []
 
 # Headless, read-only terminal access to the library (see src/cli_main.rs).
 # Kept OUT of src/bin/ so cargo does not auto-detect it as a second app binary
@@ -29,6 +32,13 @@ cli = []
 name = "scriptorium-cli"
 path = "src/cli_main.rs"
 required-features = ["cli"]
+
+# Local stdio MCP server: read-only tools over the same library for Claude
+# Desktop / Claude Code and any MCP client. Same isolation as the CLI.
+[[bin]]
+name = "scriptorium-mcp"
+path = "src/mcp_main.rs"
+required-features = ["mcp"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
