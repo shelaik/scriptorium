@@ -4221,50 +4221,137 @@ fn latex_ref_raw(rref: &metadata::ResolvedRef) -> String {
     }
 }
 
-/// Try to attach an Open-Access PDF to a reference-only document.
-/// Returns "attached" | "already" | "not_found".
+/// Collect a candidate OA-PDF URL, skipping blanks and duplicates (the sources
+/// often agree on the same link).
+fn push_pdf_url(urls: &mut Vec<String>, u: Option<String>) {
+    if let Some(u) = u {
+        let u = u.trim().to_string();
+        if !u.is_empty() && !urls.iter().any(|x| x.eq_ignore_ascii_case(&u)) {
+            urls.push(u);
+        }
+    }
+}
+
+/// Try to attach an Open-Access PDF to a reference-only document — robustly:
+/// candidate links are gathered from a CHAIN of sources (arXiv id in the path,
+/// arXiv DOI, Unpaywall when a contact email is set, OpenAlex, Semantic
+/// Scholar, and — with no DOI at all — an OpenAlex title search gated by the
+/// strict title match), then downloaded in order until one actually yields a
+/// PDF, so a dead link just moves on to the next source.
+/// Returns "attached" | "already" | "duplicate" | "not_found".
 #[tauri::command]
 pub async fn find_pdf(app: AppHandle, id: i64) -> Result<String, String> {
-    let (doi, path, email) = {
+    let (doi, path, title, email) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
         let row = conn
             .query_row(
-                "SELECT doi, path FROM documents WHERE id = ?1 AND deleted_at IS NULL",
+                "SELECT doi, path, title FROM documents WHERE id = ?1 AND deleted_at IS NULL",
                 params![id],
-                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        let (doi, path) = row.ok_or_else(|| "documento non trovato".to_string())?;
+        let (doi, path, title) = row.ok_or_else(|| "documento non trovato".to_string())?;
         let email = setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty());
-        (doi, path, email)
+        (doi, path, title, email)
     };
     // Already has a real file?
     if path.as_deref().map(|p| !p.starts_with("ref:")).unwrap_or(false) {
         return Ok("already".into());
     }
+    let oa_key = secret::get("openalex_key").unwrap_or_default();
+    let s2_key = secret::get("s2_key").unwrap_or_default();
 
     let client = metadata::http_client(email.as_deref()).map_err(|e| e.to_string())?;
-    // Prefer an arXiv eprint if the reference came from arXiv; else ask Unpaywall.
-    let mut url: Option<String> = None;
-    if let Some(rest) = path.as_deref().and_then(|p| p.strip_prefix("ref:arxiv:")) {
-        url = Some(format!("https://arxiv.org/pdf/{rest}"));
-    }
-    if url.is_none() {
-        let Some(doi) = doi.as_deref() else {
-            return Ok("not_found".into());
-        };
-        let mail = email
-            .clone()
-            .ok_or_else(|| "Per «Trova PDF» imposta un'email nelle Impostazioni (richiesta da Unpaywall)".to_string())?;
-        url = metadata::unpaywall_pdf(&client, doi, &mail).await.map_err(|e| e.to_string())?;
-    }
-    let Some(url) = url else {
-        return Ok("not_found".into());
-    };
+    let timeout = std::time::Duration::from_secs(20);
+    let mut urls: Vec<String> = Vec::new();
 
-    let Some(saved) = download_pdf(&app, &url).await? else {
+    // (1) An arXiv reference: the id IS the paper, its PDF link is deterministic.
+    if let Some(rest) = path.as_deref().and_then(|p| p.strip_prefix("ref:arxiv:")) {
+        push_pdf_url(&mut urls, Some(format!("https://arxiv.org/pdf/{rest}")));
+    }
+    // (2) An arXiv DOI names the eprint directly.
+    if let Some(aid) = doi
+        .as_deref()
+        .map(|d| d.trim().to_lowercase())
+        .and_then(|d| d.strip_prefix("10.48550/arxiv.").map(str::to_string))
+        .filter(|a| !a.is_empty())
+    {
+        push_pdf_url(&mut urls, Some(format!("https://arxiv.org/pdf/{aid}")));
+    }
+    // (3-5) DOI lookups: Unpaywall (only with the contact email it mandates —
+    // no longer a hard requirement), then OpenAlex and Semantic Scholar.
+    if let Some(d) = doi.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        if let Some(mail) = email.as_deref() {
+            if let Ok(Ok(u)) = tokio::time::timeout(timeout, metadata::unpaywall_pdf(&client, d, mail)).await {
+                push_pdf_url(&mut urls, u);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+        if let Ok(u) = tokio::time::timeout(timeout, discovery::openalex_oa_pdf(&client, d, &oa_key)).await {
+            push_pdf_url(&mut urls, u);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        if let Ok(u) = tokio::time::timeout(timeout, discovery::s2_oa_pdf(&client, d, &s2_key)).await {
+            push_pdf_url(&mut urls, u);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    }
+    // (6) No leads yet: OpenAlex search by the stored title, accepted ONLY on
+    // the strict title match — a near-neighbour must never provide the file.
+    if urls.is_empty() {
+        if let Some(t) = title.as_deref().map(str::trim).filter(|t| t.chars().count() >= 8) {
+            let filters = discovery::Filters {
+                year_from: None,
+                year_to: None,
+                oa_only: false,
+                sort: "relevance".to_string(),
+                author: None,
+            };
+            if let Ok(Ok(list)) =
+                tokio::time::timeout(timeout, discovery::search_openalex(&client, t, &filters, &oa_key)).await
+            {
+                for r in list.into_iter().take(8) {
+                    if r.title.as_deref().is_some_and(|c| metadata::strong_title_match(t, c)) {
+                        push_pdf_url(&mut urls, r.oa_pdf_url);
+                        // The matched work's DOI unlocks the DOI sources too.
+                        if let (Some(d2), Some(mail)) = (r.doi.as_deref(), email.as_deref()) {
+                            if let Ok(Ok(u)) =
+                                tokio::time::timeout(timeout, metadata::unpaywall_pdf(&client, d2, mail)).await
+                            {
+                                push_pdf_url(&mut urls, u);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if urls.is_empty() {
+        return Ok("not_found".into());
+    }
+
+    // Download the candidates in order: a dead OA link (404 host, HTML landing
+    // page) just moves on to the next source instead of giving up.
+    let mut saved_path: Option<PathBuf> = None;
+    for url in &urls {
+        match download_pdf(&app, url).await {
+            Ok(Some(p)) => {
+                saved_path = Some(p);
+                break;
+            }
+            Ok(None) | Err(_) => continue,
+        }
+    }
+    let Some(saved) = saved_path else {
         return Ok("not_found".into());
     };
 

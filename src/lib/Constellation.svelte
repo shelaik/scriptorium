@@ -1794,7 +1794,7 @@
   .srch { position: relative; }
   .srchin {
     height: 26px;
-    width: 160px;
+    width: 190px;
     border: 1px solid var(--border);
     border-radius: var(--r-sm, 8px);
     background: color-mix(in srgb, var(--surface) 80%, transparent);
@@ -1824,11 +1824,14 @@
   .srchlist {
     position: absolute;
     top: 30px;
-    left: 0;
+    right: 0; /* ancorata al bordo destro dell'input: si allarga verso la mappa */
     z-index: 6;
-    width: 290px;
-    max-height: 302px;
+    width: min(440px, 72vw);
+    max-height: 320px;
     overflow-y: auto;
+    overflow-x: hidden; /* mai frecce/scroll orizzontali: i titoli vanno a capo */
+    scrollbar-width: thin; /* scrollbar verticale sottile, senza frecce */
+    scrollbar-color: color-mix(in srgb, var(--dim) 32%, transparent) transparent;
     margin: 0;
     padding: 4px;
     list-style: none;
@@ -1841,22 +1844,31 @@
   .srchnone { padding: 8px 10px; font-size: 11.5px; color: var(--faint); }
   .srchit {
     display: flex;
-    gap: 7px;
-    align-items: baseline;
+    gap: 8px;
+    align-items: flex-start;
     width: 100%;
     text-align: left;
     border: none;
     background: none;
     cursor: pointer;
-    padding: 5px 8px;
-    border-radius: 6px;
+    padding: 6px 9px;
+    border-radius: 7px;
     font-size: 12px;
     color: var(--text);
   }
   .srchit.selrow { background: var(--accent-soft, rgba(43, 74, 120, 0.1)); }
-  .srchkind { flex: none; font-size: 9px; }
-  .srchtitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .srchyear { flex: none; font-size: 10.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .srchkind { flex: none; font-size: 9px; padding-top: 3px; }
+  .srchtitle {
+    flex: 1;
+    min-width: 0;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2; /* i titoli lunghi vanno su due righe, poi … */
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .srchyear { flex: none; padding-top: 2px; font-size: 10.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
   /* Density tuning panel, anchored below the HUD (top-right). */
   .tune {
     position: absolute;

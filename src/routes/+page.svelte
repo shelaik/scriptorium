@@ -614,7 +614,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.15";
+  const APP_VERSION = "0.9.16";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "backup" | "maint">("online");
   let obsidianVault = $state("");
@@ -1652,6 +1652,55 @@
       if (res === "attached") {
         await loadDocs();
       }
+    } catch (e) {
+      status = "Errore Trova PDF: " + e;
+    }
+  }
+
+  // ---- «Trova PDF» in blocco: allega copie OA a più riferimenti in sequenza ----
+  let pdfBatch = $state<{ done: number; total: number; found: number } | null>(null);
+  let pdfBatchCancel = false;
+  async function batchFindPdf(targets: DocumentItem[]) {
+    const list = targets.filter((d) => !d.has_file);
+    if (!list.length) {
+      status = "Nessun riferimento senza PDF qui";
+      return;
+    }
+    if (pdfBatch) return; // one sweep at a time
+    pdfBatchCancel = false;
+    let done = 0;
+    let found = 0;
+    let dup = 0;
+    let miss = 0;
+    let err = 0;
+    pdfBatch = { done, total: list.length, found };
+    for (const d of list) {
+      if (pdfBatchCancel) break;
+      try {
+        const r = await findPdf(d.id);
+        if (r === "attached") found++;
+        else if (r === "duplicate") dup++;
+        else miss++;
+      } catch {
+        err++;
+      }
+      done++;
+      pdfBatch = { done, total: list.length, found };
+    }
+    const parts = [`${found} PDF allegati su ${list.length}`];
+    if (dup) parts.push(`${dup} già in libreria altrove`);
+    if (miss) parts.push(`${miss} senza copia Open Access`);
+    if (err) parts.push(`${err} errori`);
+    status = "Trova PDF: " + parts.join(" · ") + (pdfBatchCancel ? " · interrotto" : "");
+    pdfBatch = null;
+    await loadDocs();
+    await loadSidebar();
+  }
+  /** Sweep EVERY reference-only entry in the library (not just the current view). */
+  async function findPdfAllRefs() {
+    try {
+      const all = await listDocuments();
+      await batchFindPdf(all.filter((d) => !d.has_file));
     } catch (e) {
       status = "Errore Trova PDF: " + e;
     }
@@ -3084,7 +3133,7 @@
       orgKids.push({ id: "or-rm", label: `Togli da «${filter.label ?? "collezione"}»`, danger: true, action: () => removeDocFromCurrentCollection(d) });
     if (!d.has_file)
       orgKids.push({ id: "or-pdf", label: "Allega PDF…", hint: "Questa voce è solo un riferimento: trova un PDF Open Access o allegane uno da un link", action: () => (refPanel = { doc: d, url: "", busy: false }) });
-    return [
+    const items: RadialItem[] = [
       { id: "d-open", label: "Apri", icon: I.open, hint: "Leggi nel visore integrato", action: () => openDocument(d) },
       { id: "d-copyt", label: "Copia titolo", icon: I.copy, hint: "Copia il titolo del paper negli appunti", disabled: !(d.title ?? "").trim(), action: () => copyTitle(d) },
       { id: "d-fav", label: "Preferito", icon: I.star, checked: d.favorite, hint: d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti", action: () => toggleFavorite(d) },
@@ -3096,6 +3145,17 @@
       { id: "d-share", label: "Condividi", icon: I.share, hint: "Invia, stampa, mostra file", children: shareKids },
       { id: "d-del", label: "Elimina", icon: I.trash, danger: true, hint: "Sposta nel cestino (recuperabile)", action: () => trashSelected([d.id]) },
     ];
+    // Reference-only entry: finding its PDF is THE next step — a first-class petal.
+    if (!d.has_file)
+      items.splice(1, 0, {
+        id: "d-findpdf",
+        label: "Trova PDF",
+        icon: I.imp,
+        hint: "Cerca una copia Open Access (arXiv, Unpaywall, OpenAlex, Semantic Scholar) e allegala a questa voce",
+        disabled: !!pdfBatch,
+        action: () => doFindPdf(d),
+      });
+    return items;
   }
 
   /** Selection radial: batch actions on the current multi-selection. */
@@ -3117,6 +3177,19 @@
       { id: "s-print", label: "Stampa", icon: I.print, disabled: printing, hint: "Un unico lavoro di stampa", action: () => printSelected() },
       { id: "s-share", label: "Condividi", icon: I.share, children: shareKids },
     ];
+    // Batch OA-PDF finder over the selected reference-only entries.
+    const noPdf = ids
+      .map((x) => displayed.find((d) => d.id === x))
+      .filter((d): d is DocumentItem => !!d && !d.has_file);
+    if (noPdf.length)
+      items.push({
+        id: "s-findpdf",
+        label: `Trova PDF (${noPdf.length} riferiment${noPdf.length === 1 ? "o" : "i"})`,
+        icon: I.imp,
+        hint: "Cerca e allega la copia Open Access per le voci selezionate senza file (arXiv, Unpaywall, OpenAlex, Semantic Scholar)",
+        disabled: !!pdfBatch,
+        action: () => batchFindPdf(noPdf),
+      });
     // Gate on the LIVE saved state (aiStat), not the Settings-form variable: the
     // form state can lag what's persisted and silently hide these items.
     if (aiStat?.enabled) {
@@ -3247,6 +3320,7 @@
         children: [
           { id: "gc-health", label: "Salute libreria", hint: "File mancanti, PDF senza testo, metadati incompleti…", action: () => openCare("salute") },
           { id: "gc-meta", label: "Recupera metadati mancanti", hint: needsMeta ? `${needsMeta} documenti incompleti — arXiv dal nome file, DOI e titolo dal PDF` : "Nessun documento incompleto al momento", disabled: enriching || needsMeta === 0, action: () => enrichMeta() },
+          { id: "gc-findpdf", label: "Trova PDF dei riferimenti", hint: "Cerca copie Open Access (arXiv, Unpaywall, OpenAlex, Semantic Scholar) per TUTTE le voci senza file e le allega", disabled: !!pdfBatch, action: () => findPdfAllRefs() },
           { id: "gc-gaps", label: "Gap di citazioni", hint: "I DOI più citati dai tuoi paper che ancora non possiedi", action: () => openCare("gap") },
           { id: "gc-dup", label: "Duplicati", hint: "Trova e unisci le copie dello stesso lavoro", action: () => openCare("duplicati") },
           { id: "gt-thumb", label: "Rigenera anteprime", hint: "Ricrea le copertine dal PDF ad alta risoluzione", disabled: rebuildingThumbs, action: () => rebuildThumbs() },
@@ -6112,7 +6186,7 @@
           allegato (quando è stato aggiunto non c'era un PDF Open Access scaricabile).
         </p>
         <div class="refactions">
-          <button class="primary" onclick={refFindPdf} disabled={refPanel.busy} title="Cerca una copia Open Access via Unpaywall/arXiv e allegala a questa voce">
+          <button class="primary" onclick={refFindPdf} disabled={refPanel.busy} title="Cerca una copia Open Access in cascata — arXiv, Unpaywall, OpenAlex, Semantic Scholar (e per titolo se manca il DOI) — e allegala a questa voce">
             {refPanel.busy ? "…" : "Trova PDF (Open Access)"}
           </button>
           <button class="ghost" onclick={() => (editingId = refPanel!.doc.id)}>Modifica metadati</button>
@@ -6189,6 +6263,13 @@
         <span>Metadati: {metaScan.done}/{metaScan.total} — {metaScan.updated} aggiornati</span>
         <div class="bar"><div class="fill" style="width:{metaScan.total ? (metaScan.done / metaScan.total) * 100 : 0}%"></div></div>
         <button class="ghost small" onclick={() => cancelRecoverMetadata()} title="Interrompi il recupero (quanto già aggiornato resta)">Stop</button>
+      </div>
+    {/if}
+    {#if pdfBatch}
+      <div class="toast">
+        <span>Trova PDF: {pdfBatch.done}/{pdfBatch.total} — {pdfBatch.found} allegati</span>
+        <div class="bar"><div class="fill" style="width:{pdfBatch.total ? (pdfBatch.done / pdfBatch.total) * 100 : 0}%"></div></div>
+        <button class="ghost small" onclick={() => (pdfBatchCancel = true)} title="Interrompi la ricerca dei PDF (quelli già allegati restano)">Stop</button>
       </div>
     {/if}
     {#if status}
@@ -6749,7 +6830,7 @@
           <ul>
             <li><strong>Sei vie</strong> (barra → Importa): <strong>PDF dal disco</strong> (anche trascinandoli nella finestra — restano dove sono, l'app li indicizza; i duplicati si riconoscono dal contenuto); <strong>BibTeX .bib</strong> (la tua libreria Zotero/Mendeley); per <strong>identificatore</strong> (DOI / arXiv / ISBN / PMID); <strong>da URL</strong>; <strong>progetto LaTeX (.zip)</strong> — i tuoi paper con la loro bibliografia, marcati «Il mio lavoro»; <strong>Cartella sorvegliata</strong> (importa da sola ciò che ci finisce dentro).</li>
             <li><strong>Dal browser</strong>: copia il link del PDF e torna su Scriptorium — compare «Aggancia» (interruttore in Impostazioni → Connettore); in alternativa il <strong>bookmarklet</strong>, o la Cartella sorvegliata puntata su Download.</li>
-            <li><strong>Riferimenti senza PDF</strong> (aggiunti da ricerca online, citazioni, BibTeX o ID): aprendoli compare il pannello per allegare il file — <strong>Trova PDF</strong> (Open Access) o <strong>Allega</strong> da un link, sulla stessa voce, senza duplicati.</li>
+            <li><strong>Riferimenti senza PDF</strong> (aggiunti da ricerca online, citazioni, BibTeX o ID): aprendoli compare il pannello per allegare il file — <strong>Trova PDF</strong> cerca in cascata su arXiv, Unpaywall, OpenAlex e Semantic Scholar (per titolo se manca il DOI), oppure <strong>Allega</strong> da un link, sulla stessa voce e senza duplicati. La stessa azione è nel <strong>radiale</strong> della scheda, sulla <strong>selezione multipla</strong> e in blocco su tutta la libreria (Cura della libreria → «Trova PDF dei riferimenti»).</li>
           </ul>
         </div>
 
@@ -8507,7 +8588,8 @@
   .exbar { display: flex; align-items: center; gap: 14px; margin: 6px 0 10px; flex-wrap: wrap; }
   .exbar .segbtn { width: auto; padding: 0 14px; font-size: 12px; }
   .exlegend { font-size: 11px; color: var(--faint); display: inline-flex; align-items: center; gap: 6px; }
-  .menu.mappop { width: 270px; }
+  /* Sopra il modale «Esplora citazioni» (z 80): il popup nasceva DIETRO la finestra. */
+  .menu.mappop { width: 300px; z-index: 86; }
   .mapmeta { font-size: 11px; color: var(--faint); margin: 0 4px 6px; }
 
   /* ===== 0.5.1: tag editor, home leggera, coach mark, care tabs ===== */

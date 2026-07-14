@@ -3451,7 +3451,7 @@ dependencies = [
 
 [[package]]
 name = "pdfmanage"
-version = "0.9.15"
+version = "0.9.16"
 dependencies = [
  "ammonia",
  "anyhow",

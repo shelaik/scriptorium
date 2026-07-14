@@ -334,6 +334,52 @@ fn openalex_to_result(w: &Value) -> SearchResult {
     }
 }
 
+/// Open-Access PDF URL for a DOI from the OpenAlex single-work record
+/// (keyless-friendly). Quiet on every failure — the caller runs a fallback
+/// chain and a missing/erroring source must not abort it.
+pub async fn openalex_oa_pdf(client: &reqwest::Client, doi: &str, api_key: &str) -> Option<String> {
+    let key_part = if api_key.trim().is_empty() {
+        String::new()
+    } else {
+        format!("&api_key={}", enc(api_key.trim()))
+    };
+    let url = format!(
+        "https://api.openalex.org/works?filter=doi:{}&select=doi,open_access,best_oa_location&per-page=1{}",
+        enc(&format!("https://doi.org/{}", doi.trim())),
+        key_part
+    );
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: Value = resp.json().await.ok()?;
+    let results = body["results"].as_array()?;
+    let w = results.first()?;
+    w["best_oa_location"]["pdf_url"]
+        .as_str()
+        .or_else(|| w["open_access"]["oa_url"].as_str())
+        .map(str::to_string)
+}
+
+/// Open-Access PDF URL for a DOI from Semantic Scholar (Graph API,
+/// keyless-friendly). Quiet on every failure, like [`openalex_oa_pdf`].
+pub async fn s2_oa_pdf(client: &reqwest::Client, doi: &str, api_key: &str) -> Option<String> {
+    let url = format!(
+        "https://api.semanticscholar.org/graph/v1/paper/DOI:{}?fields=openAccessPdf",
+        enc(doi.trim())
+    );
+    let mut req = client.get(&url);
+    if !api_key.trim().is_empty() {
+        req = req.header("x-api-key", api_key.trim());
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: Value = resp.json().await.ok()?;
+    body["openAccessPdf"]["url"].as_str().map(str::to_string)
+}
+
 /// References (works this paper cites) and citations (works that cite it),
 /// fetched from OpenAlex for the citation-graph explorer.
 #[derive(Debug, Clone, serde::Serialize)]
