@@ -8337,6 +8337,68 @@ fn eval_smart(conn: &Connection, rule_json: &str) -> anyhow::Result<Vec<i64>> {
     }
 }
 
+/// All authors for a set of documents in one query per 900-id chunk (SQLite's
+/// bound-parameter limit), keyed by document id, each list ordered by position.
+/// Replaces a per-row author lookup — the N+1 that made a library refresh scale
+/// linearly with document count under the single DB lock.
+fn load_authors_bulk(conn: &Connection, ids: &[i64]) -> anyhow::Result<std::collections::HashMap<i64, Vec<String>>> {
+    let mut map: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    for chunk in ids.chunks(900) {
+        let placeholders = std::iter::repeat("?").take(chunk.len()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT da.document_id, a.given, a.family
+             FROM document_authors da JOIN authors a ON a.id = da.author_id
+             WHERE da.document_id IN ({placeholders}) ORDER BY da.document_id, da.position"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            let doc_id: i64 = r.get(0)?;
+            let given: Option<String> = r.get(1)?;
+            let family: Option<String> = r.get(2)?;
+            Ok((
+                doc_id,
+                format!("{} {}", given.unwrap_or_default(), family.unwrap_or_default())
+                    .trim()
+                    .to_string(),
+            ))
+        })?;
+        for row in rows {
+            let (doc_id, name) = row?;
+            if !name.is_empty() {
+                map.entry(doc_id).or_default().push(name);
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// All tags for a set of documents in one query per 900-id chunk, keyed by
+/// document id, each list ordered by name. Twin of [`load_authors_bulk`].
+fn load_tags_bulk(conn: &Connection, ids: &[i64]) -> anyhow::Result<std::collections::HashMap<i64, Vec<Tag>>> {
+    let mut map: std::collections::HashMap<i64, Vec<Tag>> = std::collections::HashMap::new();
+    for chunk in ids.chunks(900) {
+        let placeholders = std::iter::repeat("?").take(chunk.len()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT dt.document_id, t.id, t.name, t.color
+             FROM document_tags dt JOIN tags t ON t.id = dt.tag_id
+             WHERE dt.document_id IN ({placeholders}) ORDER BY dt.document_id, t.name"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            let doc_id: i64 = r.get(0)?;
+            Ok((
+                doc_id,
+                Tag { id: r.get(1)?, name: r.get(2)?, color: r.get(3)?, count: 0 },
+            ))
+        })?;
+        for row in rows {
+            let (doc_id, tag) = row?;
+            map.entry(doc_id).or_default().push(tag);
+        }
+    }
+    Ok(map)
+}
+
 fn query_documents(
     conn: &Connection,
     tag_id: Option<i64>,
@@ -8398,31 +8460,15 @@ fn query_documents(
         })?
         .collect::<Result<_, _>>()?;
 
-    let mut author_stmt = conn.prepare(
-        "SELECT a.given, a.family
-         FROM authors a JOIN document_authors da ON da.author_id = a.id
-         WHERE da.document_id = ?1 ORDER BY da.position",
-    )?;
+    // Authors + tags for every row in O(1) queries (chunked), not O(N).
+    let ids: Vec<i64> = base.iter().map(|r| r.0).collect();
+    let mut authors_map = load_authors_bulk(conn, &ids)?;
+    let mut tags_map = load_tags_bulk(conn, &ids)?;
 
     let mut docs = Vec::with_capacity(base.len());
     for (id, title, year, venue, doi, thumb_path, added_at, is_read, favorite, github_url, path, citekey, last_page, page_count, has_summary, is_own) in base {
         let pub_status = discovery::classify_pub_status(doi.as_deref(), venue.as_deref(), path.as_deref());
         let paper_url = paper_link_for(doi.as_deref(), path.as_deref());
-        let authors: Vec<String> = author_stmt
-            .query_map(params![id], |r| {
-                let given: Option<String> = r.get(0)?;
-                let family: Option<String> = r.get(1)?;
-                Ok(format!(
-                    "{} {}",
-                    given.unwrap_or_default(),
-                    family.unwrap_or_default()
-                )
-                .trim()
-                .to_string())
-            })?
-            .filter_map(|x| x.ok())
-            .filter(|s| !s.is_empty())
-            .collect();
 
         docs.push(Document {
             id,
@@ -8430,8 +8476,8 @@ fn query_documents(
             year,
             venue,
             doi,
-            authors,
-            tags: load_tags(conn, id).unwrap_or_default(),
+            authors: authors_map.remove(&id).unwrap_or_default(),
+            tags: tags_map.remove(&id).unwrap_or_default(),
             has_thumb: thumb_path.map(|t| !t.is_empty()).unwrap_or(false),
             has_file: path.as_deref().map(|p| !p.starts_with("ref:")).unwrap_or(false),
             has_summary: has_summary != 0,

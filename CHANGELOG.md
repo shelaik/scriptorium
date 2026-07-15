@@ -2,6 +2,11 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.24 — Prestazioni libreria grande + reimport dal Cestino
+- **Griglia più leggera**: le schede fuori schermo non vengono più disegnate finché non ti avvicini (grazie a `content-visibility`) — scorrimento e primo caricamento fluidi anche con migliaia di documenti.
+- **Meno lavoro sul database a ogni aggiornamento**: autori e tag di tutta la libreria si leggono ora in poche query in blocco invece di due per ogni documento (era un classico «N+1» che rallentava import, tag, preferiti, cambio filtro man mano che la libreria cresce).
+- **Reimport dal Cestino più intelligente**: reimportare (trascinamento / file) un paper che è nel Cestino ora lo **ripristina con tutto** (tag, note, annotazioni) anche se lo riprendi da una **cartella diversa** — prima solo dallo stesso percorso; se ne trovavi una copia altrove restava un «duplicato» invisibile. La riscansione della cartella sorvegliata continua a non ripristinare nulla da sola (il Cestino resta il Cestino).
+
 ## 0.9.23 — Irrobustimento: niente crash pdfium, backup coerenti, link sicuri
 Giro di consolidamento dopo un audit interno (24 punti deboli confermati e corretti). Nessuna funzione nuova: robustezza, integrità dei dati e sicurezza.
 - **Niente più crash nativo (0xc0000409)**: sei operazioni pdfium (indice RAG, rigenerazione anteprine, OCR, estrazione tabelle/testo di una regione) non prendevano il lock che serializza il lavoro su tutto il documento; ora sì. Prima potevano andare in conflitto con un import (cartella sorvegliata o manuale) e far chiudere l'app di colpo.

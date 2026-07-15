@@ -623,7 +623,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.23";
+  const APP_VERSION = "0.9.24";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -7879,6 +7879,12 @@
     position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
     overflow: hidden; transition: border-color var(--ease), box-shadow var(--ease), transform var(--ease); cursor: pointer; text-align: left;
     box-shadow: var(--shadow-sm);
+    /* Skip rendering/layout of off-screen cards (each carries a base64 cover <img>):
+       the browser paints them only as they near the viewport. `auto` in the intrinsic
+       size makes it remember each card's real height after first render, so the
+       scrollbar stays stable. Big win on large libraries; no windowing JS needed. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 320px;
   }
   .card:hover { border-color: var(--accent-soft2); box-shadow: var(--shadow-md); transform: translateY(-3px); }
   .dots {

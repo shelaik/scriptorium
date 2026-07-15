@@ -122,11 +122,14 @@ fn find_existing(conn: &Connection, hash: &str, path: &str) -> Result<Option<i64
 /// silently defeat the Trash and resurrect merge_documents' soft-deleted duplicates.
 pub fn commit_import(conn: &Connection, p: &PreparedImport, restore_trashed: bool) -> Result<ImportOutcome> {
     if let Some(existing) = find_existing(conn, &p.hash, &p.path)? {
-        // A manual re-import of the exact file whose twin is in the Trash should bring it
-        // back. Restore only a twin at the SAME content-addressed path: that update leaves
-        // path unchanged (no UNIQUE(path) risk) and points at a file we know is present.
-        // A hash-only match with a different path stays a "duplicate" (imported=false).
+        // A manual re-import of a paper whose twin is in the Trash should bring it back
+        // (with its tags/notes/annotations) instead of reporting an invisible "duplicate".
         if restore_trashed {
+            // 1) Trashed twin at the SAME path (re-dropping the exact file): restore in
+            //    place. The UPDATE leaves path unchanged, so no UNIQUE(path) risk. Refresh
+            //    the file-derived facts (the bytes at this path may have changed since it
+            //    was trashed): hash, cover, fulltext (re-indexes FTS via the update
+            //    trigger) and page count. Title is left as-is so a manual edit survives.
             let trashed_same_path: Option<i64> = conn
                 .query_row(
                     "SELECT id FROM documents WHERE path = ?1 AND deleted_at IS NOT NULL LIMIT 1",
@@ -135,10 +138,6 @@ pub fn commit_import(conn: &Connection, p: &PreparedImport, restore_trashed: boo
                 )
                 .optional()?;
             if let Some(tid) = trashed_same_path {
-                // Refresh the file-derived facts too (the file at this path may have been
-                // replaced with different bytes since it was trashed): hash, cover,
-                // fulltext (re-indexes FTS via the update trigger) and page count. Title
-                // is left as-is so a user's manual edit survives the round-trip.
                 conn.execute(
                     "UPDATE documents SET deleted_at = NULL, file_hash = ?2, thumb_path = ?3,
                      fulltext = ?4, page_count = COALESCE(?5, page_count) WHERE id = ?1",
@@ -154,6 +153,46 @@ pub fn commit_import(conn: &Connection, p: &PreparedImport, restore_trashed: boo
                     document_id: tid,
                     imported: true,
                 });
+            }
+            // 2) A trashed twin holds the SAME bytes at a DIFFERENT path (re-dragged from a
+            //    new location): restore it and repoint it here. Skip if a LIVE row already
+            //    holds these bytes or this path — that is a genuine duplicate. With no such
+            //    live row and no trashed row at p.path (branch 1), this path is provably
+            //    free, so repointing cannot hit UNIQUE(path).
+            let live_dup: bool = conn
+                .query_row(
+                    "SELECT 1 FROM documents WHERE (file_hash = ?1 OR path = ?2) AND deleted_at IS NULL LIMIT 1",
+                    params![p.hash, p.path],
+                    |_| Ok(true),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !live_dup {
+                let trashed_by_hash: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM documents WHERE file_hash = ?1 AND deleted_at IS NOT NULL LIMIT 1",
+                        params![p.hash],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(tid) = trashed_by_hash {
+                    conn.execute(
+                        "UPDATE documents SET deleted_at = NULL, path = ?2, file_hash = ?3,
+                         thumb_path = ?4, fulltext = ?5, page_count = COALESCE(?6, page_count) WHERE id = ?1",
+                        params![
+                            tid,
+                            p.path,
+                            p.hash,
+                            p.thumb_path,
+                            p.fulltext,
+                            (p.page_count > 0).then_some(p.page_count),
+                        ],
+                    )?;
+                    return Ok(ImportOutcome {
+                        document_id: tid,
+                        imported: true,
+                    });
+                }
             }
         }
         return Ok(ImportOutcome {
