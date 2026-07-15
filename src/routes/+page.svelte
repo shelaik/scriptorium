@@ -626,7 +626,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.26";
+  const APP_VERSION = "0.9.27";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -7035,7 +7035,7 @@
         <div class="helpsec">
           <h3>Importare</h3>
           <ul>
-            <li><strong>Sei vie</strong> (barra → Importa): <strong>PDF dal disco</strong> (anche trascinandoli nella finestra — restano dove sono, l'app li indicizza; i duplicati si riconoscono dal contenuto); <strong>BibTeX .bib</strong> (la tua libreria Zotero/Mendeley); per <strong>identificatore</strong> (DOI / arXiv / ISBN / PMID); <strong>da URL</strong>; <strong>progetto LaTeX (.zip)</strong> — i tuoi paper con la loro bibliografia, marcati «Il mio lavoro»; <strong>Cartella sorvegliata</strong> (importa da sola ciò che ci finisce dentro).</li>
+            <li><strong>Sei vie</strong> (barra → Importa): <strong>PDF dal disco</strong> (anche trascinandoli nella finestra — restano dove sono, l'app li indicizza; i duplicati si riconoscono dal contenuto); <strong>Da gestore bibliografico</strong> — l'export di <strong>Zotero, Mendeley, EndNote, JabRef…</strong> in <strong>.bib / .ris / CSL-JSON</strong>: porta metadati, aggancia i PDF (dal campo <em>file</em> o da una cartella d'export che indichi) e trasforma le parole chiave in <strong>tag</strong>, senza doppioni (dedup per DOI e per contenuto del PDF; i lavori già nel Cestino tornano visibili); per <strong>identificatore</strong> (DOI / arXiv / ISBN / PMID); <strong>da URL</strong>; <strong>progetto LaTeX (.zip)</strong> — i tuoi paper con la loro bibliografia, marcati «Il mio lavoro»; <strong>Cartella sorvegliata</strong> (importa da sola ciò che ci finisce dentro).</li>
             <li><strong>Dal browser</strong>: copia il link del PDF e torna su Scriptorium — compare «Aggancia» (interruttore in Impostazioni → Connettore); in alternativa il <strong>bookmarklet</strong>, o la Cartella sorvegliata puntata su Download.</li>
             <li><strong>Riferimenti senza PDF</strong> (aggiunti da ricerca online, citazioni, BibTeX o ID): <strong>Trova PDF…</strong> (radiale della scheda, o aprendo la voce) mostra i <strong>candidati</strong> trovati online per identificativo e per titolo (arXiv, Unpaywall, OpenAlex, Semantic Scholar, Crossref) con le prove — «Scarica e allega» quello giusto, «Apri pagina» per controllare, o incolla un link diretto. Sulla <strong>selezione multipla</strong> e in blocco (Cura della libreria → «Trova PDF dei riferimenti») resta automatico: allega solo abbinamenti sicuri, ora anche per titolo su arXiv/S2.</li>
           </ul>
@@ -7222,6 +7222,8 @@
           <dl class="faq">
             <dt>…aggiungere il PDF che ho appena scaricato col browser?</dt>
             <dd>Copia il link del PDF e torna su Scriptorium: compare «Aggancia». Oppure punta la Cartella sorvegliata su Download: entra da solo.</dd>
+            <dt>…portare la mia libreria da Zotero, Mendeley o EndNote?</dt>
+            <dd>Nel gestore fai <strong>Esporta</strong> in <strong>BibTeX/BibLaTeX, RIS o CSL-JSON</strong> (per avere anche i PDF, in Zotero spunta «Esporta file»). Poi barra → Importa → <strong>Da gestore bibliografico…</strong>, scegli il file e — se i PDF stanno in una cartella a parte — indicala quando te lo chiede. Metadati, PDF e parole chiave (→ tag) entrano insieme, senza doppioni.</dd>
             <dt>…sistemare un paper arrivato senza titolo o con metadati sbagliati?</dt>
             <dd>Clic su «✦ N senza metadati» in alto per il recupero in blocco (solo abbinamenti sicuri). Per il caso singolo: tasto destro → Organizza → <strong>Recupera metadati…</strong> mostra i candidati trovati online con le prove nel PDF e applichi quello giusto (o incolli un DOI/arXiv). Ritocchi a mano: Modifica metadati. Per tutta la libreria: Impostazioni → Manutenzione → «Verifica e ripara metadati».</dd>
             <dt>…copiare una citazione pronta?</dt>

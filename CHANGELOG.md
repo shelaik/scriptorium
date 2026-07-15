@@ -2,6 +2,10 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.27 — Guida aggiornata per l'import
+- La **guida in-app** ora descrive «**Da gestore bibliografico**» al posto del vecchio «BibTeX .bib» (Zotero/Mendeley/EndNote/JabRef, `.bib/.ris/CSL-JSON`, con PDF + tag, senza doppioni).
+- Nuova **FAQ**: «…portare la mia libreria da Zotero, Mendeley o EndNote?» con i passi (Esporta → «Esporta file» per i PDF → Importa → Da gestore bibliografico). Solo documentazione, nessun cambiamento di comportamento.
+
 ## 0.9.26 — Importa da Zotero, Mendeley e altri gestori
 - **Nuovo: «Importa → Da gestore bibliografico…»**. Porta la tua libreria dentro Scriptorium da quasi ogni gestore di riferimenti — **Zotero, Mendeley, EndNote, JabRef, Papers, Citavi…** — tramite il loro export: **BibTeX/BibLaTeX (`.bib`)**, **RIS (`.ris`)** o **CSL-JSON (`.json`)**. Un unico importatore li riconosce tutti (dal contenuto, non solo dall'estensione).
 - **Con i PDF e i tag**: se l'export tiene i percorsi dei PDF nelle voci (es. BibLaTeX di Zotero/JabRef con il campo `file`), i PDF vengono **agganciati** automaticamente; in più puoi indicare una **cartella** con i file esportati (Zotero «Esporta file»). Le **parole chiave** delle voci diventano **tag**. Autori, anno, rivista, DOI e abstract vengono importati puliti.
