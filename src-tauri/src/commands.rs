@@ -16,6 +16,7 @@ use crate::obsidian;
 use crate::pdf;
 use crate::projects;
 use crate::rag;
+use crate::refimport;
 use crate::secret;
 use crate::table;
 use crate::tablestruct;
@@ -4015,6 +4016,444 @@ pub fn import_bibtex(app: AppHandle, path: String) -> Result<AddSummary, String>
             None => summary.skipped += 1,
         }
     }
+    Ok(summary)
+}
+
+/// Summary of a reference-manager import (.bib / .ris / CSL-JSON).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RefImportSummary {
+    /// Detected format ("BibTeX" | "RIS" | "CSL-JSON").
+    pub format: String,
+    /// Entries parsed from the file.
+    pub entries: usize,
+    /// New library items created (reference-only or with an attached PDF).
+    pub added: usize,
+    /// Items that got a PDF attached (new import or an upgrade of a reference-only item).
+    pub pdfs_attached: usize,
+    /// Entries already present in the library.
+    pub duplicates: usize,
+    /// Distinct (document, tag) links created from keywords.
+    pub tags_applied: usize,
+    /// DOIs recovered online (title → Crossref) for entries that had none.
+    pub dois_resolved: usize,
+    pub errors: Vec<String>,
+}
+
+/// Normalize an entry's DOI: from the explicit field, else mined from a genuine
+/// doi.org URL. Lowercased and unwrapped by `metadata::extract_doi`.
+fn norm_doi(p: &refimport::ParsedRef) -> Option<String> {
+    p.doi
+        .as_deref()
+        .and_then(|d| metadata::extract_doi(d))
+        .or_else(|| {
+            p.url
+                .as_deref()
+                .filter(|u| u.to_lowercase().contains("doi.org/"))
+                .and_then(|u| metadata::extract_doi(u))
+        })
+        .map(|d| d.to_lowercase())
+}
+
+/// Map a parsed reference to a reference-only item (no PDF), using a pre-normalized DOI.
+fn parsed_to_ref(p: &refimport::ParsedRef, doi: Option<String>) -> Option<metadata::ResolvedRef> {
+    if p.title.is_none() && doi.is_none() {
+        return None;
+    }
+    let path_id = match &doi {
+        Some(d) => format!("ref:doi:{d}"),
+        None => {
+            let token = if !p.key.is_empty() { p.key.clone() } else { p.title.clone().unwrap_or_default() };
+            format!("ref:import:{}", safe_component(&token))
+        }
+    };
+    let authors = p
+        .authors
+        .iter()
+        .cloned()
+        .map(|(given, family)| metadata::Author { given, family })
+        .collect();
+    Some(metadata::ResolvedRef {
+        path_id,
+        doi,
+        meta: metadata::CrossrefMeta {
+            title: p.title.clone(),
+            venue: p.venue.clone(),
+            year: p.year,
+            abstract_text: p.abstract_text.clone(),
+            authors,
+            references: Vec::new(),
+            raw_json: String::new(),
+        },
+    })
+}
+
+/// Locate a local PDF for an entry: an existing absolute path from the `file` field,
+/// or a same-basename file in the user-picked export folder.
+fn resolve_pdf(files: &[String], pdf_dir: Option<&Path>) -> Option<PathBuf> {
+    for f in files {
+        if !f.to_ascii_lowercase().ends_with(".pdf") {
+            continue;
+        }
+        let p = Path::new(f);
+        if p.is_file() {
+            return Some(p.to_path_buf());
+        }
+        // Or the path RELATIVE to the chosen export folder (Zotero "Export Files"
+        // keeps files/<n>/name.pdf). We deliberately do NOT fall back to a bare
+        // basename match: two entries can share a filename, and attaching the WRONG
+        // PDF (and its tags) to a paper is worse than not attaching one — precision first.
+        if let Some(dir) = pdf_dir {
+            let rel = dir.join(f);
+            if rel.is_file() {
+                return Some(rel);
+            }
+        }
+    }
+    None
+}
+
+/// Copy a PDF into `papers/` (content-addressed) and analyze it via pdfium, off the
+/// DB lock (the pdfium lock is taken only for the FFI call).
+fn prepare_pdf(
+    state: &AppState,
+    papers_dir: &Path,
+    thumb: &Path,
+    src: &Path,
+) -> Result<import::PreparedImport, String> {
+    let bytes = std::fs::read(src).map_err(|e| format!("Lettura PDF {}: {e}", src.display()))?;
+    let hash = import::sha256_hex(&bytes);
+    let dest = papers_dir.join(format!("{hash}.pdf"));
+    if !dest.exists() {
+        std::fs::write(&dest, &bytes).map_err(|e| format!("Copia PDF nella libreria: {e}"))?;
+    }
+    let _g = state.pdfium_lock.lock();
+    import::prepare_import(&state.pdfium, thumb, &dest).map_err(|e| format!("Analisi PDF: {e:#}"))
+}
+
+/// Insert `(given, family)` authors for a document (mirrors `create_reference`).
+fn insert_authors(conn: &Connection, doc_id: i64, authors: &[(Option<String>, Option<String>)]) {
+    for (pos, (given, family)) in authors.iter().enumerate() {
+        if given.is_none() && family.is_none() {
+            continue;
+        }
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO authors (family, given) VALUES (?1, ?2)",
+            params![family, given],
+        );
+        let aid: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM authors WHERE family IS ?1 AND given IS ?2",
+                params![family, given],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        if let Some(aid) = aid {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO document_authors (document_id, author_id, position) VALUES (?1, ?2, ?3)",
+                params![doc_id, aid, pos as i64],
+            );
+        }
+    }
+}
+
+/// After importing a PDF for a brand-new work, overlay the bibliography's clean
+/// metadata (the bib title wins over the PDF-extracted one) and insert its authors.
+fn enrich_document(conn: &Connection, id: i64, r: &refimport::ParsedRef, doi: &Option<String>) {
+    let _ = conn.execute(
+        "UPDATE documents SET title = COALESCE(?2, title), year = COALESCE(?3, year), \
+         venue = COALESCE(?4, venue), abstract = COALESCE(?5, abstract) WHERE id = ?1",
+        params![id, r.title, r.year, r.venue, r.abstract_text],
+    );
+    // DOI is UNIQUE: set it only if free, so a colliding doi can never error the import.
+    if let Some(d) = doi {
+        let _ = conn.execute(
+            "UPDATE documents SET doi = ?2 WHERE id = ?1 \
+             AND NOT EXISTS (SELECT 1 FROM documents WHERE doi = ?2 AND id <> ?1)",
+            params![id, d],
+        );
+    }
+    insert_authors(conn, id, &r.authors);
+    let _ = crate::db::citekey::auto_citekey(conn, id);
+}
+
+/// Turn an existing reference-only row (no file) into a real document by attaching a
+/// freshly-prepared PDF. The FTS `documents_au*` triggers keep doc_fts in sync.
+fn upgrade_to_pdf(
+    conn: &Connection,
+    id: i64,
+    p: &import::PreparedImport,
+    bib_title: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE documents SET path = ?2, file_hash = ?3, thumb_path = ?4, page_count = ?5, \
+         fulltext = ?6, title = COALESCE(?7, title, ?8), github_url = COALESCE(github_url, ?9) \
+         WHERE id = ?1",
+        params![
+            id,
+            p.path,
+            p.hash,
+            p.thumb_path,
+            (p.page_count > 0).then_some(p.page_count),
+            p.fulltext,
+            bib_title,
+            p.title,
+            p.github_url,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Map keyword strings to tags and link them to a document; returns links created.
+fn apply_tags(conn: &Connection, doc_id: i64, keywords: &[String]) -> usize {
+    let mut created = 0usize;
+    for kw in keywords {
+        let name = kw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let _ = conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", params![name]);
+        let tid: Option<i64> = conn
+            .query_row("SELECT id FROM tags WHERE name = ?1", params![name], |row| row.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        if let Some(tid) = tid {
+            if let Ok(n) = conn.execute(
+                "INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?1, ?2)",
+                params![doc_id, tid],
+            ) {
+                created += n;
+            }
+        }
+    }
+    created
+}
+
+/// Import a bibliography exported by any reference manager (BibTeX/BibLaTeX, RIS, or
+/// CSL-JSON): create library items, attach PDFs when found (from the `file` field or
+/// a chosen export folder), and map keywords to tags. fs + pdfium heavy → blocking
+/// thread. Only online DOI recovery touches the network (gated on the discovery opt-in).
+#[tauri::command]
+pub async fn import_reference_manager(
+    app: AppHandle,
+    path: String,
+    pdf_dir: Option<String>,
+) -> Result<RefImportSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        import_reference_manager_inner(&app, &path, pdf_dir.as_deref())
+    })
+    .await
+    .map_err(|e| format!("Task fallito: {e}"))?
+}
+
+fn import_reference_manager_inner(
+    app: &AppHandle,
+    path: &str,
+    pdf_dir: Option<&str>,
+) -> Result<RefImportSummary, String> {
+    let mut text = std::fs::read_to_string(path).map_err(|e| format!("Lettura file: {e}"))?;
+    if text.starts_with('\u{feff}') {
+        text.remove(0); // strip a UTF-8 BOM so CSL-JSON parses and the first RIS tag is seen
+    }
+    let ext = Path::new(path).extension().and_then(|e| e.to_str());
+    let format = refimport::detect_format(ext, &text);
+    let refs = refimport::parse(&text, format);
+
+    let state = app.state::<AppState>();
+    let data_dir = app.path().app_data_dir().map_err(|e| format!("app_data_dir: {e}"))?;
+    let papers_dir = data_dir.join("papers");
+    let _ = std::fs::create_dir_all(&papers_dir);
+    let thumb = thumb_dir(app);
+    let _ = std::fs::create_dir_all(&thumb);
+    let pdf_dir_path = pdf_dir.map(PathBuf::from);
+
+    let mut summary = RefImportSummary {
+        format: format.label().to_string(),
+        entries: refs.len(),
+        added: 0,
+        pdfs_attached: 0,
+        duplicates: 0,
+        tags_applied: 0,
+        dois_resolved: 0,
+        errors: Vec::new(),
+    };
+
+    // --- 1. Normalize DOIs and recover missing ones online BEFORE dedup, so the
+    //        DOI-based dedup can match. Network I/O runs with NO DB lock held.
+    let mut norm_dois: Vec<Option<String>> = refs.iter().map(norm_doi).collect();
+    let need_resolve = refs.iter().zip(&norm_dois).filter(|(r, d)| d.is_none() && r.title.is_some()).count();
+    if need_resolve > 0 {
+        let (online, email) = {
+            let conn = state.db.lock();
+            (
+                setting(&conn, "discovery_enabled").as_deref() == Some("1"),
+                setting(&conn, "discovery_email").filter(|s| !s.trim().is_empty()),
+            )
+        };
+        if online {
+            if let Ok(client) = metadata::http_client(email.as_deref()) {
+                const TOTAL_MAX: usize = 600;
+                tauri::async_runtime::block_on(async {
+                    let mut total = 0usize;
+                    for i in 0..refs.len() {
+                        if norm_dois[i].is_some() || total >= TOTAL_MAX {
+                            continue;
+                        }
+                        let Some(title) = refs[i].title.clone() else { continue };
+                        total += 1;
+                        let res = tokio::time::timeout(
+                            std::time::Duration::from_secs(20),
+                            metadata::crossref_search_title(&client, &detex_title(&title), email.as_deref()),
+                        )
+                        .await;
+                        if let Ok(Ok(Some((doi, _)))) = res {
+                            norm_dois[i] = Some(doi.to_lowercase());
+                            summary.dois_resolved += 1;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                });
+            }
+        }
+    }
+
+    // --- 2. Import each entry: attach a PDF when found, else create a reference-only
+    //        item; map keywords to tags. Dedup by DOI (UNIQUE) and file hash so a
+    //        re-import never creates invisible duplicates.
+    for (i, r) in refs.iter().enumerate() {
+        let doi = norm_dois[i].clone();
+        let pdf_path = resolve_pdf(&r.files, pdf_dir_path.as_deref());
+        // Prepare the PDF off the DB lock (pdfium); a copy failure is non-fatal.
+        let prepared = match &pdf_path {
+            Some(src) => match prepare_pdf(&state, &papers_dir, &thumb, src) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    summary.errors.push(e);
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let mut conn = state.db.lock();
+        // Match ANY row with this DOI (UNIQUE ⇒ at most one, live OR trashed).
+        let existing: Option<(i64, Option<String>, bool)> = doi.as_ref().and_then(|d| {
+            conn.query_row(
+                "SELECT id, file_hash, deleted_at IS NOT NULL FROM documents WHERE doi = ?1 LIMIT 1",
+                params![d],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        });
+        // A DOI match sitting in the Trash means the user is re-importing a work they
+        // had trashed → restore it (same intent as commit_import's restore_trashed), so
+        // the import never lands on an invisible row and is reported honestly.
+        if let Some((id, _, true)) = &existing {
+            let _ = conn.execute("UPDATE documents SET deleted_at = NULL WHERE id = ?1", params![id]);
+        }
+        let existing = existing.map(|(id, fh, _)| (id, fh));
+
+        let doc_id: Option<i64> = match (existing, &prepared) {
+            // Existing reference-only item + a PDF now available → upgrade in place, but
+            // only if those exact bytes don't already back ANOTHER row (else the
+            // path = papers/<hash>.pdf UPDATE would hit UNIQUE(path) and error out).
+            (Some((id, None)), Some(p)) => {
+                let clash: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM documents WHERE (file_hash = ?2 OR path = ?3) AND id <> ?1 LIMIT 1",
+                        params![id, p.hash, p.path],
+                        |_| Ok(true),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false);
+                if clash {
+                    // The PDF is already in the library under another row; leave the
+                    // reference as-is rather than collide. Still tagged below.
+                    summary.duplicates += 1;
+                    Some(id)
+                } else {
+                    match upgrade_to_pdf(&conn, id, p, r.title.as_deref()) {
+                        Ok(()) => {
+                            summary.pdfs_attached += 1;
+                            Some(id)
+                        }
+                        Err(e) => {
+                            summary.errors.push(format!("Aggancio PDF: {e:#}"));
+                            summary.duplicates += 1;
+                            Some(id)
+                        }
+                    }
+                }
+            }
+            // Already present (already has a file, or no new PDF) → duplicate; still tag it.
+            (Some((id, _)), _) => {
+                summary.duplicates += 1;
+                Some(id)
+            }
+            // New work with a PDF → import + overlay clean metadata + authors.
+            (None, Some(p)) => match import::commit_import(&conn, p, true) {
+                Ok(outcome) => {
+                    if outcome.imported {
+                        enrich_document(&conn, outcome.document_id, r, &doi);
+                        summary.added += 1;
+                        summary.pdfs_attached += 1;
+                    } else {
+                        summary.duplicates += 1;
+                    }
+                    Some(outcome.document_id)
+                }
+                Err(e) => {
+                    summary.errors.push(format!("Salvataggio PDF: {e:#}"));
+                    None
+                }
+            },
+            // New work, no PDF → reference-only item.
+            (None, None) => match parsed_to_ref(r, doi.clone()) {
+                Some(rref) => match create_reference(&mut conn, &rref) {
+                    Ok(Some(id)) => {
+                        summary.added += 1;
+                        Some(id)
+                    }
+                    Ok(None) => {
+                        summary.duplicates += 1;
+                        // Re-find the matched row; if it's in the Trash, restore it so a
+                        // re-import never leaves a DOI-less reference invisible (mirrors the
+                        // DOI-match restore above — the user is importing it, so they want it).
+                        let found: Option<(i64, bool)> = conn
+                            .query_row(
+                                "SELECT id, deleted_at IS NOT NULL FROM documents WHERE path = ?1 OR (doi IS NOT NULL AND doi = ?2) LIMIT 1",
+                                params![rref.path_id, rref.doi],
+                                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+                            )
+                            .optional()
+                            .ok()
+                            .flatten();
+                        if let Some((id, true)) = found {
+                            let _ = conn.execute("UPDATE documents SET deleted_at = NULL WHERE id = ?1", params![id]);
+                        }
+                        found.map(|(id, _)| id)
+                    }
+                    Err(e) => {
+                        summary.errors.push(format!("{}: {e:#}", r.key));
+                        None
+                    }
+                },
+                None => None,
+            },
+        };
+
+        if let Some(id) = doc_id {
+            summary.tags_applied += apply_tags(&conn, id, &r.keywords);
+        }
+    }
+
+    let _ = app.emit("library-changed", ());
     Ok(summary)
 }
 

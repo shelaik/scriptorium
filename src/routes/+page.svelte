@@ -74,7 +74,7 @@
     getConnectorInfo,
     setConnectorEnabled,
     type ConnectorInfo,
-    importBibtex,
+    importReferenceManager,
     importLatexZip,
     findPdf,
     hfResources,
@@ -626,7 +626,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.25";
+  const APP_VERSION = "0.9.26";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -1273,23 +1273,40 @@
     await handleImport(Array.isArray(selected) ? selected : [selected]);
   }
 
-  async function importBibtexDialog() {
+  async function importRefManagerDialog() {
     const file = await open({
       multiple: false,
-      filters: [{ name: "BibTeX / RIS", extensions: ["bib", "bibtex", "ris", "txt"] }],
+      filters: [
+        { name: "Bibliografia (BibTeX / RIS / CSL-JSON)", extensions: ["bib", "bibtex", "ris", "json", "csljson", "csl", "txt"] },
+      ],
     });
     if (typeof file !== "string") return;
-    status = "Importo riferimenti…";
+    // Optionally point at the export's PDF folder (Zotero "Export Files", etc.) so
+    // attachments get pulled in. Skippable — if the file itself carries PDF paths,
+    // those are used automatically.
+    let pdfDir: string | undefined;
+    if (await confirmAsk(
+      "Indicare una cartella con i PDF esportati?\n\nServe solo se la tua esportazione tiene i PDF in una cartella a parte (es. Zotero «Esporta file»). Se i percorsi dei PDF sono già dentro il file, puoi saltare.",
+      "Scegli cartella…",
+      false,
+    )) {
+      const dir = await open({ directory: true });
+      if (typeof dir === "string") pdfDir = dir;
+    }
+    status = "Importo la bibliografia…";
     try {
-      const res = await importBibtex(file);
+      const res = await importReferenceManager(file, pdfDir);
       const parts = [`${res.added} aggiunti`];
-      if (res.skipped) parts.push(`${res.skipped} saltati`);
+      if (res.pdfs_attached) parts.push(`${res.pdfs_attached} con PDF`);
+      if (res.tags_applied) parts.push(`${res.tags_applied} tag`);
+      if (res.duplicates) parts.push(`${res.duplicates} già presenti`);
+      if (res.dois_resolved) parts.push(`${res.dois_resolved} DOI recuperati`);
       if (res.errors.length) parts.push(`${res.errors.length} errori`);
-      status = "BibTeX: " + parts.join(" · ");
+      status = `${res.format}: ` + (res.entries ? parts.join(" · ") : "nessuna voce trovata nel file");
       await loadDocs();
       await loadSidebar();
     } catch (e) {
-      status = "Errore import BibTeX: " + e;
+      status = "Errore import bibliografia: " + e;
     }
   }
 
@@ -3339,7 +3356,7 @@
         hint: "PDF, BibTeX, identificatori, URL",
         children: [
           { id: "gi-pdf", label: "PDF dal disco…", action: () => importViaDialog() },
-          { id: "gi-bib", label: "Da BibTeX (.bib)…", hint: "Libreria Zotero/Mendeley", action: () => importBibtexDialog() },
+          { id: "gi-bib", label: "Da gestore bibliografico…", hint: "Zotero, Mendeley, EndNote… (.bib/.ris/CSL-JSON) + PDF + tag", action: () => importRefManagerDialog() },
           { id: "gi-tex", label: "Progetto LaTeX (.zip)…", hint: "I tuoi paper: PDF + bibliografia", action: () => importLatexDialog() },
           { id: "gi-id", label: "Per identificatore…", hint: "DOI / arXiv / ISBN / PMID", action: () => (idModal = true) },
           { id: "gi-url", label: "Da URL…", hint: "Scarica un PDF da un link", action: () => openUrlModal() },

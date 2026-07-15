@@ -66,6 +66,23 @@ export const documentsByAuthor = (name: string) =>
 export const importBibtex = (path: string) =>
   invoke<{ added: number; skipped: number; errors: string[] }>("import_bibtex", { path });
 
+export interface RefImportSummary {
+  format: string;
+  entries: number;
+  added: number;
+  pdfs_attached: number;
+  duplicates: number;
+  tags_applied: number;
+  dois_resolved: number;
+  errors: string[];
+}
+/** Import a bibliography exported by any reference manager (BibTeX/BibLaTeX, RIS,
+ *  CSL-JSON): creates library items, attaches PDFs found in the entries' `file`
+ *  field or in an optional export folder, and maps keywords to tags. If online
+ *  discovery is on, recovers missing DOIs (title → Crossref). */
+export const importReferenceManager = (path: string, pdfDir?: string) =>
+  invoke<RefImportSummary>("import_reference_manager", { path, pdfDir: pdfDir ?? null });
+
 export interface LatexImportSummary {
   imported: number;
   duplicates: number;
