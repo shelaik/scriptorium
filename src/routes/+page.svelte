@@ -85,6 +85,9 @@
     setRead,
     setFavorite,
     backupLibrary,
+    inspectBackup,
+    stageRestore,
+    restartApp,
     getAiSettings,
     setAiSettings,
     aiListModels,
@@ -623,7 +626,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.24";
+  const APP_VERSION = "0.9.25";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -1022,6 +1025,50 @@
       status = "Backup salvato: " + path;
     } catch (e) {
       status = "Errore backup: " + e;
+    }
+  }
+  async function doRestoreFolder() {
+    const dir = await open({ directory: true, multiple: false, title: "Scegli la cartella di backup (contiene pdfmanage.db)" });
+    if (!dir || Array.isArray(dir)) return;
+    await restoreFrom(dir);
+  }
+  async function doRestoreDbFile() {
+    const f = await open({
+      directory: false,
+      multiple: false,
+      title: "Scegli un file .db di backup",
+      filters: [{ name: "Database", extensions: ["db"] }],
+    });
+    if (!f || Array.isArray(f)) return;
+    await restoreFrom(f);
+  }
+  async function restoreFrom(source: string) {
+    let info;
+    try {
+      info = await inspectBackup(source);
+    } catch (e) {
+      status = "Backup non valido: " + e;
+      return;
+    }
+    const kind = info.full
+      ? "libreria completa (database + PDF + note + progetti)"
+      : "solo il database (catalogo, tag, grafo, annotazioni)";
+    const ok = await confirmAsk(
+      `Ripristinare da questo backup?\n\n• ${info.doc_count} documenti\n• ${kind}\n\nLa libreria ATTUALE verrà sostituita (ne viene salvata prima una copia di sicurezza in backups/). L'app si riavvierà per applicare il ripristino.`,
+      "Ripristina e riavvia",
+      true,
+    );
+    if (!ok) return;
+    try {
+      await stageRestore(source);
+    } catch (e) {
+      status = "Non riesco a preparare il ripristino: " + e;
+      return;
+    }
+    try {
+      await restartApp();
+    } catch {
+      status = "Ripristino pronto: verrà applicato al prossimo avvio di Scriptorium.";
     }
   }
 
@@ -7421,6 +7468,13 @@
             {:else if settingsTab === "backup"}
               <p class="dimtext">Salva una copia completa (database + PDF + miniature) in una cartella a tua scelta.</p>
               <button class="ghost" onclick={doBackup}>Scegli cartella e salva backup…</button>
+              <p class="dimtext" style="margin-top:20px;">
+                <strong>Ripristina</strong> la libreria da un backup precedente. <strong>Sostituisce</strong> i dati attuali
+                (ne salva prima una copia di sicurezza) e riavvia l'app. I dati non vengono mai persi installando o
+                disinstallando: vivono in <code>%APPDATA%\com.pdfmanage.app</code>, separati dal programma.
+              </p>
+              <button class="ghost" onclick={doRestoreFolder}>Ripristina da cartella di backup…</button>
+              <button class="ghost" style="margin-top:8px;" onclick={doRestoreDbFile}>…o da un file .db (backup automatici in <code>backups\</code>)</button>
             {:else}
               <p class="dimtext">
                 <strong>Verifica e ripara metadati.</strong> Controlla ogni documento e corregge quelli il cui
@@ -8204,7 +8258,7 @@
     width: 400px; max-width: 100%; background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--r-lg); padding: 22px 24px; box-shadow: var(--shadow-lg);
   }
-  .confirmmsg { margin: 0 0 18px; font-size: 14.5px; line-height: 1.5; color: var(--text); }
+  .confirmmsg { margin: 0 0 18px; font-size: 14.5px; line-height: 1.5; color: var(--text); white-space: pre-line; }
   /* About dialog */
   .aboutbox { width: 380px; min-width: 320px; min-height: 0; text-align: center; resize: none; }
   .abouthead { display: flex; flex-direction: column; align-items: center; gap: 3px; margin-bottom: 10px; }

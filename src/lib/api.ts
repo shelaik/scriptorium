@@ -244,6 +244,14 @@ export const getLastPage = (id: number) => invoke<number | null>("get_last_page"
 /** Copy the whole library data folder into `dest`; returns the backup path. */
 export const backupLibrary = (dest: string) => invoke<string>("backup_library", { dest });
 
+export interface BackupInfo { doc_count: number; full: boolean; }
+/** Inspect a candidate backup (folder with pdfmanage.db, or a .db file) read-only. */
+export const inspectBackup = (source: string) => invoke<BackupInfo>("inspect_backup", { source });
+/** Stage a restore from `source`; applied on the next launch (needs a restart). */
+export const stageRestore = (source: string) => invoke<void>("stage_restore", { source });
+/** Restart the app (to apply a staged restore). */
+export const restartApp = () => invoke<void>("restart_app");
+
 // ----- Tags -----
 export const listTags = () => invoke<Tag[]>("list_tags");
 export const createTag = (name: string, color: string | null) =>

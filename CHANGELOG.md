@@ -2,6 +2,11 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.25 — Ripristina la libreria da backup
+- **Nuovo: «Ripristina da backup»** (Impostazioni → Backup). Riporta l'intera libreria a un backup precedente: scegli una **cartella di backup** (creata da «Backup libreria») oppure un singolo **file `.db`** (utile per i backup automatici pre-aggiornamento in `backups\`). L'app mostra quanti documenti contiene il backup, chiede conferma, **salva prima una copia di sicurezza** dei dati attuali (`backups\pre-restore-…`, con database, note e progetti) e si riavvia per applicare lo scambio **prima** di aprire il database (l'unico momento sicuro). Un backup completo ripristina anche PDF, note e progetti (unione, senza cancellare i file aggiunti dopo).
+- **Sicuro per costruzione** (è l'operazione più delicata dell'app): la libreria attuale viene rimpiazzata **solo** da un backup prima **verificato integro** e migrato in un file di prova (`integrity_check` + migrazione a schema corrente), e **solo dopo** che la copia di sicurezza è stata scritta; lo scambio del database è **atomico** e il WAL vecchio viene consolidato prima di copiare. Se qualcosa fallisce (backup danneggiato/estraneo, disco pieno, snapshot non scrivibile) il ripristino **si annulla** lasciando la libreria attuale **intatta** — non può bloccare l'avvio né perdere dati. Un backup non-Scriptorium o corrotto viene rifiutato subito, al momento della scelta, con un messaggio chiaro.
+- Promemoria nella scheda: i tuoi dati **non si perdono** installando o disinstallando — vivono in `%APPDATA%\com.pdfmanage.app`, una cartella separata dal programma.
+
 ## 0.9.24 — Prestazioni libreria grande + reimport dal Cestino
 - **Griglia più leggera**: le schede fuori schermo non vengono più disegnate finché non ti avvicini (grazie a `content-visibility`) — scorrimento e primo caricamento fluidi anche con migliaia di documenti.
 - **Meno lavoro sul database a ogni aggiornamento**: autori e tag di tutta la libreria si leggono ora in poche query in blocco invece di due per ogni documento (era un classico «N+1» che rallentava import, tag, preferiti, cambio filtro man mano che la libreria cresce).

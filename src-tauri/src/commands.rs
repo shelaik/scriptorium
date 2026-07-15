@@ -3724,6 +3724,86 @@ pub async fn backup_library(app: AppHandle, dest: String) -> Result<String, Stri
     .map_err(|e| e.to_string())?
 }
 
+/// What a candidate backup contains, for the restore confirmation dialog.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackupInfo {
+    /// Number of documents in the backup's catalog.
+    pub doc_count: i64,
+    /// True when the source is a full backup FOLDER that also carries papers/
+    /// notes/projects (so those files are restored too), false for a bare `.db`.
+    pub full: bool,
+}
+
+/// Resolve a user-picked restore source to its `pdfmanage.db` and whether it is a
+/// full backup folder. Accepts a backup FOLDER (must contain `pdfmanage.db`) or a
+/// `.db` file directly (e.g. an automatic `backups/pre-*.db` snapshot).
+fn resolve_backup_source(source: &str) -> Result<(PathBuf, bool), String> {
+    let p = Path::new(source);
+    if p.is_dir() {
+        let db = p.join("pdfmanage.db");
+        if !db.is_file() {
+            return Err("La cartella scelta non contiene «pdfmanage.db»: non è un backup di Scriptorium.".into());
+        }
+        let full = p.join("papers").is_dir() || p.join("notes").is_dir() || p.join("projects").is_dir();
+        Ok((db, full))
+    } else if p.is_file() && p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("db")).unwrap_or(false) {
+        Ok((p.to_path_buf(), false))
+    } else {
+        Err("Scegli una cartella di backup (con pdfmanage.db) o un file .db.".into())
+    }
+}
+
+/// Validate a candidate backup db READ-ONLY: run a fast structural integrity check
+/// (`quick_check` catches truncation/page corruption) and confirm it is a Scriptorium
+/// catalog, returning its document count. Rejecting a bad source here — at pick time,
+/// with a clear message — is the first gate; [`crate::db::apply_pending_restore`] then
+/// does a full `integrity_check` + `migrate` in staging before any swap, so a source
+/// this misses still can never brick startup.
+fn validate_backup_db(db: &Path) -> Result<i64, String> {
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("Non riesco ad aprire il backup: {e}"))?;
+    let check: String = conn
+        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+        .map_err(|e| format!("Backup non leggibile: {e}"))?;
+    if check != "ok" {
+        return Err("Il file di backup è danneggiato (controllo integrità fallito): non verrà usato.".into());
+    }
+    conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+        .map_err(|_| "Questo file non sembra una libreria di Scriptorium (manca la tabella «documents»).".to_string())
+}
+
+/// Open a candidate backup READ-ONLY and confirm it is a sound Scriptorium catalog,
+/// returning its document count for the confirmation dialog. No side effects.
+#[tauri::command]
+pub fn inspect_backup(source: String) -> Result<BackupInfo, String> {
+    let (db, full) = resolve_backup_source(&source)?;
+    let doc_count = validate_backup_db(&db)?;
+    Ok(BackupInfo { doc_count, full })
+}
+
+/// Stage a restore: validate the source, then write a marker file the next launch
+/// applies (see [`crate::db::apply_pending_restore`]) — the swap can only happen
+/// safely before the DB is opened. The caller then restarts the app.
+#[tauri::command]
+pub fn stage_restore(app: AppHandle, source: String) -> Result<(), String> {
+    let (db, full) = resolve_backup_source(&source)?;
+    // Re-validate right before staging (the source could have changed since inspect).
+    validate_backup_db(&db)?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::write(
+        data_dir.join("restore_pending.txt"),
+        format!("{}\n{}\n", source, if full { "full" } else { "db" }),
+    )
+    .map_err(|e| format!("Non riesco a preparare il ripristino: {e}"))?;
+    Ok(())
+}
+
+/// Restart the app (used to apply a staged restore). Diverges — never returns.
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    app.restart();
+}
+
 // ===== Add by identifier =====
 
 #[derive(Debug, Clone, serde::Serialize)]

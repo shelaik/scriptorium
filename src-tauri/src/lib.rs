@@ -69,6 +69,10 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("pdfmanage.db");
+            // Se l'utente ha chiesto un ripristino (Impostazioni → Backup → Ripristina),
+            // applicalo ORA, mentre nessuna connessione SQLite è aperta, PRIMA del
+            // backup pre-migrazione e dell'apertura.
+            db::apply_pending_restore(&data_dir, &db_path);
             // Rete di sicurezza: alla prima apertura di una versione nuova,
             // copia del DB in backups/ PRIMA che le migrazioni lo tocchino.
             db::backup_on_upgrade(&data_dir, &db_path, env!("CARGO_PKG_VERSION"));
@@ -204,6 +208,9 @@ pub fn run() {
             commands::recent_documents,
             commands::documents_by_author,
             commands::backup_library,
+            commands::inspect_backup,
+            commands::stage_restore,
+            commands::restart_app,
             commands::delete_documents,
             commands::restore_documents,
             commands::purge_documents,
