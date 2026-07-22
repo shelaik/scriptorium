@@ -2,6 +2,9 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.29 — Attribuzioni verificate
+- `THIRD-PARTY-NOTICES.md` verificato contro le licenze reali dei pacchetti spediti: riga copyright di pdfium allineata all'upstream attuale (dual BSD-3-Clause/Apache-2.0), credit esplicito FreeType (richiesto dalla sua licenza FTL), anni copyright di xterm.js corretti. L'installer ora imbarca la versione verificata. Nessun cambiamento di comportamento.
+
 ## 0.9.28 — Attribuzioni terze parti nel pacchetto
 - Nuovo file **`THIRD-PARTY-NOTICES.md`** con le note di copyright e le licenze dei componenti inclusi (pdfium BSD-3-Clause, ONNX Runtime MIT, KaTeX, pdf.js, pdf-lib, xterm.js, crate Rust, modelli scaricati a runtime). È nel repo (linkato dal README) e da questa versione viene **installato accanto all'app**, così accompagna anche l'installer. Nessun cambiamento di comportamento.
 
