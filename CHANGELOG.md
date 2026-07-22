@@ -2,6 +2,9 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.28 — Attribuzioni terze parti nel pacchetto
+- Nuovo file **`THIRD-PARTY-NOTICES.md`** con le note di copyright e le licenze dei componenti inclusi (pdfium BSD-3-Clause, ONNX Runtime MIT, KaTeX, pdf.js, pdf-lib, xterm.js, crate Rust, modelli scaricati a runtime). È nel repo (linkato dal README) e da questa versione viene **installato accanto all'app**, così accompagna anche l'installer. Nessun cambiamento di comportamento.
+
 ## 0.9.27 — Guida aggiornata per l'import
 - La **guida in-app** ora descrive «**Da gestore bibliografico**» al posto del vecchio «BibTeX .bib» (Zotero/Mendeley/EndNote/JabRef, `.bib/.ris/CSL-JSON`, con PDF + tag, senza doppioni).
 - Nuova **FAQ**: «…portare la mia libreria da Zotero, Mendeley o EndNote?» con i passi (Esporta → «Esporta file» per i PDF → Importa → Da gestore bibliografico). Solo documentazione, nessun cambiamento di comportamento.
