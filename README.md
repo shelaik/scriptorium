@@ -21,7 +21,7 @@ Scarica l'ultimo `Scriptorium_x.y.z_x64-setup.exe` dalle **[Release](https://git
 
 ## Stack
 
-Tauri 2 · Rust (rusqlite + FTS5 + sqlite-vec, pdfium, ONNX Runtime per embedding bge-m3 / math-OCR / TATR) · SvelteKit + Svelte 5 (runes) · KaTeX · pdf.js. Solo Windows al momento.
+Tauri 2 · Rust (rusqlite + FTS5 + sqlite-vec, pdfium, ONNX Runtime per embedding bge-m3 / math-OCR / TATR) · SvelteKit + Svelte 5 (runes) · KaTeX · pdf.js. Solo Windows al momento. Attribuzioni dei componenti terzi in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Build
 
