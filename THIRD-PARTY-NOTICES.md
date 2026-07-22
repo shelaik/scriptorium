@@ -20,9 +20,12 @@ Components are grouped by how they are distributed:
 
 PDF rendering engine. Binary builds from the
 [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) project of
-Google's [PDFium](https://pdfium.googlesource.com/pdfium/).
+Google's [PDFium](https://pdfium.googlesource.com/pdfium/). PDFium is
+dual-licensed (BSD-3-Clause or Apache-2.0); it is redistributed here under the
+BSD-3-Clause terms, reproduced below. (The Apache-2.0 text also appears at the
+end of this file.)
 
-> Copyright 2014 The PDFium Authors. All rights reserved.
+> Copyright 2014 The PDFium Authors
 >
 > Redistribution and use in source and binary forms, with or without
 > modification, are permitted provided that the following conditions are
@@ -56,6 +59,8 @@ The PDFium binary itself incorporates further third-party components
 all under permissive licenses; their notices are maintained in the
 [PDFium](https://pdfium.googlesource.com/pdfium/+/main/third_party/) and
 [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) source trees.
+In particular, portions of this software are copyright © The FreeType Project
+(<https://www.freetype.org>). All rights reserved.
 
 ---
 
@@ -108,7 +113,7 @@ states its copyright line.
 | [KaTeX](https://katex.org/) | MIT | Copyright (c) 2013–2020 Khan Academy and other contributors |
 | [PDF.js](https://mozilla.github.io/pdf.js/) (`pdfjs-dist`) | Apache-2.0 | Copyright Mozilla Foundation |
 | [pdf-lib](https://pdf-lib.js.org/) | MIT | Copyright (c) 2019 Andrew Dillon |
-| [xterm.js](https://xtermjs.org/) (`@xterm/xterm`, `@xterm/addon-fit`) | MIT | Copyright (c) 2017–2022, The xterm.js authors; copyright (c) 2014–2016, SourceLair; copyright (c) 2012–2013, Christopher Jeffrey |
+| [xterm.js](https://xtermjs.org/) (`@xterm/xterm`, `@xterm/addon-fit`) | MIT | Copyright (c) 2017–2019, The xterm.js authors; copyright (c) 2014–2016, SourceLair Private Company; copyright (c) 2012–2013, Christopher Jeffrey |
 | [Tauri API](https://tauri.app/) (`@tauri-apps/api`, plugins) | MIT OR Apache-2.0 | Copyright (c) 2017–present Tauri Programme within The Commons Conservancy |
 
 KaTeX additionally bundles fonts derived from Computer Modern, released under
