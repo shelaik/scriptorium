@@ -63,7 +63,7 @@
   let confirmDel = $state(false);
   // Trascinamento in corso (nodo o paper), con bersaglio corrente e validità.
   let nodeDrag = $state<{ id: number; name: string; x: number; y: number; target: SelKey | "root" | null; valid: boolean } | null>(null);
-  let docDrag = $state<{ ids: number[]; from: number | null; label: string; x: number; y: number; target: SelKey | null; valid: boolean } | null>(null);
+  let docDrag = $state<{ ids: number[]; from: number | null; label: string; x: number; y: number; target: SelKey | "root" | null; valid: boolean } | null>(null);
   // Suggerimenti semantici per la raccolta selezionata (motore bge-m3 locale).
   let mirror = $state<MirrorStatus | null>(null);
   let mirrorBusy = $state(false);
@@ -499,9 +499,11 @@
 
   // -- trascinamento PAPER (assegnazione) --
   let ddown: { id: number; label: string; x: number; y: number } | null = null;
-  function docTargetValid(from: number | null, t: SelKey | null): boolean {
+  function docTargetValid(from: number | null, t: SelKey | "root" | null): boolean {
     if (t == null) return false;
-    if (t === "unfiled") return from != null; // togli dalla raccolta di provenienza
+    // Sfondo vuoto o nodo «SENZA RACCOLTA»: stesso gesto — togli il paper
+    // dalla raccolta di provenienza (torna fra i senza-raccolta se non è altrove).
+    if (t === "unfiled" || t === "root") return from != null;
     const n = layout.nodes.find((x) => x.key === t);
     if (!n || n.smart) return false;
     return t !== from;
@@ -525,7 +527,7 @@
     const n = hitNode(e);
     docDrag.x = e.clientX;
     docDrag.y = e.clientY;
-    docDrag.target = n ? n.key : null;
+    docDrag.target = n ? n.key : hitBackground(e) ? "root" : null;
     docDrag.valid = docTargetValid(docDrag.from, docDrag.target);
   }
   function docPointerCancel() {
@@ -540,10 +542,10 @@
     docDrag = null;
     if (!drag) return; // click semplice sulla riga: nessuna azione
     const n = hitNode(e);
-    const t: SelKey | null = n ? n.key : null;
+    const t: SelKey | "root" | null = n ? n.key : hitBackground(e) ? "root" : null;
     if (!docTargetValid(drag.from, t)) return;
     try {
-      if (t === "unfiled") {
+      if (t === "unfiled" || t === "root") {
         await removeDocumentsFromCollection(drag.from as number, drag.ids);
         msg = "Tolto dalla raccolta";
       } else if (drag.from == null || e.ctrlKey) {
@@ -603,7 +605,7 @@
       {/if}
     </div>
   </header>
-  <div class="hint">Trascina un <b>paper</b> (dall'elenco a destra) su una raccolta per spostarlo — <b>Ctrl</b> = aggiungi anche lì, l'appartenenza è multipla · trascina una <b>raccolta</b> su un'altra per annidarla, sullo sfondo per riportarla alla radice</div>
+  <div class="hint">Trascina un <b>paper</b> (dall'elenco a destra) su una raccolta per spostarlo — <b>Ctrl</b> = aggiungi anche lì, l'appartenenza è multipla; <b>sullo sfondo vuoto</b> = toglilo dalla raccolta · trascina una <b>raccolta</b> su un'altra per annidarla, sullo sfondo per riportarla alla radice</div>
   {#if msg}<div class="msg">{msg}</div>{/if}
 
   <div class="body">
@@ -808,7 +810,7 @@
   {#if docDrag}
     <div class="ghost" style="left:{docDrag.x + 12}px; top:{docDrag.y + 10}px;">
       {docDrag.label.length > 48 ? docDrag.label.slice(0, 47) + "…" : docDrag.label}
-      <span class="gsub">{docDrag.valid ? (docDrag.target === "unfiled" ? "→ togli dalla raccolta" : "→ qui") : "…"}</span>
+      <span class="gsub">{docDrag.valid ? (docDrag.target === "unfiled" || docDrag.target === "root" ? "→ togli dalla raccolta" : "→ qui") : "…"}</span>
     </div>
   {/if}
 </div>

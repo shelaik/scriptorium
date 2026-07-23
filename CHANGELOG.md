@@ -2,6 +2,9 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.35 — Trascina sullo sfondo per togliere dalla raccolta
+- Nell'**Archivio**, trascinare un paper dall'elenco **sullo sfondo vuoto** dello schema lo toglie dalla raccolta corrente (torna in «Senza raccolta» se non appartiene ad altre) — stesso effetto del nodo tratteggiato, gesto più naturale. Il fantasma lo dice chiaramente («→ togli dalla raccolta»).
+
 ## 0.9.34 — Rifiniture da riscontro d'uso
 - **Suggerimenti: la scelta si vede subito** — i chip Nome/Contenuto/Entrambi e lo slider del peso stanno ora **sopra il bottone «Calcola i suggerimenti»** (prima comparivano solo dopo il primo calcolo: la sorgente si sceglie *prima*, non dopo).
 - **Ricerca «Novità» per raccolta simmetrica**: spegnere il toggle ora **rimuove** la ricerca (e il suo feed) dalle ricerche salvate — il toggle l'ha creata, il toggle la toglie; riaccendere = ricrearla pulita. Anche eliminare la raccolta rimuove la sua ricerca agganciata.
