@@ -9454,7 +9454,52 @@ fn suggest_for_collection_inner(
                 nv
             })
         };
-        const NO_NAME: &str = "Non riesco a vettorizzare il nome della raccolta: costruisci l'Indice semantico locale (o avvia Ollama), oppure usa la modalità CONTENUTO";
+        // 2b) Fallback SENZA modelli, per il nome: ancoraggio full-text.
+        //     Le parole del nome pescano (doc_fts) i paper che le contengono e
+        //     il centroide dei LORO vettori fa da vettore del nome — zero
+        //     modelli in esecuzione, zero rete. Copre il caso «indice costruito
+        //     via Ollama, Ollama spento, modello CPU mai scaricato».
+        let name_vec: Option<Vec<f32>> = name_vec.or_else(|| {
+            if mode == "content" {
+                return None;
+            }
+            let m = fts_query(&name);
+            if m.is_empty() {
+                return None;
+            }
+            let state = app.state::<AppState>();
+            let conn = state.db.lock();
+            let vecs: Vec<Vec<f32>> = conn
+                .prepare(
+                    "SELECT v.embedding FROM doc_fts f
+                     JOIN doc_vec v ON v.document_id = f.rowid
+                     JOIN documents d ON d.id = f.rowid AND d.deleted_at IS NULL
+                     WHERE doc_fts MATCH ?1 ORDER BY rank LIMIT 15",
+                )
+                .ok()?
+                .query_map(params![m], |r| r.get::<_, Vec<u8>>(0))
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|b| bytes_to_f32(&b))
+                .collect();
+            if vecs.is_empty() {
+                return None;
+            }
+            let dim = vecs[0].len();
+            let mut c = vec![0f32; dim];
+            for mut v in vecs {
+                if v.len() != dim {
+                    continue;
+                }
+                norm(&mut v);
+                for (ci, vi) in c.iter_mut().zip(v.iter()) {
+                    *ci += vi;
+                }
+            }
+            norm(&mut c);
+            Some(c)
+        });
+        const NO_NAME: &str = "Non riesco a ricavare il vettore del nome: nessun modello locale in cache, Ollama spento e nessun paper in libreria contiene le parole del nome. Usa la modalità CONTENUTO, oppure dai alla raccolta un nome con termini presenti nei tuoi paper";
         const NO_CONTENT: &str = "La raccolta non ha ancora paper con un vettore semantico: mettine dentro 1-2 (o costruisci l'Indice semantico), oppure usa la modalità NOME";
         let query: Vec<f32> = match mode {
             "name" => name_vec.ok_or(NO_NAME)?,

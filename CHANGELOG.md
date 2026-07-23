@@ -2,6 +2,9 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.36 — Il «Nome» funziona anche senza modelli accesi
+- **Suggerimenti, modalità Nome/Entrambi senza motori in esecuzione**: se non c'è né il modello locale in cache né Ollama acceso (il caso di chi ha costruito l'indice via Ollama), il vettore del nome ora si ricava **dalla libreria stessa**: le parole del nome pescano via full-text i paper che le contengono e il centroide dei loro vettori fa da vettore del nome — zero modelli, zero rete. L'errore resta solo nel caso limite (nessun paper contiene le parole del nome), con un messaggio che spiega cosa fare.
+
 ## 0.9.35 — Trascina sullo sfondo per togliere dalla raccolta
 - Nell'**Archivio**, trascinare un paper dall'elenco **sullo sfondo vuoto** dello schema lo toglie dalla raccolta corrente (torna in «Senza raccolta» se non appartiene ad altre) — stesso effetto del nodo tratteggiato, gesto più naturale. Il fantasma lo dice chiaramente («→ togli dalla raccolta»).
 
