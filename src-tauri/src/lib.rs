@@ -17,6 +17,7 @@ mod notes;
 mod obsidian;
 mod ocr;
 mod projects;
+mod pulse;
 mod rag;
 mod refimport;
 mod secret;
@@ -92,6 +93,8 @@ pub fn run() {
                 connector: Mutex::new(None),
             });
             app.manage(term::TermState::default());
+            app.manage(pulse::PulseState::default());
+            pulse::init(app.handle());
             // One-time migration: move any plaintext API keys from the settings
             // table into the OS credential vault, then blank them in the DB.
             {
@@ -136,6 +139,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            pulse::pulse_snapshot,
+            pulse::open_plancia,
+            pulse::pulse_log_status,
+            pulse::set_pulse_log,
+            pulse::pulse_export,
+            pulse::pulse_reveal_logs,
             commands::import_files,
             commands::list_documents,
             commands::get_thumbnail,

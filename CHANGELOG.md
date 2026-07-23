@@ -2,6 +2,13 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.30 — Plancia: il sinottico dei processi
+- **Nuovo: la «Plancia»** (icona tachimetro sulla barra, o Ctrl+K → Plancia): una **finestra separata** con un **sinottico visivo da tenere in background** che mostra in tempo reale lo **stato dei processi interni** — import, estrazione, metadati, miniature, OCR, formule, tabelle, embedding, indice per «Chiedi», wiki, riassunti, DOI dei riferimenti, backup, scoperta, cartella sorvegliata, connettore, terminale. Si illumina **solo ciò che sta lavorando davvero** (con avanzamento e durata); da ferma è spenta.
+- **Errori spiegati**: un guasto accende il nodo in rosso con il **motivo per esteso** (banner + registro); un problema non bloccante (es. un file su cento) segna in ambra senza fermare il lavoro. I sottosistemi disattivati dicono *perché* («online disattivato», «modelli da scaricare»…).
+- **Dettagli e numeri veri**: clic su un nodo → descrizione, stato, statistiche di sessione e storico; i nodi in quiete mostrano **letture reali** (documenti/cestino/MB del database, copertura dell'indice semantico, età dell'ultimo backup, modello AI attivo…).
+- **Registro attività**: filtrabile (Tutti/Errori), esportabile con «Salva registro…»; da **Impostazioni → Manutenzione** può scrivere anche **su file** (uno al giorno, conservati gli ultimi 14).
+- Sotto il cofano: nuovo bus di eventi `pulse` con strumentazione di ~25 operazioni (avvio/avanzamento/esito con causa), coppie start/esito verificate su ogni percorso d'uscita, e copertura di lavori prima invisibili (OCR, import da URL/identificatori, riparazione metadati, confronto/rassegna AI, appunti e progetti).
+
 ## 0.9.29 — Attribuzioni verificate
 - `THIRD-PARTY-NOTICES.md` verificato contro le licenze reali dei pacchetti spediti: riga copyright di pdfium allineata all'upstream attuale (dual BSD-3-Clause/Apache-2.0), credit esplicito FreeType (richiesto dalla sua licenza FTL), anni copyright di xterm.js corretti. L'installer ora imbarca la versione verificata. Nessun cambiamento di comportamento.
 

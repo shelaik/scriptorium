@@ -256,9 +256,16 @@ fn handle(app: &AppHandle, token: &Arc<String>, request: tiny_http::Request) {
     // accept loop; reuse the exact in-app engine (SSRF-guarded → import → enrich).
     let app = app.clone();
     std::thread::spawn(move || {
+        crate::pulse::start(&app, "browser", "Import dal browser");
         let status = match tauri::async_runtime::block_on(crate::commands::import_from_url(&app, &target)) {
-            Ok(s) => s,
-            Err(_) => "error",
+            Ok(s) => {
+                crate::pulse::ok(&app, "browser", "Import dal browser", s);
+                s
+            }
+            Err(e) => {
+                crate::pulse::err(&app, "browser", "Import dal browser", &e.to_string());
+                "error"
+            }
         };
         // Nudge the UI (toast + refresh already happen via `library-changed`).
         let _ = app.emit("connector-added", status);

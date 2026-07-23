@@ -15,6 +15,7 @@ use crate::notes;
 use crate::obsidian;
 use crate::pdf;
 use crate::projects;
+use crate::pulse;
 use crate::rag;
 use crate::refimport;
 use crate::secret;
@@ -44,6 +45,9 @@ pub async fn import_files(app: AppHandle, paths: Vec<String>) -> Result<ImportSu
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let dir = thumb_dir(&app);
+        let n_tot = paths.len() as u64;
+        pulse::start(&app, "import", &format!("Import di {n_tot} file"));
+        let mut n_done: u64 = 0;
         let mut summary = ImportSummary {
             imported: Vec::new(),
             duplicates: Vec::new(),
@@ -60,7 +64,10 @@ pub async fn import_files(app: AppHandle, paths: Vec<String>) -> Result<ImportSu
             let prepared = match prepared {
                 Ok(pr) => pr,
                 Err(e) => {
+                    // warn: problema di UN file, il batch prosegue (non chiude la coppia).
+                    pulse::warn(&app, "import", "Estrazione PDF fallita", &format!("{p}: {e:#}"));
                     summary.errors.push(format!("{p}: {e:#}"));
+                    n_done += 1;
                     continue;
                 }
             };
@@ -80,9 +87,29 @@ pub async fn import_files(app: AppHandle, paths: Vec<String>) -> Result<ImportSu
                     }
                 }
                 Ok(o) => summary.duplicates.push(o.document_id),
-                Err(e) => summary.errors.push(format!("{p}: {e:#}")),
+                Err(e) => {
+                    pulse::warn(&app, "import", "Import fallito", &format!("{p}: {e:#}"));
+                    summary.errors.push(format!("{p}: {e:#}"));
+                }
+            }
+            n_done += 1;
+            // Throttle: su batch grandi basta ~1 progress su 100 (il ring è finito).
+            let step = (n_tot / 100).max(1);
+            if n_done % step == 0 || n_done == n_tot {
+                pulse::progress(&app, "import", "Import", n_done, n_tot);
             }
         }
+        pulse::ok(
+            &app,
+            "import",
+            "Import",
+            &format!(
+                "{} nuovi, {} doppioni, {} errori",
+                summary.imported.len(),
+                summary.duplicates.len(),
+                summary.errors.len()
+            ),
+        );
         Ok::<_, String>(summary)
     })
     .await
@@ -134,6 +161,16 @@ pub fn get_thumbnail(state: State<'_, AppState>, id: i64) -> Result<Option<Strin
 /// runtime; returns how many covers were regenerated.
 #[tauri::command]
 pub async fn rebuild_thumbnails(app: AppHandle) -> Result<usize, String> {
+    pulse::start(&app, "miniature", "Rigenerazione anteprime");
+    let r = rebuild_thumbnails_inner(app.clone()).await;
+    match &r {
+        Ok(n) => pulse::ok(&app, "miniature", "Anteprime", &format!("{n} copertine rigenerate")),
+        Err(e) => pulse::err(&app, "miniature", "Anteprime", e),
+    }
+    r
+}
+
+async fn rebuild_thumbnails_inner(app: AppHandle) -> Result<usize, String> {
     let dir = thumb_dir(&app);
     tokio::task::spawn_blocking(move || -> Result<usize, String> {
         std::fs::create_dir_all(&dir).ok();
@@ -235,6 +272,9 @@ pub async fn enrich_all(app: AppHandle) -> Result<EnrichSummary, String> {
         errors: Vec::new(),
     };
 
+    pulse::start(&app, "metadati", &format!("Arricchimento metadati ({} candidati)", candidates.len()));
+    let enrich_tot = candidates.len() as u64;
+    let mut enrich_done: u64 = 0;
     for (id, existing, fulltext) in candidates {
         // Whether the PDF carried *any* DOI at all — used only to classify a
         // non-resolution as "cited-work DOI" vs "no DOI" for the summary.
@@ -273,10 +313,18 @@ pub async fn enrich_all(app: AppHandle) -> Result<EnrichSummary, String> {
             None if had_doi => summary.skipped_mismatch += 1,
             None => summary.no_doi += 1,
         }
+        enrich_done += 1;
+        pulse::progress(&app, "metadati", "Arricchimento metadati", enrich_done, enrich_tot);
         // Be polite to the online APIs between documents.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 
+    pulse::ok(
+        &app,
+        "metadati",
+        "Arricchimento metadati",
+        &format!("{} aggiornati, {} senza DOI, {} errori", summary.updated, summary.no_doi, summary.errors.len()),
+    );
     Ok(summary)
 }
 
@@ -347,6 +395,13 @@ fn write_bib_only(conn: &mut Connection, id: i64, meta: &metadata::CrossrefMeta)
 /// call is bounded by a hard timeout so the pass can never hang. Idempotent.
 #[tauri::command]
 pub async fn repair_metadata(app: AppHandle) -> Result<RepairSummary, String> {
+    pulse::start(&app, "metadati", "Verifica e ripara metadati");
+    let r = repair_metadata_inner(app.clone()).await;
+    pulse::done(&app, "metadati", "Verifica e ripara metadati", &r);
+    r
+}
+
+async fn repair_metadata_inner(app: AppHandle) -> Result<RepairSummary, String> {
     // (id, doi, title, path, head) for every on-disk document — gathered off-lock.
     let candidates: Vec<(i64, Option<String>, Option<String>, String, String)> = {
         let state = app.state::<AppState>();
@@ -618,6 +673,9 @@ pub async fn recover_missing_metadata(app: AppHandle) -> Result<MetaRecoverSumma
             MetaRecoverProgress { done, total, updated, phase: phase.into() },
         );
     };
+    // Lo start DEVE precedere ogni evento di progresso: la Plancia conta gli
+    // start/ok in coppia e un progress orfano prima dello start sdoppierebbe il conteggio.
+    pulse::start(&app, "metadati", &format!("Recupero metadati ({total} documenti magri)"));
     emit(0, 0, "running");
 
     for (done, (id, existing_doi, path, text)) in candidates.into_iter().enumerate() {
@@ -625,6 +683,7 @@ pub async fn recover_missing_metadata(app: AppHandle) -> Result<MetaRecoverSumma
             let state = app.state::<AppState>();
             if state.meta_cancel.load(Ordering::SeqCst) {
                 emit(done, sum.updated, "cancelled");
+                pulse::ok(&app, "metadati", "Recupero metadati", "interrotto dall'utente");
                 return Ok(sum);
             }
         }
@@ -702,6 +761,12 @@ pub async fn recover_missing_metadata(app: AppHandle) -> Result<MetaRecoverSumma
         emit(done + 1, sum.updated, "running");
     }
     emit(total, sum.updated, "done");
+    pulse::ok(
+        &app,
+        "metadati",
+        "Recupero metadati",
+        &format!("{} recuperati su {}, {} errori", sum.updated, total, sum.errors.len()),
+    );
     Ok(sum)
 }
 
@@ -1570,6 +1635,8 @@ pub async fn generate_embeddings(app: AppHandle) -> Result<EmbedSummary, String>
             return Ok(summary);
         }
 
+        // Start PRIMA del primo progress (la Plancia accoppia start/ok).
+        pulse::start(&app, "embed", &format!("Indice semantico ({total} da vettorizzare)"));
         // The first batch lazily loads the model (downloads ~2.3GB on first ever run).
         let _ = app.emit(
             "embed-progress",
@@ -1582,6 +1649,7 @@ pub async fn generate_embeddings(app: AppHandle) -> Result<EmbedSummary, String>
                     "embed-progress",
                     EmbedProgress { done: summary.embedded, total, phase: "cancelled".into() },
                 );
+                pulse::ok(&app, "embed", "Indice semantico", "interrotto dall'utente");
                 return Ok(summary);
             }
             let ids: Vec<i64> = chunk.iter().map(|c| c.0).collect();
@@ -1599,6 +1667,7 @@ pub async fn generate_embeddings(app: AppHandle) -> Result<EmbedSummary, String>
                             "embed-progress",
                             EmbedProgress { done: summary.embedded, total, phase: "cancelled".into() },
                         );
+                        pulse::ok(&app, "embed", "Indice semantico", "interrotto dall'utente");
                         return Ok(summary);
                     }
                     let conn = state.db.lock();
@@ -1628,6 +1697,7 @@ pub async fn generate_embeddings(app: AppHandle) -> Result<EmbedSummary, String>
                     "embed-progress",
                     EmbedProgress { done: summary.embedded, total, phase: "cancelled".into() },
                 );
+                pulse::ok(&app, "embed", "Indice semantico", "interrotto dall'utente");
                 return Ok(summary);
             }
             let ids: Vec<i64> = chunk.iter().map(|c| c.0).collect();
@@ -1662,6 +1732,16 @@ pub async fn generate_embeddings(app: AppHandle) -> Result<EmbedSummary, String>
             "embed-progress",
             EmbedProgress { done: summary.embedded, total, phase: "done".into() },
         );
+        if summary.errors.is_empty() {
+            pulse::ok(&app, "embed", "Indice semantico", &format!("{} vettorizzati", summary.embedded));
+        } else {
+            pulse::err(
+                &app,
+                "embed",
+                "Indice semantico",
+                &format!("{} vettorizzati, {} errori: {}", summary.embedded, summary.errors.len(), summary.errors[0]),
+            );
+        }
         Ok::<_, String>(summary)
     })
     .await
@@ -2515,7 +2595,9 @@ pub fn write_project_file(app: AppHandle, slug: String, rel: String, content: St
     }
     let tmp = root.join(format!("{}.tmp-write", rel.replace('/', "_")));
     std::fs::write(&tmp, content).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
+    std::fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
+    pulse::blip(&app, "archivio", &format!("Progetto «{slug}»: salvato {rel}"));
+    Ok(())
 }
 
 /// A project file as base64 (the compiled PDF for the in-app preview).
@@ -2550,9 +2632,16 @@ pub fn sync_project_bib(app: AppHandle, state: State<'_, AppState>, slug: String
 #[tauri::command]
 pub async fn compile_project(app: AppHandle, slug: String) -> Result<projects::CompileResult, String> {
     let root = project_root(&app, &slug)?;
-    tauri::async_runtime::spawn_blocking(move || projects::compile(&root))
+    pulse::start(&app, "latex", &format!("Compilazione LaTeX «{slug}»"));
+    let r = tauri::async_runtime::spawn_blocking(move || projects::compile(&root))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    match &r {
+        Ok(c) if c.ok => pulse::ok(&app, "latex", "Compilazione LaTeX", "PDF prodotto"),
+        Ok(_) => pulse::err(&app, "latex", "Compilazione LaTeX", "compilazione fallita (vedi log del progetto)"),
+        Err(e) => pulse::err(&app, "latex", "Compilazione LaTeX", e),
+    }
+    r
 }
 
 /// Open the project folder in the file explorer.
@@ -2733,11 +2822,14 @@ pub async fn build_rag_index(app: AppHandle) -> Result<usize, String> {
         };
 
         let total = docs.len();
-        let _ = app.emit("rag-progress", RagProgress { done: 0, total, phase: "running".into() });
         if total == 0 {
+            let _ = app.emit("rag-progress", RagProgress { done: 0, total, phase: "running".into() });
             let _ = app.emit("rag-progress", RagProgress { done: 0, total, phase: "done".into() });
             return Ok(0);
         }
+        // Start PRIMA del primo progress (la Plancia accoppia start/ok).
+        pulse::start(&app, "rag", &format!("Indice per «Chiedi» ({total} documenti)"));
+        let _ = app.emit("rag-progress", RagProgress { done: 0, total, phase: "running".into() });
 
         // Pipeline: a producer thread extracts + chunks the NEXT document (CPU)
         // while this thread embeds + inserts the current one (GPU/CPU + DB), so the
@@ -2818,6 +2910,11 @@ pub async fn build_rag_index(app: AppHandle) -> Result<usize, String> {
         };
         let done_n = *outcome.as_ref().unwrap_or(&0);
         let _ = app.emit("rag-progress", RagProgress { done: done_n, total, phase: phase.into() });
+        match &outcome {
+            Ok(_) if phase == "cancelled" => pulse::ok(&app, "rag", "Indice per «Chiedi»", "interrotto dall'utente"),
+            Ok(n) => pulse::ok(&app, "rag", "Indice per «Chiedi»", &format!("{n} documenti spezzettati e vettorizzati")),
+            Err(e) => pulse::err(&app, "rag", "Indice per «Chiedi»", e),
+        }
         outcome
     })
     .await
@@ -2888,6 +2985,21 @@ fn best_chunk(conn: &Connection, doc_id: i64, qvec: &[f32]) -> Option<(i64, Stri
 /// (citations + similar docs) + one local-LLM answer with citations.
 #[tauri::command]
 pub async fn ask_library(
+    app: AppHandle,
+    question: String,
+    scope_kind: Option<String>,
+    scope_id: Option<i64>,
+) -> Result<AskResult, String> {
+    if question.trim().is_empty() {
+        return Err("Scrivi una domanda".into());
+    }
+    pulse::start(&app, "chiedi", "Domanda alla libreria");
+    let r = ask_library_inner(app.clone(), question, scope_kind, scope_id).await;
+    pulse::done(&app, "chiedi", "Domanda alla libreria", &r);
+    r
+}
+
+async fn ask_library_inner(
     app: AppHandle,
     question: String,
     scope_kind: Option<String>,
@@ -3537,6 +3649,13 @@ pub struct OcrSummary {
 /// Refuses to overwrite a document that already has extracted text.
 #[tauri::command]
 pub async fn ocr_document(app: AppHandle, id: i64) -> Result<OcrSummary, String> {
+    pulse::start(&app, "ocr", "OCR del documento");
+    let r = ocr_document_inner(app.clone(), id).await;
+    pulse::done(&app, "ocr", "OCR del documento", &r);
+    r
+}
+
+async fn ocr_document_inner(app: AppHandle, id: i64) -> Result<OcrSummary, String> {
     const MAX_OCR_PAGES: usize = 40;
     tauri::async_runtime::spawn_blocking(move || -> Result<OcrSummary, String> {
         let state = app.state::<AppState>();
@@ -3675,6 +3794,16 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
 /// so a multi-GB library never freezes the window. Returns the backup folder path.
 #[tauri::command]
 pub async fn backup_library(app: AppHandle, dest: String) -> Result<String, String> {
+    pulse::start(&app, "backup", "Backup della libreria");
+    let r = backup_library_inner(app.clone(), dest).await;
+    match &r {
+        Ok(p) => pulse::ok(&app, "backup", "Backup della libreria", &format!("completato in {p}")),
+        Err(e) => pulse::err(&app, "backup", "Backup della libreria", e),
+    }
+    r
+}
+
+async fn backup_library_inner(app: AppHandle, dest: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let state = app.state::<AppState>();
         let src = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -3787,6 +3916,13 @@ pub fn inspect_backup(source: String) -> Result<BackupInfo, String> {
 /// safely before the DB is opened. The caller then restarts the app.
 #[tauri::command]
 pub fn stage_restore(app: AppHandle, source: String) -> Result<(), String> {
+    pulse::start(&app, "backup", "Ripristino: preparazione dal backup");
+    let r = stage_restore_inner(&app, source);
+    pulse::done(&app, "backup", "Ripristino: preparazione", &r);
+    r
+}
+
+fn stage_restore_inner(app: &AppHandle, source: String) -> Result<(), String> {
     let (db, full) = resolve_backup_source(&source)?;
     // Re-validate right before staging (the source could have changed since inspect).
     validate_backup_db(&db)?;
@@ -3874,6 +4010,13 @@ fn create_reference(conn: &mut Connection, rref: &metadata::ResolvedRef) -> anyh
 /// Add reference-only items (no PDF) from pasted identifiers: DOI, arXiv, ISBN, PMID.
 #[tauri::command]
 pub async fn add_by_identifiers(app: AppHandle, identifiers: Vec<String>) -> Result<AddSummary, String> {
+    pulse::start(&app, "import", &format!("Aggiunta per identificatori ({})", identifiers.len()));
+    let r = add_by_identifiers_inner(app.clone(), identifiers).await;
+    pulse::done(&app, "import", "Aggiunta per identificatori", &r);
+    r
+}
+
+async fn add_by_identifiers_inner(app: AppHandle, identifiers: Vec<String>) -> Result<AddSummary, String> {
     let email = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
@@ -4001,6 +4144,13 @@ fn bib_to_ref(e: &bibtex::BibEntry) -> Option<metadata::ResolvedRef> {
 /// Import a BibTeX (.bib) file (e.g. a Zotero/Mendeley export) as reference-only items.
 #[tauri::command]
 pub fn import_bibtex(app: AppHandle, path: String) -> Result<AddSummary, String> {
+    pulse::start(&app, "biblio", "Import BibTeX");
+    let r = import_bibtex_inner(app.clone(), path);
+    pulse::done(&app, "biblio", "Import BibTeX", &r);
+    r
+}
+
+fn import_bibtex_inner(app: AppHandle, path: String) -> Result<AddSummary, String> {
     let text = std::fs::read_to_string(&path).map_err(|e| format!("Lettura file: {e}"))?;
     let entries = bibtex::parse(&text);
     let state = app.state::<AppState>();
@@ -4242,7 +4392,18 @@ pub async fn import_reference_manager(
     pdf_dir: Option<String>,
 ) -> Result<RefImportSummary, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        import_reference_manager_inner(&app, &path, pdf_dir.as_deref())
+        pulse::start(&app, "biblio", "Import da gestore bibliografico");
+        let r = import_reference_manager_inner(&app, &path, pdf_dir.as_deref());
+        match &r {
+            Ok(s) => pulse::ok(
+                &app,
+                "biblio",
+                "Import da gestore bibliografico",
+                &format!("{}: {} voci, {} nuove, {} PDF agganciati, {} doppioni", s.format, s.entries, s.added, s.pdfs_attached, s.duplicates),
+            ),
+            Err(e) => pulse::err(&app, "biblio", "Import da gestore bibliografico", e),
+        }
+        r
     })
     .await
     .map_err(|e| format!("Task fallito: {e}"))?
@@ -4491,9 +4652,14 @@ impl Drop for TempDirGuard {
 /// fs + pdfium heavy, so it runs on a blocking thread. Entirely local (no network).
 #[tauri::command]
 pub async fn import_latex_zip(app: AppHandle, path: String) -> Result<LatexImportSummary, String> {
-    tauri::async_runtime::spawn_blocking(move || import_latex_zip_inner(&app, &path))
-        .await
-        .map_err(|e| format!("Task fallito: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        pulse::start(&app, "latex", "Import progetto LaTeX (.zip)");
+        let r = import_latex_zip_inner(&app, &path);
+        pulse::done(&app, "latex", "Import progetto LaTeX", &r);
+        r
+    })
+    .await
+    .map_err(|e| format!("Task fallito: {e}"))?
 }
 
 fn import_latex_zip_inner(app: &AppHandle, zip_path: &str) -> Result<LatexImportSummary, String> {
@@ -5877,6 +6043,23 @@ pub async fn extract_table_model(
     w: f32,
     h: f32,
 ) -> Result<Vec<Vec<String>>, String> {
+    pulse::start(&app, "tabelle", "Estrazione tabella (TATR)");
+    let r = extract_table_model_inner(app.clone(), image_base64, id, page, x, y, w, h).await;
+    pulse::done(&app, "tabelle", "Estrazione tabella", &r);
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn extract_table_model_inner(
+    app: AppHandle,
+    image_base64: String,
+    id: i64,
+    page: u16,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Result<Vec<Vec<String>>, String> {
     let dir = tablestruct_dir(&app);
     if !tablestruct::models_present(&dir) {
         tablestruct::ensure_models(&dir)
@@ -5970,16 +6153,30 @@ pub async fn formula_to_latex(
     let bytes = BASE64_STANDARD
         .decode(b64)
         .map_err(|e| format!("immagine non valida: {e}"))?;
+    // Start PRIMA del download modelli: durante lo scarico il nodo deve dire
+    // «in lavorazione», non «OFFLINE — modelli da scaricare».
+    pulse::start(&app, "formule", "Formula → LaTeX (OCR locale)");
     if !mathocr::models_present(&dir) {
-        let client = ai::client().map_err(|e| e.to_string())?;
-        mathocr::ensure_models(&dir, &client)
-            .await
-            .map_err(|e| format!("scarico modelli formula: {e}"))?;
+        let client = match ai::client() {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = e.to_string();
+                pulse::err(&app, "formule", "Formula → LaTeX", &msg);
+                return Err(msg);
+            }
+        };
+        if let Err(e) = mathocr::ensure_models(&dir, &client).await {
+            let msg = format!("scarico modelli formula: {e}");
+            pulse::err(&app, "formule", "Scarico modelli formula", &msg);
+            return Err(msg);
+        }
     }
-    tauri::async_runtime::spawn_blocking(move || mathocr::recognize(&dir, &bytes, multi))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+    let r = match tauri::async_runtime::spawn_blocking(move || mathocr::recognize(&dir, &bytes, multi)).await {
+        Ok(inner) => inner.map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    pulse::done(&app, "formule", "Formula → LaTeX", &r);
+    r
 }
 
 /// Take just the base64 payload of a possibly-data-URL image string.
@@ -6669,6 +6866,27 @@ pub async fn discover_search(
     oa_only: bool,
     sort: String,
 ) -> Result<Vec<discovery::SearchResult>, String> {
+    let src_label = source.clone();
+    pulse::start(&app, "scoperta", &format!("Ricerca online ({src_label})"));
+    let r = discover_search_inner(app.clone(), query, source, author, year_from, year_to, oa_only, sort).await;
+    match &r {
+        Ok(v) => pulse::ok(&app, "scoperta", "Ricerca online", &format!("{} risultati da {src_label}", v.len())),
+        Err(e) => pulse::err(&app, "scoperta", "Ricerca online", e),
+    }
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn discover_search_inner(
+    app: AppHandle,
+    query: String,
+    source: String,
+    author: Option<String>,
+    year_from: Option<i64>,
+    year_to: Option<i64>,
+    oa_only: bool,
+    sort: String,
+) -> Result<Vec<discovery::SearchResult>, String> {
     let (enabled, key, ads_token, s2_key, core_key, email) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
@@ -6810,6 +7028,15 @@ pub async fn explore_citations(
 /// reference. Returns "added_pdf" | "added_ref" | "duplicate".
 #[tauri::command]
 pub async fn discover_add(app: AppHandle, result: discovery::SearchResult) -> Result<String, String> {
+    let short = result.title.clone().unwrap_or_else(|| result.external_id.clone());
+    let short: String = short.chars().take(60).collect();
+    pulse::start(&app, "scoperta", &format!("Aggiunta dalla scoperta: «{short}»"));
+    let r = discover_add_inner(app.clone(), result).await;
+    pulse::done(&app, "scoperta", "Aggiunta dalla scoperta", &r);
+    r
+}
+
+async fn discover_add_inner(app: AppHandle, result: discovery::SearchResult) -> Result<String, String> {
     // Gate behind the opt-in network setting (consistent with discover_search).
     {
         let state = app.state::<AppState>();
@@ -7073,7 +7300,10 @@ pub(crate) async fn import_from_url(app: &AppHandle, url: &str) -> Result<&'stat
 /// `"added"` | `"duplicate"` | `"not_pdf"`.
 #[tauri::command]
 pub async fn add_from_url(app: AppHandle, url: String) -> Result<String, String> {
-    import_from_url(&app, &url).await.map(|s| s.to_string())
+    pulse::start(&app, "import", "Import da URL");
+    let r = import_from_url(&app, &url).await.map(|s| s.to_string());
+    pulse::done(&app, "import", "Import da URL", &r);
+    r
 }
 
 /// Read (or lazily create + persist) the connector's secret token — a 128-bit
@@ -7419,13 +7649,25 @@ pub async fn run_all_watches(app: AppHandle, force: bool) -> usize {
     if watches.is_empty() {
         return 0;
     }
+    pulse::start(&app, "scoperta", &format!("Sweep «Novità» ({} ricerche salvate)", watches.len()));
     let mut total_new = 0usize;
+    let mut failed = 0usize;
     for s in &watches {
-        if let Ok((_, fresh)) = run_watch_core(&app, s).await {
-            total_new += fresh.len();
+        match run_watch_core(&app, s).await {
+            Ok((_, fresh)) => total_new += fresh.len(),
+            Err(e) => {
+                failed += 1;
+                pulse::warn(&app, "scoperta", &format!("Ricerca «{}» fallita", s.name), &e.to_string());
+            }
         }
     }
     let _ = app.emit("novita-changed", total_new);
+    let detail = if failed > 0 {
+        format!("{total_new} novità trovate, {failed} ricerche fallite")
+    } else {
+        format!("{total_new} novità trovate")
+    };
+    pulse::ok(&app, "scoperta", "Sweep «Novità»", &detail);
     total_new
 }
 
@@ -7748,6 +7990,13 @@ fn fetch_doc_text(conn: &Connection, id: i64) -> Result<(String, String), String
 /// Generate an Italian summary for a document (manual, opt-in). Caches it.
 #[tauri::command]
 pub async fn summarize_document(app: AppHandle, id: i64) -> Result<String, String> {
+    pulse::start(&app, "riassunti", "Riassunto AI del documento");
+    let r = summarize_document_inner(app.clone(), id).await;
+    pulse::done(&app, "riassunti", "Riassunto AI", &r);
+    r
+}
+
+async fn summarize_document_inner(app: AppHandle, id: i64) -> Result<String, String> {
     let (enabled, provider, url, model, title, text) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
@@ -8048,9 +8297,22 @@ pub async fn resolve_reference_dois(app: AppHandle) -> Result<BackfillDoiSummary
     // Run on a blocking thread: the inner body uses `block_on` for network I/O, and
     // that must NOT run on the async-runtime worker thread (nested-runtime panic).
     // Mirrors import_latex_zip / generate_embeddings.
-    tauri::async_runtime::spawn_blocking(move || resolve_reference_dois_inner(&app))
-        .await
-        .map_err(|e| format!("Task fallito: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        pulse::start(&app, "refdoi", "Risoluzione DOI dei riferimenti");
+        let r = resolve_reference_dois_inner(&app);
+        match &r {
+            Ok(s) => pulse::ok(
+                &app,
+                "refdoi",
+                "Risoluzione DOI dei riferimenti",
+                &format!("{} risolti su {} cercati, {} restanti", s.resolved, s.scanned, s.remaining),
+            ),
+            Err(e) => pulse::err(&app, "refdoi", "Risoluzione DOI dei riferimenti", e),
+        }
+        r
+    })
+    .await
+    .map_err(|e| format!("Task fallito: {e}"))?
 }
 
 fn resolve_reference_dois_inner(app: &AppHandle) -> Result<BackfillDoiSummary, String> {
@@ -9688,6 +9950,7 @@ pub fn create_note(app: AppHandle, title: String) -> Result<String, String> {
         let conn = state.db.lock();
         index_note(&conn, &slug, &body, None);
     }
+    pulse::blip(&app, "archivio", &format!("Nuovo appunto: {slug}.md"));
     Ok(slug)
 }
 
@@ -9743,6 +10006,7 @@ pub fn append_to_note(app: AppHandle, slug: String, markdown: String) -> Result<
         let conn = state.db.lock();
         index_note(&conn, &slug, &new_content, mtime);
     }
+    pulse::blip(&app, "archivio", &format!("Aggiunta a un appunto: {slug}.md"));
     Ok(NoteMeta {
         slug,
         title: notes::note_title(&new_content),
@@ -9769,6 +10033,7 @@ pub fn delete_note(app: AppHandle, slug: String) -> Result<(), String> {
             [],
         );
     }
+    pulse::blip(&app, "archivio", &format!("Appunto eliminato: {slug}.md"));
     Ok(())
 }
 
@@ -10100,6 +10365,22 @@ fn top_chunks(conn: &Connection, doc_id: i64, qvec: &[f32], k: usize) -> Vec<(St
 /// `wiki-progress` events; cancellable via [`wiki_cancel`].
 #[tauri::command]
 pub async fn wiki_generate(
+    app: AppHandle,
+    concept: String,
+    tag_id: Option<i64>,
+    ids: Option<Vec<i64>>,
+) -> Result<String, String> {
+    if concept.trim().is_empty() {
+        return Err("Scrivi un concetto (o usa il nome di un tag)".into());
+    }
+    let short: String = concept.trim().chars().take(50).collect();
+    pulse::start(&app, "wiki", &format!("Generazione wiki: «{short}»"));
+    let r = wiki_generate_inner(app.clone(), concept, tag_id, ids).await;
+    pulse::done_user(&app, "wiki", "Generazione wiki", &r);
+    r
+}
+
+async fn wiki_generate_inner(
     app: AppHandle,
     concept: String,
     tag_id: Option<i64>,
@@ -10495,6 +10776,13 @@ pub async fn compare_documents(app: AppHandle, ids: Vec<i64>) -> Result<AiDocRes
     if !(2..=3).contains(&ids.len()) {
         return Err("Seleziona 2 o 3 documenti da confrontare".into());
     }
+    pulse::start(&app, "riassunti", &format!("Confronto AI ({} documenti)", ids.len()));
+    let r = compare_documents_inner(app.clone(), ids).await;
+    pulse::done_user(&app, "riassunti", "Confronto AI", &r);
+    r
+}
+
+async fn compare_documents_inner(app: AppHandle, ids: Vec<i64>) -> Result<AiDocResult, String> {
     let (client, provider, url, model) = ai_ready(&app)?;
     let docs = {
         let state = app.state::<AppState>();
@@ -10536,6 +10824,13 @@ pub async fn generate_review(app: AppHandle, ids: Vec<i64>) -> Result<AiDocResul
     if !(2..=10).contains(&ids.len()) {
         return Err("Servono da 2 a 10 documenti per una rassegna".into());
     }
+    pulse::start(&app, "riassunti", &format!("Rassegna AI ({} documenti)", ids.len()));
+    let r = generate_review_inner(app.clone(), ids).await;
+    pulse::done_user(&app, "riassunti", "Rassegna AI", &r);
+    r
+}
+
+async fn generate_review_inner(app: AppHandle, ids: Vec<i64>) -> Result<AiDocResult, String> {
     let (client, provider, url, model) = ai_ready(&app)?;
     {
         let state = app.state::<AppState>();

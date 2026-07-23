@@ -164,6 +164,10 @@
     type CompanionPaths,
     companionPaths,
     checkUpdate,
+    openPlancia,
+    pulseLogStatus,
+    setPulseLog,
+    pulseRevealLogs,
   } from "$lib/api";
   import Viewer from "$lib/viewer/Viewer.svelte";
   import MetaEditor from "$lib/MetaEditor.svelte";
@@ -626,7 +630,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.29";
+  const APP_VERSION = "0.9.30";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -1197,6 +1201,26 @@
   }
 
   let repairing = $state(false);
+  // Plancia: log attività su file (Impostazioni → Manutenzione).
+  let pulseLog = $state(false);
+  let pulseLogDir = $state("");
+  async function togglePulseLog() {
+    try {
+      const s = await setPulseLog(!pulseLog);
+      pulseLog = s.enabled;
+      pulseLogDir = s.dir;
+    } catch (e) {
+      status = "Log Plancia: " + e;
+      // La checkbox non deve mentire: riallineala allo stato reale del backend.
+      try {
+        const s = await pulseLogStatus();
+        pulseLog = s.enabled;
+        pulseLogDir = s.dir;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
   let repairMsg = $state("");
   async function repairMeta() {
     if (!(await confirmAsk(
@@ -1880,6 +1904,13 @@
       aiModel = a.model;
       aiEmbedGpu = a.embed_gpu;
       aiEmbedBatch = a.embed_batch;
+    } catch {
+      /* ignore */
+    }
+    try {
+      const pl = await pulseLogStatus();
+      pulseLog = pl.enabled;
+      pulseLogDir = pl.dir;
     } catch {
       /* ignore */
     }
@@ -3013,6 +3044,7 @@
 
   /** Stroke-icon paths (24×24, feather-style) for radial petals. */
   const I = {
+    pulse: "M5.64 18.36A9 9 0 1 1 18.36 18.36M12 12l3.5-3.5",
     open: "M2 4h6a4 4 0 0 1 4 4v12a3 3 0 0 0-3-3H2zM22 4h-6a4 4 0 0 0-4 4v12a3 3 0 0 1 3-3h7z",
     star: "M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z",
     check: "M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4L12 14.01l-3-3",
@@ -3462,6 +3494,7 @@
       { id: "g-backup", label: "Backup libreria", icon: I.backup, hint: "Copia completa della libreria (PDF + database) in una cartella", action: () => doBackup() },
       { id: "g-trash", label: "Cestino", icon: I.trash, hint: "I documenti eliminati (ripristinabili)", action: () => setFilter({ kind: "trash" }) },
       { id: "g-term", label: "Terminale", icon: I.term, hint: "PowerShell integrato nella cartella dei PDF", action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
+      { id: "g-plancia", label: "Plancia", icon: I.pulse, hint: "La sala macchine: cosa sta lavorando adesso, in tempo reale (finestra separata)", action: () => void openPlancia() },
       {
         id: "g-help",
         label: "Guida",
@@ -7004,7 +7037,7 @@
         <div class="helpsec">
           <h3>Le tre porte d'ingresso</h3>
           <ul>
-            <li><strong>Barra strumenti</strong> (in alto): un'icona per ogni strumento — passaci sopra col mouse per il nome. Nell'ordine: <strong>I miei paper</strong> (torna alla griglia), <strong>Importa</strong>, <strong>Vista</strong>, <strong>Riprendi lettura</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Appunti</strong>, <strong>Progetti (LaTeX)</strong>, <strong>Riscopri</strong>, <strong>Novità</strong> (🔔 col conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong>, <strong>Indice semantico</strong>, <strong>Memoria AI</strong> (o <em>Attiva AI</em> quando è spenta), <strong>Backup</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Guida</strong>, <strong>Aspetto</strong>, <strong>Sistema</strong> (Impostazioni · Controlla aggiornamenti · Informazioni). Le voci con un menu si aprono al clic, le altre eseguono; l'icona è evidenziata quando sei nella vista corrispondente. In alto trovi anche il chip <strong>AI</strong> (stato dell'AI locale), «✦ N senza metadati» quando serve, e l'icona della <strong>palette</strong>.</li>
+            <li><strong>Barra strumenti</strong> (in alto): un'icona per ogni strumento — passaci sopra col mouse per il nome. Nell'ordine: <strong>I miei paper</strong> (torna alla griglia), <strong>Importa</strong>, <strong>Vista</strong>, <strong>Riprendi lettura</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Appunti</strong>, <strong>Progetti (LaTeX)</strong>, <strong>Riscopri</strong>, <strong>Novità</strong> (🔔 col conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong>, <strong>Indice semantico</strong>, <strong>Memoria AI</strong> (o <em>Attiva AI</em> quando è spenta), <strong>Backup</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Plancia</strong> (il sinottico dei processi, in finestra separata), <strong>Guida</strong>, <strong>Aspetto</strong>, <strong>Sistema</strong> (Impostazioni · Controlla aggiornamenti · Informazioni). Le voci con un menu si aprono al clic, le altre eseguono; l'icona è evidenziata quando sei nella vista corrispondente. In alto trovi anche il chip <strong>AI</strong> (stato dell'AI locale), «✦ N senza metadati» quando serve, e l'icona della <strong>palette</strong>.</li>
             <li><strong>Menu radiale</strong> (tasto destro): su un <strong>documento</strong> → le azioni su quel documento; sullo <strong>spazio vuoto</strong> → il menu globale (gli stessi gruppi della barra); su una <strong>selezione multipla</strong> → le azioni in blocco. Muovi verso un petalo e clicca (basta la direzione); <strong>rotella</strong> per ruotare; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; il centro torna indietro, <kbd>Esc</kbd> chiude. La <strong>descrizione</strong> della voce evidenziata compare sotto l'anello.</li>
             <li><strong>Palette comandi</strong> (<kbd>Ctrl</kbd>+<kbd>K</kbd>): ogni azione, documento, <strong>appunto</strong>, <strong>pagina wiki</strong>, <strong>progetto LaTeX</strong>, filtro, sezione della guida e tema — digitando. Funziona <strong>anche dentro il lettore</strong>. Barra, radiale e palette pescano dallo <strong>stesso registro</strong>: se non trovi un comando, è comunque lì.</li>
           </ul>
@@ -7214,6 +7247,13 @@
             <li>Appunti e progetti sono <strong>file veri</strong>: modificarli da fuori è previsto. <strong>Backup libreria</strong> (barra) fa una copia completa; <strong>Esporta</strong> produce citazioni (BibTeX/RIS/CSL) o note per <strong>Obsidian</strong>.</li>
             <li><strong>Terminale</strong> integrato (&gt;_, es. per <code>claude code</code>); la CLI <code>scriptorium-cli</code> interroga da fuori, in sola lettura, libreria <em>e</em> Appunti <em>e</em> progetti LaTeX (<code>query</code>, <code>bib</code>, <code>notes</code>, <code>note</code>, <code>search-notes</code>, <code>projects</code>, <code>stats</code>…). Il <strong>server MCP</strong> <code>scriptorium-mcp</code> porta gli stessi dati (9 strumenti, sola lettura) dentro <strong>Claude Desktop / Claude Code</strong> e qualsiasi client MCP: config pronta da copiare in <strong>Impostazioni → CLI e MCP</strong>. Il <strong>connettore browser</strong> per «Aggancia» è un servizio solo-locale, spegnibile in Impostazioni. <strong>11 temi</strong> in Aspetto.</li>
           </ul>
+
+          <h3>Plancia — il sinottico dei processi</h3>
+          <ul>
+            <li>La <strong>Plancia</strong> (icona tachimetro sulla barra, o Ctrl+K → «Plancia») apre una <strong>finestra separata</strong> con un <strong>sinottico visivo</strong> dei processi interni: import, estrazione, metadati, indici, AI, backup… Puoi <strong>tenerla in background</strong> su un lato dello schermo: si illumina <em>solo</em> ciò che sta lavorando davvero, con avanzamento (<code>12/96</code>) e durata; da ferma è spenta.</li>
+            <li><strong>Stato ed errori a colpo d'occhio</strong>: un guasto accende il nodo in rosso con il <strong>motivo</strong> per esteso; un problema non bloccante (es. un file su cento) lo segna in ambra senza fermare il resto. I sottosistemi spenti dicono <em>perché</em> («online disattivato», «modelli da scaricare»…). Clic su un nodo: descrizione, statistiche, storico.</li>
+            <li>Il <strong>registro attività</strong> in basso è filtrabile (Tutti/Errori) ed esportabile con <strong>Salva registro…</strong>; da <strong>Impostazioni → Manutenzione</strong> puoi farlo scrivere anche <strong>su file</strong> (uno al giorno, conservati 14) per capire a posteriori cosa è successo.</li>
+          </ul>
         </div>
 
         {:else if helpTab === "faq"}
@@ -7226,6 +7266,8 @@
             <dd>Nel gestore fai <strong>Esporta</strong> in <strong>BibTeX/BibLaTeX, RIS o CSL-JSON</strong> (per avere anche i PDF, in Zotero spunta «Esporta file»). Poi barra → Importa → <strong>Da gestore bibliografico…</strong>, scegli il file e — se i PDF stanno in una cartella a parte — indicala quando te lo chiede. Metadati, PDF e parole chiave (→ tag) entrano insieme, senza doppioni.</dd>
             <dt>…sistemare un paper arrivato senza titolo o con metadati sbagliati?</dt>
             <dd>Clic su «✦ N senza metadati» in alto per il recupero in blocco (solo abbinamenti sicuri). Per il caso singolo: tasto destro → Organizza → <strong>Recupera metadati…</strong> mostra i candidati trovati online con le prove nel PDF e applichi quello giusto (o incolli un DOI/arXiv). Ritocchi a mano: Modifica metadati. Per tutta la libreria: Impostazioni → Manutenzione → «Verifica e ripara metadati».</dd>
+            <dt>…vedere cosa sta facendo l'app in questo momento (e perché qualcosa è fallito)?</dt>
+            <dd>Apri la <strong>Plancia</strong> (icona tachimetro sulla barra): un sinottico in finestra separata, da tenere anche in background, dove si illumina solo ciò che sta lavorando. Gli errori accendono il nodo in rosso col motivo per esteso; clic sul nodo per dettagli e storico; «Salva registro…» esporta la sessione. Da Impostazioni → Manutenzione puoi registrare l'attività anche su file.</dd>
             <dt>…copiare una citazione pronta?</dt>
             <dd>Tasto destro sul paper → Cita: APA, IEEE, BibTeX, citekey, <code>\cite</code>, <code>[@…]</code>. Con più paper selezionati ottieni <code>\cite&#123;k1,k2&#125;</code> o tutte le voci BibTeX insieme.</dd>
             <dt>…mandare un paper a un collega?</dt>
@@ -7507,6 +7549,22 @@
                 {repairing ? "Riparazione in corso…" : "Verifica e ripara metadati"}
               </button>
               {#if repairMsg}<p class="sethint" style="margin-top:8px;">{repairMsg}</p>{/if}
+
+              <p class="dimtext" style="margin-top:20px;">
+                <strong>Plancia — registro su file.</strong> La Plancia (icona tachimetro) mostra in tempo reale i
+                processi interni; qui puoi far scrivere lo stesso registro anche su file, uno al giorno
+                (conservati gli ultimi 14), utile per capire a posteriori cosa è successo.
+              </p>
+              <label class="setrow" style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" checked={pulseLog} onchange={togglePulseLog} />
+                Registra l'attività della Plancia su file
+              </label>
+              {#if pulseLog && pulseLogDir}
+                <p class="sethint">
+                  I file sono in <code>{pulseLogDir}</code>
+                  <button class="linklike" onclick={() => void pulseRevealLogs()}>apri cartella</button>
+                </p>
+              {/if}
             {/if}
           </div>
         </div>

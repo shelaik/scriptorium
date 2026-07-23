@@ -1118,3 +1118,11 @@ export interface UpdateInfo {
   url: string;
 }
 export const checkUpdate = () => invoke<UpdateInfo>("check_update");
+
+// ===== Plancia (monitor dei processi interni, finestra separata) =====
+export const openPlancia = () => invoke<void>("open_plancia");
+
+export interface PulseLogStatus { enabled: boolean; dir: string }
+export const pulseLogStatus = () => invoke<PulseLogStatus>("pulse_log_status");
+export const setPulseLog = (enabled: boolean) => invoke<PulseLogStatus>("set_pulse_log", { enabled });
+export const pulseRevealLogs = () => invoke<void>("pulse_reveal_logs");

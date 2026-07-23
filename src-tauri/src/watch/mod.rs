@@ -62,7 +62,12 @@ fn import_watched(app: &AppHandle, path: PathBuf) {
         };
         if matches!(outcome, Ok(o) if o.imported) {
             let _ = app.emit("library-changed", ());
+            let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            crate::pulse::blip(&app, "cartella", &format!("Nuovo PDF dalla cartella sorvegliata: {name}"));
         }
+    } else {
+        let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        crate::pulse::err(&app, "cartella", "Cartella sorvegliata", &format!("{name}: PDF non leggibile dopo 4 tentativi"));
     }
 
     INFLIGHT.lock().unwrap().remove(&path);
