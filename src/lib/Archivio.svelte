@@ -90,13 +90,14 @@
     try {
       localStorage.setItem("scriptorium-suggmode", m);
     } catch { /* ignore */ }
-    void loadSuggestions();
+    // Prima del primo calcolo è solo una scelta; a lista aperta, ricalcola.
+    if (sugg != null) void loadSuggestions();
   }
   function saveSuggWeight() {
     try {
       localStorage.setItem("scriptorium-suggweight", String(suggWeight));
     } catch { /* ignore */ }
-    void loadSuggestions();
+    if (sugg != null) void loadSuggestions();
   }
 
   // ---- layout dell'albero -----------------------------------------------------
@@ -712,40 +713,46 @@
               Con la ricerca attiva, a ogni avvio Scriptorium cerca online nuovi paper per questa
               raccolta (query = il nome; puoi raffinarla fra le ricerche salvate di «Novità»). Le novità
               accettate dal feed <b>entrano già nella raccolta</b>; con ≥3 paper indicizzati i risultati
-              sono filtrati per somiglianza semantica.
+              sono filtrati per somiglianza semantica. Spegnendola, la ricerca (e il suo feed)
+              <b>viene rimossa</b> dalle ricerche salvate.
             </div>
           {/if}
 
           {#if !selNode.smart}
             <div class="suggbox">
+              <div class="sugghead">
+                <span>✦ SUGGERIMENTI {suggLoading ? "· CALCOLO…" : sugg != null ? `(${suggVisible.length} sopra soglia)` : ""}</span>
+                {#if sugg != null}
+                  <button class="pclosemini" onclick={() => (sugg = null)}>✕</button>
+                {/if}
+              </div>
+              <!-- La SORGENTE si sceglie PRIMA di calcolare: sempre visibile. -->
+              <div class="suggctl">
+                <span class="modechips">
+                  <button class="lfm" class:active={suggMode === "name"} disabled={suggLoading} onclick={() => setSuggMode("name")} title="Somiglianza col solo NOME della raccolta (utile su raccolte nuove dal titolo parlante)">NOME</button>
+                  <button class="lfm" class:active={suggMode === "content"} disabled={suggLoading || selNode.count === 0} onclick={() => setSuggMode("content")} title={selNode.count === 0 ? "Serve almeno un paper nella raccolta" : "Somiglianza col solo CONTENUTO (centroide dei paper già dentro) — ignora il nome"}>CONTENUTO</button>
+                  <button class="lfm" class:active={suggMode === "both"} disabled={suggLoading || selNode.count === 0} onclick={() => setSuggMode("both")} title={selNode.count === 0 ? "Serve almeno un paper nella raccolta" : "Miscela nome+contenuto, col peso qui sotto"}>ENTRAMBI</button>
+                </span>
+                {#if suggMode === "both" && selNode.count > 0}
+                  <label class="sldlbl" title="Quanto pesa il CONTENUTO nella miscela (il resto è il nome)">
+                    contenuto <b>{suggWeight}%</b> · nome <b>{100 - suggWeight}%</b>
+                    <input type="range" min="0" max="100" step="5" bind:value={suggWeight} disabled={suggLoading} onchange={saveSuggWeight} />
+                  </label>
+                {/if}
+                <label class="chklbl">
+                  <input type="checkbox" bind:checked={suggUnfiled} disabled={suggLoading} onchange={() => { if (sugg != null) void loadSuggestions(); }} />
+                  solo senza raccolta
+                </label>
+              </div>
               {#if sugg == null}
                 <button class="pbtn wide" onclick={loadSuggestions} disabled={suggLoading}>
-                  {suggLoading ? "CALCOLO…" : "✦ SUGGERISCI PAPER PER QUESTA RACCOLTA"}
+                  {suggLoading ? "CALCOLO…" : "CALCOLA I SUGGERIMENTI"}
                 </button>
               {:else}
-                <div class="sugghead">
-                  <span>SUGGERIMENTI {suggLoading ? "· CALCOLO…" : `(${suggVisible.length} sopra soglia)`}</span>
-                  <button class="pclosemini" onclick={() => (sugg = null)}>✕</button>
-                </div>
                 <div class="suggctl">
-                  <span class="modechips">
-                    <button class="lfm" class:active={suggMode === "name"} disabled={suggLoading} onclick={() => setSuggMode("name")} title="Somiglianza col solo NOME della raccolta (utile su raccolte nuove dal titolo parlante)">NOME</button>
-                    <button class="lfm" class:active={suggMode === "content"} disabled={suggLoading || selNode.count === 0} onclick={() => setSuggMode("content")} title={selNode.count === 0 ? "Serve almeno un paper nella raccolta" : "Somiglianza col solo CONTENUTO (centroide dei paper già dentro) — ignora il nome"}>CONTENUTO</button>
-                    <button class="lfm" class:active={suggMode === "both"} disabled={suggLoading || selNode.count === 0} onclick={() => setSuggMode("both")} title={selNode.count === 0 ? "Serve almeno un paper nella raccolta" : "Miscela nome+contenuto, col peso qui sotto"}>ENTRAMBI</button>
-                  </span>
-                  {#if suggMode === "both"}
-                    <label class="sldlbl" title="Quanto pesa il CONTENUTO nella miscela (il resto è il nome)">
-                      contenuto <b>{suggWeight}%</b> · nome <b>{100 - suggWeight}%</b>
-                      <input type="range" min="0" max="100" step="5" bind:value={suggWeight} disabled={suggLoading} onchange={saveSuggWeight} />
-                    </label>
-                  {/if}
                   <label class="sldlbl">
                     confidenza ≥ <b>{suggThreshold}%</b>
                     <input type="range" min="30" max="90" step="1" bind:value={suggThreshold} />
-                  </label>
-                  <label class="chklbl">
-                    <input type="checkbox" bind:checked={suggUnfiled} disabled={suggLoading} onchange={loadSuggestions} />
-                    solo senza raccolta
                   </label>
                   <button class="pbtn" onclick={addAllSuggestions} disabled={suggAdding || suggVisible.length === 0}>
                     {suggAdding ? "AGGIUNGO…" : `AGGIUNGI TUTTI (${suggVisible.length})`}

@@ -9031,10 +9031,15 @@ pub fn delete_collection_rehome(app: AppHandle, id: i64) -> Result<(), String> {
         params![parent, id],
     )
     .map_err(|e| e.to_string())?;
-    // La ricerca «Novità» agganciata si sgancia e sopravvive tra le ricerche
-    // salvate normali (mai distruggere roba dell'utente di riflesso).
+    // La ricerca «Novità» agganciata è un artefatto del toggle: vive e muore
+    // con la raccolta (stessa semantica dello spegnimento del toggle).
     txn.execute(
-        "UPDATE saved_searches SET collection_id = NULL WHERE collection_id = ?1",
+        "DELETE FROM watch_hits WHERE watch_id IN (SELECT id FROM saved_searches WHERE collection_id = ?1)",
+        params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    txn.execute(
+        "DELETE FROM saved_searches WHERE collection_id = ?1",
         params![id],
     )
     .map_err(|e| e.to_string())?;
@@ -9075,12 +9080,20 @@ pub fn set_collection_watch(app: AppHandle, collection_id: i64, enabled: bool) -
         .optional()
         .map_err(|e| e.to_string())?;
     match existing {
-        Some(sid) => {
+        Some(sid) if enabled => {
             conn.execute(
-                "UPDATE saved_searches SET auto_run = ?1 WHERE id = ?2",
-                params![enabled as i64, sid],
+                "UPDATE saved_searches SET auto_run = 1 WHERE id = ?1",
+                params![sid],
             )
             .map_err(|e| e.to_string())?;
+        }
+        Some(sid) => {
+            // Il toggle l'ha creata, il toggle la toglie: OFF = la ricerca (e il
+            // suo feed) spariscono dalle ricerche salvate. Riaccendere = ricrearla.
+            conn.execute("DELETE FROM watch_hits WHERE watch_id = ?1", params![sid])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM saved_searches WHERE id = ?1", params![sid])
+                .map_err(|e| e.to_string())?;
         }
         None if enabled => {
             conn.execute(
