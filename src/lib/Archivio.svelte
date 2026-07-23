@@ -723,7 +723,7 @@
                     <div class="srow empty">Niente sopra il {suggThreshold}% — abbassa la soglia.</div>
                   {/each}
                 </div>
-                <div class="pnote">Punteggio = somiglianza semantica (bge-m3, in locale) col nome della raccolta e con i paper che già contiene: più ne aggiungi, più i suggerimenti migliorano. Nulla viene aggiunto senza il tuo clic.</div>
+                <div class="pnote">Punteggio = somiglianza semantica (bge-m3, in locale) coi paper che la raccolta già contiene (e col nome, quando possibile): più ne aggiungi, più i suggerimenti migliorano. Con almeno un paper dentro non serve né rete né Ollama. Nulla viene aggiunto senza il tuo clic.</div>
               {/if}
             </div>
           {/if}

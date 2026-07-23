@@ -2,6 +2,9 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.32 — Suggerimenti senza Ollama
+- **I Suggerimenti dell'Archivio non dipendono più da Ollama**: con almeno un paper nella raccolta lavorano di **solo centroide** (i vettori già calcolati — zero provider, zero rete); il nome della raccolta contribuisce come bonus quando il modello locale è in cache (CPU) o, solo in subordine, se Ollama è il provider configurato ed è acceso. Il caso raccolta-vuota-senza-modelli dà un messaggio chiaro invece di un errore di connessione. Stessa preferenza per il modello locale nel filtro semantico dello sweep «Novità».
+
 ## 0.9.31 — Archivio: raccolte ad albero, suggerimenti, novità per raccolta, specchio su disco
 - **Nuovo: la vista «Archivio»** (icona cartella sulla barra): le collezioni diventano un **albero navigabile** in stile sinottico — sotto-raccolte a piacere, conteggi veri, pannello con statistiche. **Trascina un paper** su una raccolta per spostarlo (Ctrl = aggiungi anche lì: l'appartenenza è multipla), trascina una raccolta su un'altra per **annidarla**, sullo sfondo per riportarla alla radice. Eliminare una raccolta non tocca mai i paper: le sotto-raccolte risalgono di un livello (niente cancellazioni a cascata, da nessun percorso).
 - **✦ Suggerisci paper per questa raccolta**: candidati ordinati per **somiglianza semantica locale** (bge-m3, il motore dell'Indice semantico: centroide dei paper già dentro + nome della raccolta), **slider di confidenza**, «solo senza raccolta», aggiungi singolo o tutti — mai nulla in automatico. Più paper aggiungi, più i suggerimenti migliorano.

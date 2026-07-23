@@ -7633,8 +7633,10 @@ async fn run_watch_core(app: &AppHandle, s: &SavedSearch) -> Result<(Vec<discove
                 })
                 .collect();
             let cache = embed_cache_dir(app);
+            // Modello locale in cache → CPU, senza dipendere da Ollama acceso.
+            let use_gpu = if embed::model_cached(&cache) { false } else { gpu };
             let embedded = tauri::async_runtime::spawn_blocking(move || {
-                embed_texts(gpu, &ollama_url, &cache, texts)
+                embed_texts(use_gpu, &ollama_url, &cache, texts)
             })
             .await
             .map_err(|e| e.to_string())?;
@@ -9409,21 +9411,39 @@ fn suggest_for_collection_inner(
             norm(&mut c);
             centroid = Some(c);
         }
-        // L'embedding del nome gira FUORI dal lock db (può caricare il modello).
-        let mut name_vec = embed_query_text(gpu, &ollama_url, &cache, &name)?;
-        norm(&mut name_vec);
-        let query: Vec<f32> = match centroid {
-            Some(c) if member_vecs.len() >= 3 => {
-                let mut q: Vec<f32> = c.iter().zip(name_vec.iter()).map(|(a, b)| 0.75 * a + 0.25 * b).collect();
+        // L'embedding del NOME è un bonus, mai una dipendenza: prima il modello
+        // locale se è già in cache (nessun Ollama, nessun download), altrimenti
+        // Ollama solo se è il provider configurato — e se fallisce si va di solo
+        // centroide. (Stesso spazio bge-m3 in entrambi i casi.)
+        let name_vec: Option<Vec<f32>> = {
+            let v = if embed::model_cached(&cache) {
+                embed::embed_query(&cache, &name).ok()
+            } else if gpu {
+                embed_query_text(true, &ollama_url, &cache, &name).ok()
+            } else {
+                None
+            };
+            v.map(|mut nv| {
+                norm(&mut nv);
+                nv
+            })
+        };
+        let query: Vec<f32> = match (centroid, name_vec) {
+            (Some(c), Some(nv)) => {
+                let w = if member_vecs.len() >= 3 { 0.75 } else { 0.5 };
+                let mut q: Vec<f32> =
+                    c.iter().zip(nv.iter()).map(|(a, b)| w * a + (1.0 - w) * b).collect();
                 norm(&mut q);
                 q
             }
-            Some(c) => {
-                let mut q: Vec<f32> = c.iter().zip(name_vec.iter()).map(|(a, b)| 0.5 * a + 0.5 * b).collect();
-                norm(&mut q);
-                q
+            (Some(c), None) => c, // solo centroide: nessun provider richiesto
+            (None, Some(nv)) => nv,
+            (None, None) => {
+                return Err(
+                    "Raccolta vuota e nessun modo di vettorizzare il nome: metti 1-2 paper nella raccolta e riprova (oppure costruisci l'Indice semantico locale, o avvia Ollama)"
+                        .into(),
+                )
             }
-            None => name_vec,
         };
 
         // 3) Coseno contro tutti i candidati (la libreria è piccola: niente KNN).
