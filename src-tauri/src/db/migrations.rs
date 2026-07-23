@@ -322,6 +322,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "doc_chunks", "page", "INTEGER")?;
     // Saved search participates in the on-launch "Novità" sweep (default: yes).
     add_column_if_missing(conn, "saved_searches", "auto_run", "INTEGER NOT NULL DEFAULT 1")?;
+    // Ricerca «Novità» agganciata a una raccolta (vista Archivio): le novità
+    // accettate dal suo feed entrano direttamente nella raccolta.
+    add_column_if_missing(conn, "saved_searches", "collection_id", "INTEGER")?;
     backfill_github_urls(conn)?;
     // Assign citekeys to any documents that don't have one yet (cheap no-op once full).
     super::citekey::backfill(conn)?;

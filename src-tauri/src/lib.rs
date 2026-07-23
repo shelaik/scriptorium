@@ -12,6 +12,7 @@ mod import;
 mod mathocr;
 mod mdexport;
 mod metadata;
+mod mirror;
 mod model;
 mod notes;
 mod obsidian;
@@ -127,6 +128,8 @@ pub fn run() {
             // Start the browser connector (loopback bookmarklet endpoint) unless
             // the user disabled it. Non-fatal if the port can't be bound.
             commands::start_connector(app.handle());
+            // Specchio su disco (Archivio): se attivo, riallinealo all'avvio.
+            mirror::request_sync(app.handle());
             // "Novità": on-launch background sweep of auto-run saved searches for
             // new papers since last time. Debounced (12h) and gated behind the
             // opt-in online-discovery setting; emits `novita-changed` when done.
@@ -204,6 +207,20 @@ pub fn run() {
             commands::set_document_tags,
             commands::list_collections,
             commands::create_collection,
+            commands::rename_collection,
+            commands::move_collection,
+            commands::delete_collection_rehome,
+            commands::archive_tree,
+            commands::list_unfiled_documents,
+            commands::add_documents_to_collection,
+            commands::move_documents_to_collection,
+            commands::remove_documents_from_collection,
+            commands::suggest_for_collection,
+            commands::set_collection_watch,
+            mirror::mirror_status,
+            mirror::set_mirror,
+            mirror::mirror_regenerate,
+            mirror::mirror_reveal,
             commands::delete_collection,
             commands::add_to_collection,
             commands::remove_from_collection,

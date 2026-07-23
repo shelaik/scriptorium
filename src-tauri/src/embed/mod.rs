@@ -18,6 +18,30 @@ const FULLTEXT_CHARS: usize = 2000;
 
 static EMBEDDER: OnceCell<Mutex<TextEmbedding>> = OnceCell::new();
 
+/// True se la cache locale contiene già file del modello (nessun download
+/// partirebbe). Usato dai chiamanti in background che NON devono mai innescare
+/// il download da 2.3GB senza consenso (es. il filtro semantico dello sweep).
+pub fn model_cached(cache_dir: &Path) -> bool {
+    fn has_onnx(dir: &Path, depth: u8) -> bool {
+        if depth > 3 {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else { return false };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if has_onnx(&p, depth + 1) {
+                    return true;
+                }
+            } else if p.extension().and_then(|x| x.to_str()) == Some("onnx") {
+                return true;
+            }
+        }
+        false
+    }
+    has_onnx(cache_dir, 0)
+}
+
 /// Lazily initialize the bge-m3 embedder. The first call downloads the model
 /// into `cache_dir`; later calls reuse the cached files.
 fn embedder(cache_dir: &Path) -> Result<&'static Mutex<TextEmbedding>> {

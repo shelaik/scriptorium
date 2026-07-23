@@ -110,6 +110,9 @@ pub async fn import_files(app: AppHandle, paths: Vec<String>) -> Result<ImportSu
                 summary.errors.len()
             ),
         );
+        if !summary.imported.is_empty() {
+            crate::mirror::request_sync(&app);
+        }
         Ok::<_, String>(summary)
     })
     .await
@@ -7028,6 +7031,16 @@ pub async fn explore_citations(
 /// reference. Returns "added_pdf" | "added_ref" | "duplicate".
 #[tauri::command]
 pub async fn discover_add(app: AppHandle, result: discovery::SearchResult) -> Result<String, String> {
+    discover_add_with_id(app, result).await.map(|(outcome, _)| outcome)
+}
+
+/// Come [`discover_add`], ma restituisce anche l'id del documento coinvolto
+/// (nuovo O duplicato già presente) — serve al feed Novità per archiviare il
+/// paper nella raccolta agganciata alla ricerca.
+async fn discover_add_with_id(
+    app: AppHandle,
+    result: discovery::SearchResult,
+) -> Result<(String, Option<i64>), String> {
     let short = result.title.clone().unwrap_or_else(|| result.external_id.clone());
     let short: String = short.chars().take(60).collect();
     pulse::start(&app, "scoperta", &format!("Aggiunta dalla scoperta: «{short}»"));
@@ -7036,7 +7049,10 @@ pub async fn discover_add(app: AppHandle, result: discovery::SearchResult) -> Re
     r
 }
 
-async fn discover_add_inner(app: AppHandle, result: discovery::SearchResult) -> Result<String, String> {
+async fn discover_add_inner(
+    app: AppHandle,
+    result: discovery::SearchResult,
+) -> Result<(String, Option<i64>), String> {
     // Gate behind the opt-in network setting (consistent with discover_search).
     {
         let state = app.state::<AppState>();
@@ -7057,8 +7073,8 @@ async fn discover_add_inner(app: AppHandle, result: discovery::SearchResult) -> 
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        if dup.is_some() {
-            return Ok("duplicate".into());
+        if let Some(dup_id) = dup {
+            return Ok(("duplicate".into(), Some(dup_id)));
         }
     }
 
@@ -7078,9 +7094,11 @@ async fn discover_add_inner(app: AppHandle, result: discovery::SearchResult) -> 
                 match import::commit_import(&conn, &prepared, false) {
                     Ok(o) if o.imported => {
                         write_result_meta(&mut conn, o.document_id, &result).map_err(|e| e.to_string())?;
-                        return Ok("added_pdf".into());
+                        drop(conn);
+                        crate::mirror::request_sync(&app);
+                        return Ok(("added_pdf".into(), Some(o.document_id)));
                     }
-                    Ok(_) => return Ok("duplicate".into()),
+                    Ok(o) => return Ok(("duplicate".into(), Some(o.document_id))),
                     Err(e) => return Err(e.to_string()),
                 }
             }
@@ -7095,7 +7113,7 @@ async fn discover_add_inner(app: AppHandle, result: discovery::SearchResult) -> 
         .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
     write_result_meta(&mut conn, id, &result).map_err(|e| e.to_string())?;
-    Ok("added_ref".into())
+    Ok(("added_ref".into(), Some(id)))
 }
 
 // ===== "Aggancia da URL" + browser connector =====
@@ -7439,6 +7457,8 @@ pub struct SavedSearch {
     pub last_run_at: Option<String>,
     /// Whether the on-launch "Novità" sweep re-runs this search automatically.
     pub auto_run: bool,
+    /// Raccolta agganciata (vista Archivio): le novità accettate vi entrano da sole.
+    pub collection_id: Option<i64>,
 }
 
 fn row_to_saved(r: &rusqlite::Row) -> rusqlite::Result<SavedSearch> {
@@ -7454,10 +7474,11 @@ fn row_to_saved(r: &rusqlite::Row) -> rusqlite::Result<SavedSearch> {
         sort: r.get(8)?,
         last_run_at: r.get(10)?,
         auto_run: r.get::<_, i64>(11)? != 0,
+        collection_id: r.get(12)?,
     })
 }
 
-const SAVED_COLS: &str = "id, name, source, query, author, year_from, year_to, oa_only, sort, seen_ids, last_run_at, auto_run";
+const SAVED_COLS: &str = "id, name, source, query, author, year_from, year_to, oa_only, sort, seen_ids, last_run_at, auto_run, collection_id";
 
 #[tauri::command]
 pub fn list_saved_searches(state: State<'_, AppState>) -> Result<Vec<SavedSearch>, String> {
@@ -7550,7 +7571,7 @@ async fn run_watch_core(app: &AppHandle, s: &SavedSearch) -> Result<(Vec<discove
             .map_err(|e| e.to_string())?
     };
 
-    let results = discover_search(
+    let mut results = discover_search(
         app.clone(),
         s.query.clone(),
         s.source.clone(),
@@ -7561,6 +7582,110 @@ async fn run_watch_core(app: &AppHandle, s: &SavedSearch) -> Result<(Vec<discove
         s.sort.clone(),
     )
     .await?;
+
+    // Ricerca agganciata a una raccolta con ≥3 paper indicizzati: filtra i
+    // risultati per somiglianza semantica col centroide della raccolta (stesso
+    // motore dei Suggerimenti). Il centroide esiste ⇒ il modello è già scaricato.
+    if let Some(coll) = s.collection_id {
+        const WATCH_SIM_MIN: f32 = 0.45;
+        let (gpu, ollama_url, member_vecs) = {
+            let state = app.state::<AppState>();
+            let conn = state.db.lock();
+            let c = ai_config(&conn);
+            let mut stmt = conn
+                .prepare(
+                    "SELECT v.embedding FROM collection_members cm
+                     JOIN doc_vec v ON v.document_id = cm.document_id
+                     JOIN documents d ON d.id = cm.document_id AND d.deleted_at IS NULL
+                     WHERE cm.collection_id = ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let vecs: Vec<Vec<f32>> = stmt
+                .query_map(params![coll], |r| r.get::<_, Vec<u8>>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok)
+                .map(|b| bytes_to_f32(&b))
+                .collect();
+            (c.embed_gpu, c.ollama_url.clone(), vecs)
+        };
+        // MAI innescare il download del modello (2.3GB) da uno sweep in
+        // background: col provider CPU si filtra solo se la cache è già piena.
+        let cache_probe = embed_cache_dir(app);
+        let model_ok = gpu || embed::model_cached(&cache_probe);
+        if member_vecs.len() >= 3 && model_ok {
+            let dim = member_vecs[0].len();
+            let mut centroid = vec![0f32; dim];
+            for mut v in member_vecs {
+                norm(&mut v);
+                for (ci, vi) in centroid.iter_mut().zip(v.iter()) {
+                    *ci += vi;
+                }
+            }
+            norm(&mut centroid);
+            let texts: Vec<String> = results
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{} {}",
+                        r.title.clone().unwrap_or_default(),
+                        r.abstract_text.clone().unwrap_or_default()
+                    )
+                })
+                .collect();
+            let cache = embed_cache_dir(app);
+            let embedded = tauri::async_runtime::spawn_blocking(move || {
+                embed_texts(gpu, &ollama_url, &cache, texts)
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            // Risposta disallineata (provider remoto che restituisce meno vettori
+            // dei testi): non filtrare al buio, meglio risultati interi.
+            if let Ok(vecs) = embedded {
+                if vecs.len() == results.len() {
+                    let before = results.len();
+                    let keep: Vec<bool> = vecs
+                        .into_iter()
+                        .map(|mut v| {
+                            if v.len() != centroid.len() {
+                                return true; // dimensioni diverse: non filtrare al buio
+                            }
+                            norm(&mut v);
+                            let cos: f32 = v.iter().zip(centroid.iter()).map(|(a, b)| a * b).sum();
+                            cos >= WATCH_SIM_MIN
+                        })
+                        .collect();
+                    let mut it = keep.iter();
+                    results.retain(|_| *it.next().unwrap_or(&true));
+                    let dropped = before - results.len();
+                    if dropped > 0 {
+                        pulse::blip(
+                            app,
+                            "scoperta",
+                            &format!("«{}»: {dropped} risultati scartati dal filtro semantico", s.name),
+                        );
+                    }
+                }
+            }
+            // Embedding fallito (es. Ollama spento): meglio novità non filtrate
+            // che nessuna novità — si prosegue coi risultati interi.
+        }
+    }
+
+    // Ricerca di raccolta appena creata (baseline vuota): il PRIMO sweep è un
+    // battesimo — registra i risultati correnti come «visti» SENZA riversarli
+    // nel feed (le «novità» partono da ora; il pregresso lo coprono i
+    // Suggerimenti nell'Archivio).
+    if s.collection_id.is_some() && seen.trim().is_empty() && !results.is_empty() {
+        let ids: Vec<String> = results.iter().map(|r| r.external_id.clone()).collect();
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        conn.execute(
+            "UPDATE saved_searches SET seen_ids = ?1, last_run_at = datetime('now') WHERE id = ?2",
+            params![ids.join("\n"), s.id],
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok((results, Vec::new()));
+    }
 
     let baseline: std::collections::HashSet<&str> = seen.lines().collect();
     let mut fresh: Vec<String> = Vec::new();
@@ -7765,20 +7890,57 @@ pub fn dismiss_watch_hits(state: State<'_, AppState>, watch_id: i64) -> Result<(
 /// hit as 'added'. Returns the discover_add outcome ("added_pdf"|"added_ref"|"duplicate").
 #[tauri::command]
 pub async fn accept_hit(app: AppHandle, hit_id: i64) -> Result<String, String> {
-    let json: String = {
+    let (json, watch_id): (String, i64) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
-        conn.query_row("SELECT result_json FROM watch_hits WHERE id = ?1", params![hit_id], |r| r.get(0))
-            .optional()
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "novità non trovata".to_string())?
+        conn.query_row(
+            "SELECT result_json, watch_id FROM watch_hits WHERE id = ?1",
+            params![hit_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "novità non trovata".to_string())?
     };
     let result: discovery::SearchResult = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    let outcome = discover_add(app.clone(), result).await?;
+    let (outcome, doc_id) = discover_add_with_id(app.clone(), result).await?;
     let state = app.state::<AppState>();
     let conn = state.db.lock();
     conn.execute("UPDATE watch_hits SET state = 'added' WHERE id = ?1", params![hit_id])
         .map_err(|e| e.to_string())?;
+    // Se la ricerca è agganciata a una raccolta (vista Archivio), il paper
+    // accettato — nuovo o già in libreria — entra direttamente lì.
+    if let Some(doc_id) = doc_id {
+        let coll: Option<i64> = conn
+            .query_row(
+                "SELECT c.id FROM saved_searches s JOIN collections c ON c.id = s.collection_id
+                 WHERE s.id = ?1 AND c.is_smart = 0",
+                params![watch_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(coll) = coll {
+            // Solo documenti VIVI: la dedup per hash può restituire un gemello
+            // nel cestino — archiviarlo creerebbe un'appartenenza invisibile.
+            match conn.execute(
+                "INSERT OR IGNORE INTO collection_members (collection_id, document_id)
+                 SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM documents WHERE id = ?2 AND deleted_at IS NULL)",
+                params![coll, doc_id],
+            ) {
+                Ok(n) if n > 0 => {
+                    drop(conn);
+                    pulse::blip(&app, "archivio", "Novità accettata: archiviata nella sua raccolta");
+                    crate::mirror::request_sync(&app);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    drop(conn);
+                    pulse::warn(&app, "archivio", "Novità accettata ma non archiviata", &e.to_string());
+                }
+            }
+        }
+    }
     Ok(outcome)
 }
 
@@ -8728,15 +8890,16 @@ pub fn export_obsidian(
 pub fn list_collections(state: State<'_, AppState>) -> Result<Vec<Collection>, String> {
     let conn = state.db.lock();
     let mut stmt = conn
-        .prepare("SELECT id, name, is_smart, rule_json FROM collections ORDER BY name")
+        .prepare("SELECT id, name, parent_id, is_smart, rule_json FROM collections ORDER BY name")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
             Ok(Collection {
                 id: r.get(0)?,
                 name: r.get(1)?,
-                is_smart: r.get::<_, i64>(2)? != 0,
-                rule_json: r.get(3)?,
+                parent_id: r.get(2)?,
+                is_smart: r.get::<_, i64>(3)? != 0,
+                rule_json: r.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -8745,61 +8908,617 @@ pub fn list_collections(state: State<'_, AppState>) -> Result<Vec<Collection>, S
 
 #[tauri::command]
 pub fn create_collection(
-    state: State<'_, AppState>,
+    app: AppHandle,
     name: String,
     is_smart: bool,
     rule_json: Option<String>,
+    parent_id: Option<i64>,
 ) -> Result<Collection, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Il nome della raccolta è vuoto".into());
+    }
+    let state = app.state::<AppState>();
     let conn = state.db.lock();
+    if let Some(p) = parent_id {
+        let smart_parent: i64 = conn
+            .query_row("SELECT is_smart FROM collections WHERE id = ?1", params![p], |r| r.get(0))
+            .map_err(|_| "La raccolta madre non esiste".to_string())?;
+        if smart_parent != 0 {
+            return Err("Una raccolta smart non può avere sotto-raccolte".into());
+        }
+    }
     conn.execute(
-        "INSERT INTO collections (name, is_smart, rule_json) VALUES (?1, ?2, ?3)",
-        params![name, is_smart as i64, rule_json],
+        "INSERT INTO collections (name, parent_id, is_smart, rule_json) VALUES (?1, ?2, ?3, ?4)",
+        params![name, parent_id, is_smart as i64, rule_json],
     )
     .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
+    drop(conn);
+    crate::mirror::request_sync(&app);
     Ok(Collection {
         id,
         name,
+        parent_id,
         is_smart,
         rule_json,
     })
 }
 
 #[tauri::command]
-pub fn delete_collection(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+pub fn rename_collection(app: AppHandle, id: i64, name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Il nome della raccolta è vuoto".into());
+    }
+    let state = app.state::<AppState>();
     let conn = state.db.lock();
-    conn.execute("DELETE FROM collections WHERE id = ?1", params![id])
+    let old: String = conn
+        .query_row("SELECT name FROM collections WHERE id = ?1", params![id], |r| r.get(0))
+        .map_err(|_| "Raccolta non trovata".to_string())?;
+    conn.execute("UPDATE collections SET name = ?1 WHERE id = ?2", params![name, id])
         .map_err(|e| e.to_string())?;
+    // La ricerca «Novità» agganciata segue il nome; la query solo se non è
+    // stata personalizzata (cioè se era ancora identica al vecchio nome).
+    let _ = conn.execute(
+        "UPDATE saved_searches SET name = ?1, query = CASE WHEN query = ?2 THEN ?1 ELSE query END
+         WHERE collection_id = ?3",
+        params![name, old, id],
+    );
+    drop(conn);
+    crate::mirror::request_sync(&app);
     Ok(())
+}
+
+/// Ri-annida una raccolta sotto `parent_id` (None = radice). Rifiuta i cicli:
+/// una raccolta non può finire sotto sé stessa o un proprio discendente.
+#[tauri::command]
+pub fn move_collection(app: AppHandle, id: i64, parent_id: Option<i64>) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let conn = state.db.lock();
+    if let Some(p) = parent_id {
+        if p == id {
+            return Err("Una raccolta non può stare dentro sé stessa".into());
+        }
+        let smart_parent: i64 = conn
+            .query_row("SELECT is_smart FROM collections WHERE id = ?1", params![p], |r| r.get(0))
+            .map_err(|_| "La raccolta di destinazione non esiste".to_string())?;
+        if smart_parent != 0 {
+            return Err("Una raccolta smart non può avere sotto-raccolte".into());
+        }
+        // Risali dagli antenati del nuovo genitore: se incontri `id` è un ciclo.
+        // Il tetto di profondità è FAIL-CLOSED: se non raggiungiamo la radice
+        // entro 64 livelli rifiutiamo (mai permettere un ciclo per stanchezza).
+        let mut cur = Some(p);
+        for _ in 0..64 {
+            let Some(c) = cur else { break };
+            if c == id {
+                return Err("Non puoi spostare una raccolta dentro una sua sotto-raccolta".into());
+            }
+            cur = conn
+                .query_row("SELECT parent_id FROM collections WHERE id = ?1", params![c], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+        }
+        if cur.is_some() {
+            return Err("Gerarchia troppo profonda: spostamento rifiutato".into());
+        }
+    }
+    let n = conn
+        .execute("UPDATE collections SET parent_id = ?1 WHERE id = ?2", params![parent_id, id])
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err("Raccolta non trovata".into());
+    }
+    drop(conn);
+    crate::mirror::request_sync(&app);
+    Ok(())
+}
+
+/// Elimina una raccolta SENZA perdere nulla: le sotto-raccolte risalgono al
+/// suo genitore (niente CASCADE), i documenti perdono solo l'appartenenza.
+#[tauri::command]
+pub fn delete_collection_rehome(app: AppHandle, id: i64) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut conn = state.db.lock();
+    let txn = conn.transaction().map_err(|e| e.to_string())?;
+    let parent: Option<i64> = txn
+        .query_row("SELECT parent_id FROM collections WHERE id = ?1", params![id], |r| r.get(0))
+        .map_err(|_| "Raccolta non trovata".to_string())?;
+    txn.execute(
+        "UPDATE collections SET parent_id = ?1 WHERE parent_id = ?2",
+        params![parent, id],
+    )
+    .map_err(|e| e.to_string())?;
+    // La ricerca «Novità» agganciata si sgancia e sopravvive tra le ricerche
+    // salvate normali (mai distruggere roba dell'utente di riflesso).
+    txn.execute(
+        "UPDATE saved_searches SET collection_id = NULL WHERE collection_id = ?1",
+        params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    txn.execute("DELETE FROM collections WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    txn.commit().map_err(|e| e.to_string())?;
+    drop(conn);
+    crate::mirror::request_sync(&app);
+    Ok(())
+}
+
+/// Accende/spegne la ricerca «Novità» agganciata a una raccolta. La prima
+/// accensione crea una ricerca salvata (query = nome raccolta, personalizzabile
+/// poi fra le ricerche salvate); lo spegnimento la disattiva senza cancellarla.
+#[tauri::command]
+pub fn set_collection_watch(app: AppHandle, collection_id: i64, enabled: bool) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    let conn = state.db.lock();
+    if enabled && setting(&conn, "discovery_enabled").as_deref() != Some("1") {
+        return Err("La ricerca online è disattivata: attivala in Impostazioni → Ricerca online".into());
+    }
+    let (name, smart): (String, i64) = conn
+        .query_row(
+            "SELECT name, is_smart FROM collections WHERE id = ?1",
+            params![collection_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "Raccolta non trovata".to_string())?;
+    if smart != 0 {
+        return Err("Le raccolte smart si popolano già da sole con la loro regola".into());
+    }
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM saved_searches WHERE collection_id = ?1 ORDER BY id LIMIT 1",
+            params![collection_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match existing {
+        Some(sid) => {
+            conn.execute(
+                "UPDATE saved_searches SET auto_run = ?1 WHERE id = ?2",
+                params![enabled as i64, sid],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        None if enabled => {
+            conn.execute(
+                "INSERT INTO saved_searches (name, source, query, sort, seen_ids, auto_run, collection_id)
+                 VALUES (?1, 'openalex', ?1, 'relevance', '', 1, ?2)",
+                params![name, collection_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        None => {}
+    }
+    drop(conn);
+    pulse::blip(
+        &app,
+        "scoperta",
+        &format!("Ricerca «Novità» {} per «{name}»", if enabled { "attivata" } else { "spenta" }),
+    );
+    Ok(enabled)
+}
+
+/// L'albero per la vista «Archivio»: raccolte con conteggio diretto dei
+/// documenti vivi, più i totali (tutti / senza raccolta).
+#[derive(serde::Serialize)]
+pub struct ArchiveNode {
+    pub id: i64,
+    pub name: String,
+    pub parent_id: Option<i64>,
+    pub is_smart: bool,
+    pub count: i64,
+    /// Ricerca «Novità» agganciata e attiva (campanella nel sinottico).
+    pub watch: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct ArchiveTree {
+    pub collections: Vec<ArchiveNode>,
+    pub unfiled: i64,
+    pub total: i64,
+}
+
+#[tauri::command]
+pub fn archive_tree(state: State<'_, AppState>) -> Result<ArchiveTree, String> {
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id, c.name, c.parent_id, c.is_smart,
+                    (SELECT COUNT(*) FROM collection_members cm
+                       JOIN documents d ON d.id = cm.document_id AND d.deleted_at IS NULL
+                     WHERE cm.collection_id = c.id),
+                    EXISTS(SELECT 1 FROM saved_searches s
+                           WHERE s.collection_id = c.id AND s.auto_run = 1)
+             FROM collections c ORDER BY c.name COLLATE NOCASE",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut collections: Vec<ArchiveNode> = stmt
+        .query_map([], |r| {
+            Ok(ArchiveNode {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                parent_id: r.get(2)?,
+                is_smart: r.get::<_, i64>(3)? != 0,
+                count: r.get(4)?,
+                watch: r.get::<_, i64>(5)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    // Le raccolte smart non hanno righe in collection_members: il loro numero
+    // vero è la regola valutata (contando solo i documenti vivi, come la griglia).
+    for node in collections.iter_mut().filter(|n| n.is_smart) {
+        node.count = ids_in_collection(&conn, node.id)
+            .ok()
+            .map(|ids| {
+                if ids.is_empty() {
+                    return 0i64;
+                }
+                let ph = vec!["?"; ids.len()].join(",");
+                let sql = format!(
+                    "SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL AND id IN ({ph})"
+                );
+                conn.query_row(&sql, rusqlite::params_from_iter(ids.iter()), |r| r.get(0))
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+    }
+    let unfiled: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL
+             AND id NOT IN (SELECT document_id FROM collection_members)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(ArchiveTree { collections, unfiled, total })
+}
+
+/// I documenti che non appartengono a nessuna raccolta (il «Senza raccolta»).
+#[tauri::command]
+pub fn list_unfiled_documents(state: State<'_, AppState>) -> Result<Vec<Document>, String> {
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id FROM documents WHERE deleted_at IS NULL
+             AND id NOT IN (SELECT document_id FROM collection_members)
+             ORDER BY added_at DESC, id DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let ids: Vec<i64> = stmt
+        .query_map([], |r| r.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    fetch_documents(&conn, &ids, false).map_err(|e| e.to_string())
+}
+
+fn assert_manual_collection(conn: &Connection, id: i64) -> Result<(), String> {
+    let smart: i64 = conn
+        .query_row("SELECT is_smart FROM collections WHERE id = ?1", params![id], |r| r.get(0))
+        .map_err(|_| "Raccolta non trovata".to_string())?;
+    if smart != 0 {
+        return Err("Le raccolte smart si popolano da sole (non si trascina dentro)".into());
+    }
+    Ok(())
+}
+
+/// Aggiunge in blocco alla raccolta (l'appartenenza è multipla: nessun vincolo).
+#[tauri::command]
+pub fn add_documents_to_collection(
+    app: AppHandle,
+    collection_id: i64,
+    ids: Vec<i64>,
+) -> Result<usize, String> {
+    let state = app.state::<AppState>();
+    let mut conn = state.db.lock();
+    assert_manual_collection(&conn, collection_id)?;
+    // In transazione come il gemello move_: o tutto o niente (una FK violata a
+    // metà lista non deve lasciare un'applicazione parziale).
+    let txn = conn.transaction().map_err(|e| e.to_string())?;
+    let mut n = 0usize;
+    for id in &ids {
+        n += txn
+            .execute(
+                "INSERT OR IGNORE INTO collection_members (collection_id, document_id) VALUES (?1, ?2)",
+                params![collection_id, id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    txn.commit().map_err(|e| e.to_string())?;
+    drop(conn);
+    if n > 0 {
+        pulse::blip(&app, "archivio", &format!("Raccolte: {n} paper aggiunti"));
+        crate::mirror::request_sync(&app);
+    }
+    Ok(n)
+}
+
+/// Sposta in blocco: toglie da `from_id` (se indicata) e mette in `collection_id`.
+#[tauri::command]
+pub fn move_documents_to_collection(
+    app: AppHandle,
+    from_id: Option<i64>,
+    collection_id: i64,
+    ids: Vec<i64>,
+) -> Result<usize, String> {
+    let state = app.state::<AppState>();
+    let mut conn = state.db.lock();
+    assert_manual_collection(&conn, collection_id)?;
+    let txn = conn.transaction().map_err(|e| e.to_string())?;
+    let mut n = 0usize;
+    for id in &ids {
+        if let Some(from) = from_id {
+            txn.execute(
+                "DELETE FROM collection_members WHERE collection_id = ?1 AND document_id = ?2",
+                params![from, id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        n += txn
+            .execute(
+                "INSERT OR IGNORE INTO collection_members (collection_id, document_id) VALUES (?1, ?2)",
+                params![collection_id, id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    txn.commit().map_err(|e| e.to_string())?;
+    drop(conn);
+    if !ids.is_empty() {
+        pulse::blip(&app, "archivio", &format!("Raccolte: {} paper spostati", ids.len()));
+        crate::mirror::request_sync(&app);
+    }
+    Ok(n)
+}
+
+/// Un candidato suggerito per una raccolta, con punteggio di somiglianza 0..1.
+#[derive(serde::Serialize)]
+pub struct CollectionSuggestion {
+    pub id: i64,
+    pub title: Option<String>,
+    pub year: Option<i64>,
+    pub lead_author: Option<String>,
+    pub score: f64,
+}
+
+fn norm(v: &mut [f32]) {
+    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if n > 1e-6 {
+        for x in v.iter_mut() {
+            *x /= n;
+        }
+    }
+}
+
+/// Suggerisce paper per una raccolta manuale usando SOLO il motore semantico
+/// locale già esistente (bge-m3): centroide dei membri attuali fuso con
+/// l'embedding del nome della raccolta, coseno contro tutta la libreria.
+/// Niente LLM, niente rete (salvo il provider embedding scelto dall'utente).
+#[tauri::command]
+pub async fn suggest_for_collection(
+    app: AppHandle,
+    collection_id: i64,
+    only_unfiled: bool,
+) -> Result<Vec<CollectionSuggestion>, String> {
+    // spawn_blocking: l'embedding della query può usare block_on (Ollama).
+    tauri::async_runtime::spawn_blocking(move || suggest_for_collection_inner(&app, collection_id, only_unfiled))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn suggest_for_collection_inner(
+    app: &AppHandle,
+    collection_id: i64,
+    only_unfiled: bool,
+) -> Result<Vec<CollectionSuggestion>, String> {
+    let state = app.state::<AppState>();
+    let cache = embed_cache_dir(app);
+
+    // 1) Snapshot sotto lock breve: config, nome, membri (con vettore), candidati.
+    let (gpu, ollama_url, name, member_vecs, candidates) = {
+        let conn = state.db.lock();
+        let c = ai_config(&conn);
+        let (name, smart): (String, i64) = conn
+            .query_row(
+                "SELECT name, is_smart FROM collections WHERE id = ?1",
+                params![collection_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| "Raccolta non trovata".to_string())?;
+        if smart != 0 {
+            return Err("Le raccolte smart si popolano da sole con la loro regola".into());
+        }
+        let indexed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM doc_vec", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if indexed == 0 {
+            return Err("Prima costruisci l'Indice semantico (icona a strati sulla barra): i suggerimenti usano quello".into());
+        }
+        // Vettori dei membri attuali (per il centroide).
+        let mut stmt = conn
+            .prepare(
+                "SELECT v.embedding FROM collection_members cm
+                 JOIN doc_vec v ON v.document_id = cm.document_id
+                 JOIN documents d ON d.id = cm.document_id AND d.deleted_at IS NULL
+                 WHERE cm.collection_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let member_vecs: Vec<Vec<f32>> = stmt
+            .query_map(params![collection_id], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .map(|b| bytes_to_f32(&b))
+            .collect();
+        // Candidati: vivi, con vettore, non già dentro; opzionalmente solo senza raccolta.
+        let extra = if only_unfiled {
+            "AND d.id NOT IN (SELECT document_id FROM collection_members)"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT d.id, d.title, d.year,
+                    (SELECT a.family FROM authors a JOIN document_authors da ON da.author_id = a.id
+                     WHERE da.document_id = d.id ORDER BY da.position LIMIT 1),
+                    v.embedding
+             FROM documents d JOIN doc_vec v ON v.document_id = d.id
+             WHERE d.deleted_at IS NULL
+               AND d.id NOT IN (SELECT document_id FROM collection_members WHERE collection_id = ?1)
+               {extra}"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let candidates: Vec<(i64, Option<String>, Option<i64>, Option<String>, Vec<f32>)> = stmt
+            .query_map(params![collection_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Vec<u8>>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .map(|(id, t, y, a, b)| (id, t, y, a, bytes_to_f32(&b)))
+            .collect();
+        (c.embed_gpu, c.ollama_url.clone(), name, member_vecs, candidates)
+    };
+
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    pulse::start(app, "archivio", &format!("Suggerimenti per «{name}»"));
+    let r = (|| -> Result<Vec<CollectionSuggestion>, String> {
+        // 2) Vettore-interrogazione: centroide dei membri fuso con il nome.
+        //    Con ≥3 membri il centroide domina (il contenuto vale più del titolo).
+        let mut centroid: Option<Vec<f32>> = None;
+        if !member_vecs.is_empty() {
+            let dim = member_vecs[0].len();
+            let mut c = vec![0f32; dim];
+            for mut v in member_vecs.iter().cloned() {
+                norm(&mut v);
+                for (ci, vi) in c.iter_mut().zip(v.iter()) {
+                    *ci += vi;
+                }
+            }
+            norm(&mut c);
+            centroid = Some(c);
+        }
+        // L'embedding del nome gira FUORI dal lock db (può caricare il modello).
+        let mut name_vec = embed_query_text(gpu, &ollama_url, &cache, &name)?;
+        norm(&mut name_vec);
+        let query: Vec<f32> = match centroid {
+            Some(c) if member_vecs.len() >= 3 => {
+                let mut q: Vec<f32> = c.iter().zip(name_vec.iter()).map(|(a, b)| 0.75 * a + 0.25 * b).collect();
+                norm(&mut q);
+                q
+            }
+            Some(c) => {
+                let mut q: Vec<f32> = c.iter().zip(name_vec.iter()).map(|(a, b)| 0.5 * a + 0.5 * b).collect();
+                norm(&mut q);
+                q
+            }
+            None => name_vec,
+        };
+
+        // 3) Coseno contro tutti i candidati (la libreria è piccola: niente KNN).
+        let mut scored: Vec<CollectionSuggestion> = candidates
+            .into_iter()
+            .filter(|(_, _, _, _, v)| v.len() == query.len())
+            .map(|(id, title, year, lead_author, mut v)| {
+                norm(&mut v);
+                let cos: f32 = v.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
+                CollectionSuggestion {
+                    id,
+                    title,
+                    year,
+                    lead_author,
+                    score: f64::from(cos.clamp(0.0, 1.0)),
+                }
+            })
+            .collect();
+        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(80);
+        Ok(scored)
+    })();
+    match &r {
+        Ok(v) => pulse::ok(app, "archivio", "Suggerimenti", &format!("{} candidati per «{name}»", v.len())),
+        Err(e) => pulse::err(app, "archivio", "Suggerimenti", e),
+    }
+    r
+}
+
+/// Rimozione in blocco dall'appartenenza a una raccolta.
+#[tauri::command]
+pub fn remove_documents_from_collection(
+    app: AppHandle,
+    collection_id: i64,
+    ids: Vec<i64>,
+) -> Result<usize, String> {
+    let state = app.state::<AppState>();
+    let conn = state.db.lock();
+    let mut n = 0usize;
+    for id in &ids {
+        n += conn
+            .execute(
+                "DELETE FROM collection_members WHERE collection_id = ?1 AND document_id = ?2",
+                params![collection_id, id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    drop(conn);
+    if n > 0 {
+        crate::mirror::request_sync(&app);
+    }
+    Ok(n)
+}
+
+#[tauri::command]
+pub fn delete_collection(app: AppHandle, id: i64) -> Result<(), String> {
+    // Da quando le raccolte sono annidabili, il DELETE nudo attiverebbe il
+    // CASCADE su parent_id e cancellerebbe in silenzio interi sottoalberi.
+    // Semantica unica e conservativa ovunque: i figli risalgono (rehome).
+    delete_collection_rehome(app, id)
 }
 
 #[tauri::command]
 pub fn add_to_collection(
-    state: State<'_, AppState>,
+    app: AppHandle,
     collection_id: i64,
     document_id: i64,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let conn = state.db.lock();
     conn.execute(
         "INSERT OR IGNORE INTO collection_members (collection_id, document_id) VALUES (?1, ?2)",
         params![collection_id, document_id],
     )
     .map_err(|e| e.to_string())?;
+    drop(conn);
+    crate::mirror::request_sync(&app);
     Ok(())
 }
 
 #[tauri::command]
 pub fn remove_from_collection(
-    state: State<'_, AppState>,
+    app: AppHandle,
     collection_id: i64,
     document_id: i64,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let conn = state.db.lock();
     conn.execute(
         "DELETE FROM collection_members WHERE collection_id = ?1 AND document_id = ?2",
         params![collection_id, document_id],
     )
     .map_err(|e| e.to_string())?;
+    drop(conn);
+    crate::mirror::request_sync(&app);
     Ok(())
 }
 
@@ -8854,7 +9573,8 @@ pub fn set_watched_folder(app: AppHandle, path: Option<String>) -> Result<(), St
 
 /// Soft-delete documents (move to Trash).
 #[tauri::command]
-pub fn delete_documents(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+pub fn delete_documents(app: AppHandle, ids: Vec<i64>) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let conn = state.db.lock();
     for id in ids {
         conn.execute(
@@ -8863,23 +9583,29 @@ pub fn delete_documents(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(),
         )
         .map_err(|e| e.to_string())?;
     }
+    drop(conn);
+    crate::mirror::request_sync(&app);
     Ok(())
 }
 
 /// Restore documents from the Trash.
 #[tauri::command]
-pub fn restore_documents(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+pub fn restore_documents(app: AppHandle, ids: Vec<i64>) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let conn = state.db.lock();
     for id in ids {
         conn.execute("UPDATE documents SET deleted_at = NULL WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
     }
+    drop(conn);
+    crate::mirror::request_sync(&app);
     Ok(())
 }
 
 /// Permanently delete documents (and their vector rows + thumbnail files).
 #[tauri::command]
-pub fn purge_documents(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+pub fn purge_documents(app: AppHandle, ids: Vec<i64>) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let mut conn = state.db.lock();
     // One transaction over the whole list: a crash mid-purge must not leave a
     // document row whose vector rows were already deleted — restoring it would
@@ -8919,6 +9645,7 @@ pub fn purge_documents(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), 
     for t in thumbs {
         std::fs::remove_file(&t).ok();
     }
+    crate::mirror::request_sync(&app);
     Ok(())
 }
 

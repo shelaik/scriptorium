@@ -64,10 +64,12 @@ pub struct EditableMeta {
 }
 
 /// A collection of documents: manual (membership table) or smart (rule_json).
+/// `parent_id` nests collections into a tree (the «Archivio» view).
 #[derive(Debug, Clone, Serialize)]
 pub struct Collection {
     pub id: i64,
     pub name: String,
+    pub parent_id: Option<i64>,
     pub is_smart: bool,
     pub rule_json: Option<String>,
 }

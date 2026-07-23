@@ -187,10 +187,11 @@
   import DetailPanel from "$lib/DetailPanel.svelte";
   import SendToNotePicker from "$lib/SendToNotePicker.svelte";
   import TexProjects from "$lib/TexProjects.svelte";
+  import Archivio from "$lib/Archivio.svelte";
   import { refToken, type NotePayload } from "$lib/notecite";
 
   type Filter = {
-    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita" | "mywork" | "notes" | "projects";
+    kind: "all" | "collection" | "related" | "trash" | "duplicates" | "discover" | "favorite" | "unread" | "terminal" | "author" | "github" | "peerreviewed" | "ask" | "wiki" | "novita" | "mywork" | "notes" | "projects" | "archivio";
     id?: number;
     label?: string;
   };
@@ -313,6 +314,7 @@
       case "novita": return "g-novita";
       case "notes": return "g-notes";
       case "projects": return "g-projects";
+      case "archivio": return "g-archivio";
       case "ask": return "g-ask";
       case "wiki": return "g-wiki";
       case "discover": return "g-disc";
@@ -630,7 +632,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.30";
+  const APP_VERSION = "0.9.31";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -2804,7 +2806,7 @@
   }
 
   async function removeColl(coll: Collection) {
-    if (!(await confirmAsk(`Eliminare la collezione «${coll.name}»? I documenti restano in libreria.`))) return;
+    if (!(await confirmAsk(`Eliminare la collezione «${coll.name}»? I documenti restano in libreria (le eventuali sotto-raccolte risalgono di un livello).`))) return;
     await deleteCollection(coll.id);
     if (filter.kind === "collection" && filter.id === coll.id) filter = { kind: "all" };
     await loadDocs();
@@ -3439,6 +3441,13 @@
         icon: I.code,
         hint: "Scrivi in LaTeX con citazioni dalla libreria; compila con Tectonic/latexmk",
         action: () => setFilter({ kind: "projects" }),
+      },
+      {
+        id: "g-archivio",
+        label: "Archivio",
+        icon: I.folder,
+        hint: "Raccolte e sotto-raccolte in vista sinottica: organizza i paper trascinandoli",
+        action: () => setFilter({ kind: "archivio" }),
       },
       { id: "g-redis", label: "Riscopri", icon: I.compass, hint: "Un documento dimenticato, pescato per te", action: () => rediscover() },
       {
@@ -5627,6 +5636,11 @@
         </div>
       {:else if filter.kind === "projects"}
         <TexProjects openSlug={projectsOpenSlug} />
+      {:else if filter.kind === "archivio"}
+        <Archivio
+          onOpenGrid={(id, label) => setFilter({ kind: "collection", id, label })}
+          onChanged={() => void loadSidebar()}
+        />
       {:else if filter.kind === "novita"}
         <div class="novhead">
           <div class="novtitle">
@@ -7037,7 +7051,7 @@
         <div class="helpsec">
           <h3>Le tre porte d'ingresso</h3>
           <ul>
-            <li><strong>Barra strumenti</strong> (in alto): un'icona per ogni strumento — passaci sopra col mouse per il nome. Nell'ordine: <strong>I miei paper</strong> (torna alla griglia), <strong>Importa</strong>, <strong>Vista</strong>, <strong>Riprendi lettura</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Appunti</strong>, <strong>Progetti (LaTeX)</strong>, <strong>Riscopri</strong>, <strong>Novità</strong> (🔔 col conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong>, <strong>Indice semantico</strong>, <strong>Memoria AI</strong> (o <em>Attiva AI</em> quando è spenta), <strong>Backup</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Plancia</strong> (il sinottico dei processi, in finestra separata), <strong>Guida</strong>, <strong>Aspetto</strong>, <strong>Sistema</strong> (Impostazioni · Controlla aggiornamenti · Informazioni). Le voci con un menu si aprono al clic, le altre eseguono; l'icona è evidenziata quando sei nella vista corrispondente. In alto trovi anche il chip <strong>AI</strong> (stato dell'AI locale), «✦ N senza metadati» quando serve, e l'icona della <strong>palette</strong>.</li>
+            <li><strong>Barra strumenti</strong> (in alto): un'icona per ogni strumento — passaci sopra col mouse per il nome. Nell'ordine: <strong>I miei paper</strong> (torna alla griglia), <strong>Importa</strong>, <strong>Vista</strong>, <strong>Riprendi lettura</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Appunti</strong>, <strong>Progetti (LaTeX)</strong>, <strong>Archivio</strong> (raccolte e sotto-raccolte, in vista sinottica), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔 col conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong>, <strong>Indice semantico</strong>, <strong>Memoria AI</strong> (o <em>Attiva AI</em> quando è spenta), <strong>Backup</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Plancia</strong> (il sinottico dei processi, in finestra separata), <strong>Guida</strong>, <strong>Aspetto</strong>, <strong>Sistema</strong> (Impostazioni · Controlla aggiornamenti · Informazioni). Le voci con un menu si aprono al clic, le altre eseguono; l'icona è evidenziata quando sei nella vista corrispondente. In alto trovi anche il chip <strong>AI</strong> (stato dell'AI locale), «✦ N senza metadati» quando serve, e l'icona della <strong>palette</strong>.</li>
             <li><strong>Menu radiale</strong> (tasto destro): su un <strong>documento</strong> → le azioni su quel documento; sullo <strong>spazio vuoto</strong> → il menu globale (gli stessi gruppi della barra); su una <strong>selezione multipla</strong> → le azioni in blocco. Muovi verso un petalo e clicca (basta la direzione); <strong>rotella</strong> per ruotare; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; il centro torna indietro, <kbd>Esc</kbd> chiude. La <strong>descrizione</strong> della voce evidenziata compare sotto l'anello.</li>
             <li><strong>Palette comandi</strong> (<kbd>Ctrl</kbd>+<kbd>K</kbd>): ogni azione, documento, <strong>appunto</strong>, <strong>pagina wiki</strong>, <strong>progetto LaTeX</strong>, filtro, sezione della guida e tema — digitando. Funziona <strong>anche dentro il lettore</strong>. Barra, radiale e palette pescano dallo <strong>stesso registro</strong>: se non trovi un comando, è comunque lì.</li>
           </ul>
@@ -7080,6 +7094,8 @@
             <li><strong>Tag</strong> colorati (la <strong>✎</strong> in sidebar rinomina/ricolora, la <strong>×</strong> elimina; dal pannello dettagli li applichi al volo) e <strong>Collezioni</strong>, anche <em>smart</em> (si popolano da sole con una regola).</li>
             <li><strong>Filtri</strong> in sidebar (Preferiti, Da leggere, Con codice, Peer-reviewed, Il mio lavoro), <strong>ordinamento combinabile</strong> (chip «Ordina ▾»: un clic attiva, un altro inverte, un terzo toglie), badge <em>preprint / peer-reviewed</em> sulle schede.</li>
             <li><strong>Viste</strong> (barra → Vista): griglia (copertine ridimensionabili con − ▭ +), lista a colonne, <strong>Costellazione</strong> (la mappa semantica — vedi la scheda <em>Scoperta</em>). Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
+            <li><strong>Archivio</strong> (icona cartella sulla barra): le collezioni come <strong>albero navigabile</strong> — sotto-raccolte a piacere, <strong>trascina un paper</strong> su una raccolta per spostarlo (Ctrl = aggiungi anche lì: l'appartenenza è multipla), trascina una raccolta su un'altra per annidarla. Eliminare una raccolta non tocca mai i paper (le sotto-raccolte risalgono). Nel pannello: <strong>✦ Suggerisci</strong> propone i paper affini (somiglianza semantica locale, con soglia di confidenza — mai automatico), il toggle <strong>Ricerca «Novità»</strong> aggancia una ricerca online alla raccolta (le novità accettate <em>entrano da sole nella raccolta</em>, filtrate per pertinenza quando la raccolta ha ≥3 paper indicizzati).</li>
+            <li><strong>Specchio su disco</strong> (chip in alto nell'Archivio): proietta le raccolte in una cartella vera — <code>Raccolta\Sottoraccolta\Autore Anno — Titolo.pdf</code> — con <strong>hardlink</strong> (zero spazio extra), aggiornata da sola a ogni cambio. Comodissima da Esplora risorse e dal terminale. Cancellare o spostare file nello specchio non tocca la libreria (si rigenera); <em>modificare il contenuto</em> di un PDF lì dentro sì, perché è lo stesso file: per annotare usa il lettore.</li>
           </ul>
         </div>
 
@@ -7266,6 +7282,8 @@
             <dd>Nel gestore fai <strong>Esporta</strong> in <strong>BibTeX/BibLaTeX, RIS o CSL-JSON</strong> (per avere anche i PDF, in Zotero spunta «Esporta file»). Poi barra → Importa → <strong>Da gestore bibliografico…</strong>, scegli il file e — se i PDF stanno in una cartella a parte — indicala quando te lo chiede. Metadati, PDF e parole chiave (→ tag) entrano insieme, senza doppioni.</dd>
             <dt>…sistemare un paper arrivato senza titolo o con metadati sbagliati?</dt>
             <dd>Clic su «✦ N senza metadati» in alto per il recupero in blocco (solo abbinamenti sicuri). Per il caso singolo: tasto destro → Organizza → <strong>Recupera metadati…</strong> mostra i candidati trovati online con le prove nel PDF e applichi quello giusto (o incolli un DOI/arXiv). Ritocchi a mano: Modifica metadati. Per tutta la libreria: Impostazioni → Manutenzione → «Verifica e ripara metadati».</dd>
+            <dt>…organizzare i paper in cartelle e sottocartelle, anche su disco?</dt>
+            <dd>Apri l'<strong>Archivio</strong> (icona cartella): crei raccolte e sotto-raccolte e trascini i paper tra i nodi; «<strong>✦ Suggerisci</strong>» propone cosa metterci (con soglia di confidenza). Vuoi vederle anche in Esplora risorse o dal terminale? Attiva lo <strong>Specchio su disco</strong> (chip in alto): una cartella con l'albero delle raccolte e i PDF con nomi leggibili, sempre sincronizzata, senza occupare spazio in più.</dd>
             <dt>…vedere cosa sta facendo l'app in questo momento (e perché qualcosa è fallito)?</dt>
             <dd>Apri la <strong>Plancia</strong> (icona tachimetro sulla barra): un sinottico in finestra separata, da tenere anche in background, dove si illumina solo ciò che sta lavorando. Gli errori accendono il nodo in rosso col motivo per esteso; clic sul nodo per dettagli e storico; «Salva registro…» esporta la sessione. Da Impostazioni → Manutenzione puoi registrare l'attività anche su file.</dd>
             <dt>…copiare una citazione pronta?</dt>

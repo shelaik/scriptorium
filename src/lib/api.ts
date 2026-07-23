@@ -12,6 +12,7 @@ export interface Tag {
 export interface Collection {
   id: number;
   name: string;
+  parent_id: number | null;
   is_smart: boolean;
   rule_json: string | null;
 }
@@ -286,12 +287,76 @@ export const createCollection = (
   name: string,
   isSmart: boolean,
   ruleJson: string | null,
-) => invoke<Collection>("create_collection", { name, isSmart, ruleJson });
+  parentId: number | null = null,
+) => invoke<Collection>("create_collection", { name, isSmart, ruleJson, parentId });
 export const deleteCollection = (id: number) => invoke<void>("delete_collection", { id });
 export const addToCollection = (collectionId: number, documentId: number) =>
   invoke<void>("add_to_collection", { collectionId, documentId });
 export const removeFromCollection = (collectionId: number, documentId: number) =>
   invoke<void>("remove_from_collection", { collectionId, documentId });
+
+// ----- Archivio (raccolte gerarchiche + gestione in blocco) -----
+export interface ArchiveNode {
+  id: number;
+  name: string;
+  parent_id: number | null;
+  is_smart: boolean;
+  count: number;
+  /** Ricerca «Novità» agganciata e attiva. */
+  watch: boolean;
+}
+export interface ArchiveTree {
+  collections: ArchiveNode[];
+  unfiled: number;
+  total: number;
+}
+export const archiveTree = () => invoke<ArchiveTree>("archive_tree");
+export const renameCollection = (id: number, name: string) =>
+  invoke<void>("rename_collection", { id, name });
+export const moveCollection = (id: number, parentId: number | null) =>
+  invoke<void>("move_collection", { id, parentId });
+export const deleteCollectionRehome = (id: number) =>
+  invoke<void>("delete_collection_rehome", { id });
+export const listUnfiledDocuments = () => invoke<DocumentItem[]>("list_unfiled_documents");
+export const addDocumentsToCollection = (collectionId: number, ids: number[]) =>
+  invoke<number>("add_documents_to_collection", { collectionId, ids });
+export const moveDocumentsToCollection = (
+  fromId: number | null,
+  collectionId: number,
+  ids: number[],
+) => invoke<number>("move_documents_to_collection", { fromId, collectionId, ids });
+export const removeDocumentsFromCollection = (collectionId: number, ids: number[]) =>
+  invoke<number>("remove_documents_from_collection", { collectionId, ids });
+export interface CollectionSuggestion {
+  id: number;
+  title: string | null;
+  year: number | null;
+  lead_author: string | null;
+  /** Somiglianza 0..1 (coseno bge-m3 contro centroide+nome della raccolta). */
+  score: number;
+}
+export const suggestForCollection = (collectionId: number, onlyUnfiled: boolean) =>
+  invoke<CollectionSuggestion[]>("suggest_for_collection", { collectionId, onlyUnfiled });
+/** Accende/spegne la ricerca «Novità» agganciata alla raccolta. */
+export const setCollectionWatch = (collectionId: number, enabled: boolean) =>
+  invoke<boolean>("set_collection_watch", { collectionId, enabled });
+
+// ----- Specchio su disco (proiezione hardlink delle raccolte) -----
+export interface MirrorStatus {
+  enabled: boolean;
+  dir: string;
+}
+export interface MirrorSummary {
+  folders: number;
+  linked: number;
+  copied: number;
+  missing: number;
+}
+export const mirrorStatus = () => invoke<MirrorStatus>("mirror_status");
+export const setMirror = (enabled: boolean, dir: string | null) =>
+  invoke<MirrorStatus>("set_mirror", { enabled, dir });
+export const mirrorRegenerate = () => invoke<MirrorSummary>("mirror_regenerate");
+export const mirrorReveal = () => invoke<void>("mirror_reveal");
 
 // ----- Editable metadata -----
 export interface EditableMeta {
@@ -349,6 +414,8 @@ export interface SavedSearch {
   sort: string;
   last_run_at: string | null;
   auto_run: boolean;
+  /** Raccolta agganciata (vista Archivio), se la ricerca è nata da lì. */
+  collection_id: number | null;
 }
 export const listSavedSearches = () => invoke<SavedSearch[]>("list_saved_searches");
 export const deleteSavedSearch = (id: number) => invoke<void>("delete_saved_search", { id });
