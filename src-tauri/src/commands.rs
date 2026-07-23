@@ -9306,18 +9306,29 @@ pub async fn suggest_for_collection(
     app: AppHandle,
     collection_id: i64,
     only_unfiled: bool,
+    mode: Option<String>,
+    weight: Option<f64>,
 ) -> Result<Vec<CollectionSuggestion>, String> {
     // spawn_blocking: l'embedding della query può usare block_on (Ollama).
-    tauri::async_runtime::spawn_blocking(move || suggest_for_collection_inner(&app, collection_id, only_unfiled))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        suggest_for_collection_inner(&app, collection_id, only_unfiled, mode.as_deref(), weight)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn suggest_for_collection_inner(
     app: &AppHandle,
     collection_id: i64,
     only_unfiled: bool,
+    mode: Option<&str>,
+    weight: Option<f64>,
 ) -> Result<Vec<CollectionSuggestion>, String> {
+    // "name" = solo il titolo della raccolta; "content" = solo il centroide dei
+    // paper già dentro; "both" = miscela, con `weight` = quota del CONTENUTO
+    // (default 0.5). Scelta ESPLICITA dell'utente: mai degradi silenziosi.
+    let mode = mode.unwrap_or("both");
+    let w_content = (weight.unwrap_or(0.5)).clamp(0.0, 1.0) as f32;
     let state = app.state::<AppState>();
     let cache = embed_cache_dir(app);
 
@@ -9411,11 +9422,13 @@ fn suggest_for_collection_inner(
             norm(&mut c);
             centroid = Some(c);
         }
-        // L'embedding del NOME è un bonus, mai una dipendenza: prima il modello
-        // locale se è già in cache (nessun Ollama, nessun download), altrimenti
-        // Ollama solo se è il provider configurato — e se fallisce si va di solo
-        // centroide. (Stesso spazio bge-m3 in entrambi i casi.)
-        let name_vec: Option<Vec<f32>> = {
+        // L'embedding del NOME: prima il modello locale se è già in cache
+        // (nessun Ollama, nessun download), altrimenti Ollama solo se è il
+        // provider configurato. (Stesso spazio bge-m3 in entrambi i casi.)
+        // Lo si calcola solo se la modalità scelta lo richiede.
+        let name_vec: Option<Vec<f32>> = if mode == "content" {
+            None
+        } else {
             let v = if embed::model_cached(&cache) {
                 embed::embed_query(&cache, &name).ok()
             } else if gpu {
@@ -9428,21 +9441,22 @@ fn suggest_for_collection_inner(
                 nv
             })
         };
-        let query: Vec<f32> = match (centroid, name_vec) {
-            (Some(c), Some(nv)) => {
-                let w = if member_vecs.len() >= 3 { 0.75 } else { 0.5 };
-                let mut q: Vec<f32> =
-                    c.iter().zip(nv.iter()).map(|(a, b)| w * a + (1.0 - w) * b).collect();
+        const NO_NAME: &str = "Non riesco a vettorizzare il nome della raccolta: costruisci l'Indice semantico locale (o avvia Ollama), oppure usa la modalità CONTENUTO";
+        const NO_CONTENT: &str = "La raccolta non ha ancora paper con un vettore semantico: mettine dentro 1-2 (o costruisci l'Indice semantico), oppure usa la modalità NOME";
+        let query: Vec<f32> = match mode {
+            "name" => name_vec.ok_or(NO_NAME)?,
+            "content" => centroid.ok_or(NO_CONTENT)?,
+            _ => {
+                // "both": servono entrambe le metà — scelta esplicita, esiti espliciti.
+                let c = centroid.ok_or(NO_CONTENT)?;
+                let nv = name_vec.ok_or(NO_NAME)?;
+                let mut q: Vec<f32> = c
+                    .iter()
+                    .zip(nv.iter())
+                    .map(|(a, b)| w_content * a + (1.0 - w_content) * b)
+                    .collect();
                 norm(&mut q);
                 q
-            }
-            (Some(c), None) => c, // solo centroide: nessun provider richiesto
-            (None, Some(nv)) => nv,
-            (None, None) => {
-                return Err(
-                    "Raccolta vuota e nessun modo di vettorizzare il nome: metti 1-2 paper nella raccolta e riprova (oppure costruisci l'Indice semantico locale, o avvia Ollama)"
-                        .into(),
-                )
             }
         };
 

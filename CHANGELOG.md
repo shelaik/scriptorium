@@ -2,6 +2,10 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.33 — Suggerimenti: sorgente a scelta e peso regolabile; Specchio in Plancia
+- **Suggerimenti dell'Archivio con la sorgente a scelta**: tre modalità — <em>Nome</em> (solo il titolo della raccolta: ideale per raccolte nuove dal nome parlante), <em>Contenuto</em> (solo il centroide dei paper già dentro: ideale coi nomi generici), <em>Entrambi</em> con **peso regolabile** (quota contenuto/nome, default 50/50). Scelte ricordate; su una raccolta vuota si passa da soli a <em>Nome</em>; se una modalità non può funzionare lo dice chiaramente (mai degradi silenziosi).
+- **Plancia aggiornata**: nuovo nodo **SPECCHIO** nel nucleo (con gate «spento (si attiva dall'Archivio)», letture reali — la cartella attiva — e le rigenerazioni/sync che vi si illuminano sopra), chip SPECCHIO nell'header, letture arricchite (ARCHIVIO mostra anche le raccolte, SCOPERTA le ricerche attive), descrizioni dei nodi al passo con le funzioni nuove.
+
 ## 0.9.32 — Suggerimenti senza Ollama
 - **I Suggerimenti dell'Archivio non dipendono più da Ollama**: con almeno un paper nella raccolta lavorano di **solo centroide** (i vettori già calcolati — zero provider, zero rete); il nome della raccolta contribuisce come bonus quando il modello locale è in cache (CPU) o, solo in subordine, se Ollama è il provider configurato ed è acceso. Il caso raccolta-vuota-senza-modelli dà un messaggio chiaro invece di un errore di connessione. Stessa preferenza per il modello locale nel filtro semantico dello sweep «Novità».
 

@@ -157,7 +157,7 @@ pub fn set_enabled(app: &tauri::AppHandle, enabled: bool, dir: Option<String>) -
         if lib_drive.is_some() && drive(Path::new(&dir_s)) != lib_drive {
             crate::pulse::warn(
                 app,
-                "archivio",
+                "specchio",
                 "Specchio su un altro volume",
                 "niente hardlink possibili: verranno fatte copie vere (spazio doppio)",
             );
@@ -406,11 +406,11 @@ pub fn request_sync(app: &tauri::AppHandle) {
         match r {
             Ok(Ok(s)) => crate::pulse::blip(
                 &app,
-                "archivio",
+                "specchio",
                 &format!("Specchio aggiornato: {} link, {} copie, {} cartelle", s.linked, s.copied, s.folders),
             ),
-            Ok(Err(e)) => crate::pulse::warn(&app, "archivio", "Specchio su disco", &e),
-            Err(e) => crate::pulse::warn(&app, "archivio", "Specchio su disco", &e.to_string()),
+            Ok(Err(e)) => crate::pulse::warn(&app, "specchio", "Specchio su disco", &e),
+            Err(e) => crate::pulse::warn(&app, "specchio", "Specchio su disco", &e.to_string()),
         }
     });
 }
@@ -433,7 +433,7 @@ pub fn set_mirror(app: tauri::AppHandle, enabled: bool, dir: Option<String>) -> 
 
 #[tauri::command]
 pub async fn mirror_regenerate(app: tauri::AppHandle) -> Result<MirrorSummary, String> {
-    crate::pulse::start(&app, "archivio", "Specchio su disco: rigenerazione");
+    crate::pulse::start(&app, "specchio", "Specchio su disco: rigenerazione");
     let app2 = app.clone();
     let r = tauri::async_runtime::spawn_blocking(move || regenerate(&app2))
         .await
@@ -442,11 +442,11 @@ pub async fn mirror_regenerate(app: tauri::AppHandle) -> Result<MirrorSummary, S
     match &r {
         Ok(s) => crate::pulse::ok(
             &app,
-            "archivio",
+            "specchio",
             "Specchio su disco",
             &format!("{} hardlink, {} copie, {} cartelle, {} mancanti", s.linked, s.copied, s.folders, s.missing),
         ),
-        Err(e) => crate::pulse::err(&app, "archivio", "Specchio su disco", e),
+        Err(e) => crate::pulse::err(&app, "specchio", "Specchio su disco", e),
     }
     r
 }

@@ -335,8 +335,14 @@ export interface CollectionSuggestion {
   /** Somiglianza 0..1 (coseno bge-m3 contro centroide+nome della raccolta). */
   score: number;
 }
-export const suggestForCollection = (collectionId: number, onlyUnfiled: boolean) =>
-  invoke<CollectionSuggestion[]>("suggest_for_collection", { collectionId, onlyUnfiled });
+export type SuggestMode = "name" | "content" | "both";
+export const suggestForCollection = (
+  collectionId: number,
+  onlyUnfiled: boolean,
+  mode: SuggestMode = "both",
+  /** Quota del CONTENUTO nella miscela "both" (0..1, default 0.5). */
+  weight = 0.5,
+) => invoke<CollectionSuggestion[]>("suggest_for_collection", { collectionId, onlyUnfiled, mode, weight });
 /** Accende/spegne la ricerca «Novità» agganciata alla raccolta. */
 export const setCollectionWatch = (collectionId: number, enabled: boolean) =>
   invoke<boolean>("set_collection_watch", { collectionId, enabled });

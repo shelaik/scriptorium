@@ -30,6 +30,7 @@
     removeDocumentsFromCollection,
     suggestForCollection,
     type CollectionSuggestion,
+    type SuggestMode,
     setCollectionWatch,
     mirrorStatus,
     setMirror,
@@ -71,6 +72,32 @@
   let suggThreshold = $state(55); // slider di confidenza (0..100, sul coseno)
   let suggUnfiled = $state(true); // proponi solo paper senza raccolta
   let suggAdding = $state(false);
+  // Sorgente della somiglianza: NOME della raccolta, CONTENUTO (centroide dei
+  // membri), o ENTRAMBI con peso regolabile (quota del contenuto, default 50%).
+  let suggMode = $state<SuggestMode>("both");
+  let suggWeight = $state(50);
+  try {
+    const m = localStorage.getItem("scriptorium-suggmode");
+    if (m === "name" || m === "content" || m === "both") suggMode = m;
+    const w = Number(localStorage.getItem("scriptorium-suggweight"));
+    if (Number.isFinite(w) && w >= 0 && w <= 100) suggWeight = w;
+  } catch {
+    /* localStorage assente: si parte coi default */
+  }
+  function setSuggMode(m: SuggestMode) {
+    if (suggMode === m || suggLoading) return;
+    suggMode = m;
+    try {
+      localStorage.setItem("scriptorium-suggmode", m);
+    } catch { /* ignore */ }
+    void loadSuggestions();
+  }
+  function saveSuggWeight() {
+    try {
+      localStorage.setItem("scriptorium-suggweight", String(suggWeight));
+    } catch { /* ignore */ }
+    void loadSuggestions();
+  }
 
   // ---- layout dell'albero -----------------------------------------------------
   const W = 216, H = 46, COLW = 252, ROWH = 62, PADX = 26, PADY = 64;
@@ -275,12 +302,14 @@
   let suggEpoch = 0; // anti-race: vince l'ULTIMA richiesta, non l'ultima risposta
   async function loadSuggestions() {
     if (typeof sel !== "number") return;
+    // Su una raccolta vuota il CONTENUTO non può funzionare: coercizione onesta a NOME.
+    if (selNode && selNode.count === 0 && suggMode !== "name") suggMode = "name";
     const target = sel;
     const epoch = ++suggEpoch;
     suggLoading = true;
     msg = "";
     try {
-      const out = await suggestForCollection(target, suggUnfiled);
+      const out = await suggestForCollection(target, suggUnfiled, suggMode, suggWeight / 100);
       if (epoch !== suggEpoch || sel !== target) return; // superata: scarta
       sugg = out;
       if (out.length === 0) msg = suggUnfiled ? "Nessun candidato (prova a togliere «solo senza raccolta»)" : "Nessun candidato con un vettore semantico";
@@ -699,6 +728,17 @@
                   <button class="pclosemini" onclick={() => (sugg = null)}>✕</button>
                 </div>
                 <div class="suggctl">
+                  <span class="modechips">
+                    <button class="lfm" class:active={suggMode === "name"} disabled={suggLoading} onclick={() => setSuggMode("name")} title="Somiglianza col solo NOME della raccolta (utile su raccolte nuove dal titolo parlante)">NOME</button>
+                    <button class="lfm" class:active={suggMode === "content"} disabled={suggLoading || selNode.count === 0} onclick={() => setSuggMode("content")} title={selNode.count === 0 ? "Serve almeno un paper nella raccolta" : "Somiglianza col solo CONTENUTO (centroide dei paper già dentro) — ignora il nome"}>CONTENUTO</button>
+                    <button class="lfm" class:active={suggMode === "both"} disabled={suggLoading || selNode.count === 0} onclick={() => setSuggMode("both")} title={selNode.count === 0 ? "Serve almeno un paper nella raccolta" : "Miscela nome+contenuto, col peso qui sotto"}>ENTRAMBI</button>
+                  </span>
+                  {#if suggMode === "both"}
+                    <label class="sldlbl" title="Quanto pesa il CONTENUTO nella miscela (il resto è il nome)">
+                      contenuto <b>{suggWeight}%</b> · nome <b>{100 - suggWeight}%</b>
+                      <input type="range" min="0" max="100" step="5" bind:value={suggWeight} disabled={suggLoading} onchange={saveSuggWeight} />
+                    </label>
+                  {/if}
                   <label class="sldlbl">
                     confidenza ≥ <b>{suggThreshold}%</b>
                     <input type="range" min="30" max="90" step="1" bind:value={suggThreshold} />
@@ -723,7 +763,7 @@
                     <div class="srow empty">Niente sopra il {suggThreshold}% — abbassa la soglia.</div>
                   {/each}
                 </div>
-                <div class="pnote">Punteggio = somiglianza semantica (bge-m3, in locale) coi paper che la raccolta già contiene (e col nome, quando possibile): più ne aggiungi, più i suggerimenti migliorano. Con almeno un paper dentro non serve né rete né Ollama. Nulla viene aggiunto senza il tuo clic.</div>
+                <div class="pnote">Punteggio = somiglianza semantica (bge-m3, in locale) con la sorgente scelta sopra: il <b>nome</b> della raccolta, il suo <b>contenuto</b> (i paper già dentro — più ne aggiungi, meglio va; niente rete né Ollama), o la miscela col peso che preferisci. Nulla viene aggiunto senza il tuo clic.</div>
               {/if}
             </div>
           {/if}
@@ -919,6 +959,20 @@
   .pclosemini { background: none; border: none; color: rgba(159, 220, 236, 0.5); cursor: pointer; font-family: inherit; }
   .pclosemini:hover { color: #4fe3ff; }
   .suggctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .modechips { display: flex; gap: 4px; }
+  .lfm {
+    background: none;
+    border: 1px solid rgba(0, 200, 240, 0.2);
+    color: rgba(159, 220, 236, 0.5);
+    font-family: inherit;
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    padding: 2px 7px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .lfm.active { color: #4fe3ff; border-color: rgba(79, 227, 255, 0.6); }
+  .lfm:disabled { opacity: 0.4; cursor: default; }
   .sldlbl { font-size: 9px; letter-spacing: 0.1em; color: rgba(159, 220, 236, 0.6); display: flex; align-items: center; gap: 6px; }
   .sldlbl b { color: #7be9ff; min-width: 30px; }
   .sldlbl input[type="range"] { width: 110px; accent-color: #37e0ff; }

@@ -229,6 +229,9 @@ pub struct PulseGates {
     pub connector: bool,
     pub mathocr_ready: bool,
     pub tatr_ready: bool,
+    /// Specchio su disco (Archivio) attivo, e la sua cartella.
+    pub mirror_enabled: bool,
+    pub mirror_dir: String,
 }
 
 /// Numeri VERI per i readout dei nodi (stile «CURRENT TEMP — 19°C», ma onesti).
@@ -244,6 +247,9 @@ pub struct PulseStats {
     pub db_mb: u64,
     pub backup_age_days: Option<i64>,
     pub projects: i64,
+    /// Raccolte (collezioni) totali e ricerche «Novità» attive.
+    pub collections: i64,
+    pub watches: i64,
 }
 
 #[derive(Serialize)]
@@ -282,6 +288,8 @@ fn pulse_snapshot_inner(app: &AppHandle) -> Result<PulseSnapshot, String> {
             notes: count("SELECT COUNT(*) FROM notes"),
             rag_docs: count("SELECT COUNT(DISTINCT document_id) FROM doc_chunks"),
             rag_chunks: count("SELECT COUNT(*) FROM doc_chunks"),
+            collections: count("SELECT COUNT(*) FROM collections"),
+            watches: count("SELECT COUNT(*) FROM saved_searches WHERE auto_run = 1"),
             ..Default::default()
         };
         (
@@ -294,6 +302,7 @@ fn pulse_snapshot_inner(app: &AppHandle) -> Result<PulseSnapshot, String> {
         )
     };
     let connector = state.connector.lock().is_some();
+    let mirror_st = crate::mirror::status(app);
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let mathocr_ready = crate::mathocr::models_present(&data_dir.join("mathocr"));
     let tatr_ready = crate::tablestruct::models_present(&data_dir.join("tablestruct"));
@@ -330,6 +339,8 @@ fn pulse_snapshot_inner(app: &AppHandle) -> Result<PulseSnapshot, String> {
             connector,
             mathocr_ready,
             tatr_ready,
+            mirror_enabled: mirror_st.enabled,
+            mirror_dir: mirror_st.dir,
         },
         stats,
         now: now_ms(),

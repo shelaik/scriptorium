@@ -35,6 +35,8 @@
     connector: boolean;
     mathocr_ready: boolean;
     tatr_ready: boolean;
+    mirror_enabled: boolean;
+    mirror_dir: string;
   }
   interface Stats {
     docs: number;
@@ -47,6 +49,8 @@
     db_mb: number;
     backup_age_days: number | null;
     projects: number;
+    collections: number;
+    watches: number;
   }
 
   interface NodeState {
@@ -89,6 +93,7 @@
     { id: "db",        x: 760, y: 300, w: 210, h: 84, label: "DATABASE",  sub: "SQLite · FTS5 · vec" },
     { id: "archivio",  x: 760, y: 470, w: 210, h: 54, label: "ARCHIVIO",  sub: "papers · note · progetti" },
     { id: "backup",    x: 760, y: 590, w: 210, h: 54, label: "BACKUP",    sub: "copie · ripristino" },
+    { id: "specchio",  x: 760, y: 690, w: 210, h: 54, label: "SPECCHIO",  sub: "raccolte su disco", gate: "mirror" },
     { id: "terminale", x: 760, y: 780, w: 210, h: 54, label: "TERMINALE", sub: "PowerShell" },
     { id: "embed",     x: 1160, y: 120, w: 190, h: 54, label: "EMBEDDING", sub: "bge-m3 locale" },
     { id: "rag",       x: 1160, y: 240, w: 190, h: 54, label: "INDICE RAG", sub: "passaggi per «Chiedi»" },
@@ -105,7 +110,7 @@
     browser: "Il connettore browser: il bookmarklet manda l'URL del PDF aperto e Scriptorium lo scarica e importa con lo stesso motore (protetto anti-SSRF).",
     biblio: "Import da gestori bibliografici (Zotero, Mendeley, EndNote, JabRef…): legge .bib/.ris/CSL-JSON, aggancia i PDF, converte le keyword in tag, deduplica per DOI e contenuto.",
     latex: "I progetti LaTeX: import degli .zip (PDF + bibliografia nel grafo) e compilazione con Tectonic/latexmk.",
-    scoperta: "Il lato online: ricerche su arXiv/OpenAlex/ADS…, lo sweep «Novità» delle ricerche salvate, l'aggiunta di paper trovati.",
+    scoperta: "Il lato online: ricerche su arXiv/OpenAlex/ADS…, lo sweep «Novità» delle ricerche salvate (anche quelle agganciate alle raccolte dell'Archivio, col filtro semantico), l'aggiunta di paper trovati.",
     estrazione: "Il motore pdfium: estrae testo e rende le pagine. Serializzato: un documento alla volta, per stabilità.",
     metadati: "Identità dei documenti: DOI dal testo, titolo/autori/anno da Crossref e OpenAlex, con i filtri di precisione (mai etichettare col paper sbagliato).",
     miniature: "Le copertine della griglia, rese da pdfium e salvate in cache.",
@@ -113,7 +118,8 @@
     formule: "Math-OCR locale (pix2tex via ONNX): un ritaglio di formula diventa LaTeX. I modelli si scaricano al primo uso.",
     tabelle: "Riconoscimento struttura tabelle (TATR): un ritaglio diventa righe e colonne vere.",
     db: "Il cuore: SQLite con ricerca full-text (FTS5) e vettoriale (sqlite-vec). Ogni luce qui è una modifica alla libreria.",
-    archivio: "I file veri su disco: papers/, note .md, progetti LaTeX. Vivono in %APPDATA%, separati dal programma.",
+    archivio: "L'organizzazione della libreria: raccolte e sotto-raccolte (vista Archivio, coi suggerimenti semantici per riempirle) e i file veri su disco — papers/, note .md, progetti LaTeX, in %APPDATA%, separati dal programma.",
+    specchio: "Lo Specchio su disco: proietta le raccolte in una cartella leggibile (Raccolta\\Sottoraccolta\\Autore Anno — Titolo.pdf) con hardlink, sincronizzata da sola a ogni cambio. La libreria vera non viene mai toccata; si attiva dall'Archivio.",
     backup: "Copie di sicurezza complete e ripristino (validato, atomico, con copia pre-ripristino).",
     terminale: "La PowerShell integrata, aperta nella cartella dei PDF.",
     embed: "Vettori semantici bge-m3 (locale, ONNX): alimentano Correlati, ricerca per significato e Costellazione.",
@@ -142,6 +148,7 @@
     { from: "ocr",       to: "db",        when: ["ocr"] },
     { from: "db",       to: "archivio",   when: ["backup", "archivio"] },
     { from: "db",       to: "backup",     when: ["backup"] },
+    { from: "archivio", to: "specchio",   when: ["specchio"] },
     { from: "db",       to: "embed",      when: ["embed"] },
     { from: "embed",    to: "rag",        when: ["rag"] },
     { from: "rag",      to: "chiedi",     when: ["chiedi"] },
@@ -293,6 +300,7 @@
     switch (n.gate) {
       case "rete":      return gates.discovery ? null : "online disattivato";
       case "ai":        return gates.ai_enabled ? null : "AI disattivata";
+      case "mirror":    return gates.mirror_enabled ? null : "spento (si attiva dall'Archivio)";
       case "watched":   return gates.watched_folder ? null : "nessuna cartella";
       case "connector": return gates.connector ? null : "connettore spento";
       case "mathocr":   return gates.mathocr_ready ? null : "modelli da scaricare";
@@ -367,7 +375,12 @@
       case "db":       return `${fmtN(stats.docs)} doc · ${fmtN(stats.trash)} cestino · ${stats.db_mb} MB`;
       case "embed":    return `${fmtN(stats.embedded)}/${fmtN(stats.docs)} vettorizzati`;
       case "rag":      return stats.rag_docs > 0 ? `${fmtN(stats.rag_docs)} doc · ${fmtN(stats.rag_chunks)} passaggi` : "indice da costruire";
-      case "archivio": return `${fmtN(stats.notes)} appunti · ${fmtN(stats.projects)} progetti`;
+      case "archivio": return `${fmtN(stats.collections)} raccolte · ${fmtN(stats.notes)} appunti · ${fmtN(stats.projects)} progetti`;
+      case "specchio": {
+        const d = gates?.mirror_dir ?? "";
+        return d ? (d.split(/[\\/]/).pop() ?? n.sub) : n.sub;
+      }
+      case "scoperta": return stats.watches > 0 ? `${fmtN(stats.watches)} ricerche attive` : n.sub;
       case "backup":   return stats.backup_age_days == null ? "nessun backup" : stats.backup_age_days === 0 ? "ultimo: oggi" : `ultimo: ${stats.backup_age_days} g fa`;
       case "biblio":   return stats.refs_only > 0 ? `${fmtN(stats.refs_only)} voci solo-riferimento` : n.sub;
       case "cartella": {
@@ -516,6 +529,7 @@
         <span class="chip {gates.ai_enabled ? 'g-on' : 'g-off'}">AI {gates.ai_enabled ? (gates.ai_model || gates.ai_provider || "ON").toUpperCase() : "OFF"}</span>
         <span class="chip {gates.watched_folder ? 'g-on' : 'g-off'}">CARTELLA {gates.watched_folder ? "●" : "—"}</span>
         <span class="chip {gates.connector ? 'g-on' : 'g-off'}">CONNETTORE {gates.connector ? "●" : "—"}</span>
+        <span class="chip {gates.mirror_enabled ? 'g-on' : 'g-off'}" title={gates.mirror_enabled ? gates.mirror_dir : "Specchio su disco spento (si attiva dall'Archivio)"}>SPECCHIO {gates.mirror_enabled ? "●" : "—"}</span>
       {/if}
       {#if errCount > 0}
         <span class="chip g-err">{errCount} ERRORI</span>
