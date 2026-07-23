@@ -2,6 +2,10 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.37 — Guida e Plancia al passo con l'Archivio
+- **Guida in-app aggiornata** (voce Archivio): il gesto <em>trascina sullo sfondo = togli dalla raccolta</em>, la scelta della sorgente dei suggerimenti <em>prima</em> del calcolo (col Nome che funziona anche a motori spenti) e il toggle «Novità» che rimuove la ricerca quando lo spegni.
+- **Plancia**: descrizioni dei nodi ARCHIVIO e SCOPERTA aggiornate alle stesse funzioni. Solo documentazione e testi, nessun cambiamento di comportamento.
+
 ## 0.9.36 — Il «Nome» funziona anche senza modelli accesi
 - **Suggerimenti, modalità Nome/Entrambi senza motori in esecuzione**: se non c'è né il modello locale in cache né Ollama acceso (il caso di chi ha costruito l'indice via Ollama), il vettore del nome ora si ricava **dalla libreria stessa**: le parole del nome pescano via full-text i paper che le contengono e il centroide dei loro vettori fa da vettore del nome — zero modelli, zero rete. L'errore resta solo nel caso limite (nessun paper contiene le parole del nome), con un messaggio che spiega cosa fare.
 
