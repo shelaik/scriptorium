@@ -85,7 +85,74 @@ pub async fn list_models(client: &reqwest::Client, provider: &str, url: &str) ->
     }
 }
 
+/// Esito completo di una generazione: oltre al testo, la diagnostica che
+/// distingue «il modello non ha risposto» da «ha esaurito i token ragionando».
+/// I modelli «thinking» (gpt-oss, qwen3, deepseek-r1…) spendono il budget nel
+/// campo `thinking` e possono lasciare `text` VUOTO: senza questi due campi la
+/// causa resta invisibile a chi usa l'app e a chi la ripara.
+#[derive(Debug, Default, Clone)]
+pub struct GenOut {
+    pub text: String,
+    /// La generazione si è fermata perché ha toccato `num_predict`.
+    pub truncated: bool,
+    /// Catena di ragionamento, quando il provider la espone separatamente.
+    pub thinking: String,
+}
+
+/// Toglie dal testo di un modello ciò che non è risposta: blocchi di
+/// ragionamento `<think>…</think>` (anche NON chiusi: in quel caso resta solo
+/// ciò che precede), recinti markdown ```…``` e virgolette tipografiche.
+/// Da usare prima di QUALSIASI parsing di output, non solo per i tag.
+pub fn strip_reasoning_and_fences(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    // 1) blocchi di ragionamento (case-insensitive sui tag più diffusi)
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(open) = ["<think>", "<thinking>", "<reasoning>"]
+            .iter()
+            .filter_map(|t| lower.find(t).map(|i| (i, t.len())))
+            .min_by_key(|(i, _)| *i)
+        else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..open.0]);
+        let after = &rest[open.0 + open.1..];
+        let lower_after = after.to_ascii_lowercase();
+        match ["</think>", "</thinking>", "</reasoning>"]
+            .iter()
+            .filter_map(|t| lower_after.find(t).map(|i| (i, t.len())))
+            .min_by_key(|(i, _)| *i)
+        {
+            Some((close, len)) => rest = &after[close + len..],
+            // Apertura senza chiusura: tutto il resto è ragionamento troncato.
+            None => break,
+        }
+    }
+    // 2) recinti markdown: tiene il contenuto del primo blocco, se c'è
+    let t = out.trim().to_string();
+    let out = match t.find("```") {
+        Some(start) => {
+            let after = &t[start + 3..];
+            let body = after.split_once('\n').map(|(_, b)| b).unwrap_or(after);
+            match body.find("```") {
+                Some(end) => body[..end].to_string(),
+                None => body.to_string(),
+            }
+        }
+        None => t,
+    };
+    // 3) virgolette tipografiche → dritte
+    out.replace(['\u{201c}', '\u{201d}'], "\"")
+        .replace(['\u{2018}', '\u{2019}'], "'")
+        .replace(['\u{00ab}', '\u{00bb}'], "")
+        .trim()
+        .to_string()
+}
+
 /// Single-shot, non-streaming generation. `num_predict` caps output length.
+/// Sottile involucro su [`generate_full`]: restituisce il solo testo.
 pub async fn generate(
     client: &reqwest::Client,
     provider: &str,
@@ -94,6 +161,20 @@ pub async fn generate(
     prompt: &str,
     num_predict: i64,
 ) -> Result<String> {
+    generate_full(client, provider, url, model, prompt, num_predict)
+        .await
+        .map(|o| o.text)
+}
+
+/// Come [`generate`], ma restituisce anche troncamento e catena di ragionamento.
+pub async fn generate_full(
+    client: &reqwest::Client,
+    provider: &str,
+    url: &str,
+    model: &str,
+    prompt: &str,
+    num_predict: i64,
+) -> Result<GenOut> {
     let base = base_url(url);
     if is_lmstudio(provider) {
         let resp = client
@@ -114,11 +195,19 @@ pub async fn generate(
             anyhow::bail!("LM Studio HTTP {status}: {}", truncate(&txt, 300));
         }
         let body: Value = resp.json().await.context("risposta LM Studio non valida")?;
-        Ok(body["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string())
+        Ok(GenOut {
+            text: body["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            truncated: body["choices"][0]["finish_reason"].as_str() == Some("length"),
+            thinking: body["choices"][0]["message"]["reasoning_content"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        })
     } else {
         let resp = client
             .post(format!("{base}/api/generate"))
@@ -137,7 +226,11 @@ pub async fn generate(
             anyhow::bail!("Ollama HTTP {status}: {}", truncate(&txt, 300));
         }
         let body: Value = resp.json().await.context("risposta Ollama non valida")?;
-        Ok(body["response"].as_str().unwrap_or("").trim().to_string())
+        Ok(GenOut {
+            text: body["response"].as_str().unwrap_or("").trim().to_string(),
+            truncated: body["done_reason"].as_str() == Some("length"),
+            thinking: body["thinking"].as_str().unwrap_or("").trim().to_string(),
+        })
     }
 }
 
@@ -400,4 +493,31 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max_chars).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_reasoning_and_fences as strip;
+
+    #[test]
+    fn removes_closed_and_unclosed_reasoning() {
+        assert_eq!(strip("<think>ragiono</think>a, b"), "a, b");
+        assert_eq!(strip("<THINK>x</THINK> y"), "y");
+        // Apertura senza chiusura (budget esaurito nel ragionamento): niente
+        // deve sopravvivere, o finirebbe come tag-spazzatura in libreria.
+        assert_eq!(strip("<think>okay, first, understanding"), "");
+        assert_eq!(strip("prima <think>mezzo</think> dopo"), "prima  dopo");
+    }
+
+    #[test]
+    fn unwraps_fences_and_smart_quotes() {
+        assert_eq!(strip("```json\n[\"a\",\"b\"]\n```"), "[\"a\",\"b\"]");
+        assert_eq!(strip("```\nnudo\n```"), "nudo");
+        assert_eq!(strip("\u{201c}alto\u{201d}"), "\"alto\"");
+    }
+
+    #[test]
+    fn plain_text_survives_untouched() {
+        assert_eq!(strip("  a, b, c  "), "a, b, c");
+    }
 }

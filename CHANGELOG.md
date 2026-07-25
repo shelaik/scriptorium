@@ -2,6 +2,12 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.38 — I tag automatici funzionano di nuovo
+- **Corretto: «Tag automatici (AI)» falliva sempre** su chi usa un modello «con ragionamento» (gpt-oss, qwen3, deepseek-r1 e simili). La funzione chiedeva al modello appena **80 token** — il budget più piccolo dell'app, mentre «Riassumi» ne ha 360 — e il ragionamento li consumava tutti lasciando la risposta vuota: il risultato era l'errore «Il modello non ha prodotto tag utilizzabili» su ogni documento. Ora il budget è adeguato, la lettura della risposta **tollera** ragionamento (`<think>…`), recinti markdown, elenchi JSON e preamboli, c'è **un tentativo di recupero** se il modello sfora, e gli errori **dicono la causa** invece di un messaggio unico e muto.
+- **Corretto (silenzioso, peggiore): tag-spazzatura in libreria.** Con i modelli che stampano il ragionamento nel testo, parole come `<think>` o `okay` finivano tra i tag senza alcun errore. Ora vengono scartate, insieme a frasi, preamboli e duplicati.
+- **Corretto: «Trova PDF» usciva in rete anche con la ricerca online disattivata**, contraddicendo le Impostazioni. Ora rispetta l'interruttore (sia il singolo documento sia il rastrello in blocco).
+- I tag automatici compaiono anche nella **Plancia** come attività.
+
 ## 0.9.37 — Guida e Plancia al passo con l'Archivio
 - **Guida in-app aggiornata** (voce Archivio): il gesto <em>trascina sullo sfondo = togli dalla raccolta</em>, la scelta della sorgente dei suggerimenti <em>prima</em> del calcolo (col Nome che funziona anche a motori spenti) e il toggle «Novità» che rimuove la ricerca quando lo spegni.
 - **Plancia**: descrizioni dei nodi ARCHIVIO e SCOPERTA aggiornate alle stesse funzioni. Solo documentazione e testi, nessun cambiamento di comportamento.

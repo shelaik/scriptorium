@@ -5030,6 +5030,11 @@ pub async fn find_pdf(app: AppHandle, id: i64) -> Result<String, String> {
     let (doi, path, title, email) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
+        // Questa funzione ESCE IN RETE (arXiv, Unpaywall, OpenAlex, S2): deve
+        // rispettare l'interruttore online come discover_search/discover_add.
+        if setting(&conn, "discovery_enabled").as_deref() != Some("1") {
+            return Err("La ricerca online è disattivata (abilitala in Impostazioni → Ricerca online)".into());
+        }
         let row = conn
             .query_row(
                 "SELECT doi, path, title FROM documents WHERE id = ?1 AND deleted_at IS NULL",
@@ -5290,6 +5295,10 @@ pub async fn pdf_candidates(app: AppHandle, id: i64) -> Result<PdfProbe, String>
     ) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
+        // Anche la ricerca dei candidati esce in rete: stesso interruttore.
+        if setting(&conn, "discovery_enabled").as_deref() != Some("1") {
+            return Err("La ricerca online è disattivata (abilitala in Impostazioni → Ricerca online)".into());
+        }
         let (doi, path, title, year) = conn
             .query_row(
                 "SELECT doi, path, title, year FROM documents WHERE id = ?1 AND deleted_at IS NULL",
@@ -8267,9 +8276,64 @@ pub async fn ai_explain(
     Ok(answer)
 }
 
+/// Estrae le parole chiave da una risposta del modello. Tollerante per
+/// costruzione: toglie ragionamento e recinti, accetta un array JSON, scarta i
+/// preamboli («Ecco le parole chiave:») e le frasi, normalizza e deduplica.
+fn parse_tags(raw: &str) -> Vec<String> {
+    let cleaned = ai::strip_reasoning_and_fences(raw);
+    if cleaned.is_empty() {
+        return Vec::new();
+    }
+    // (a) array JSON, la forma che i modelli istruiti restituiscono più spesso
+    let pieces: Vec<String> = match serde_json::from_str::<Vec<String>>(cleaned.trim()) {
+        Ok(v) => v,
+        Err(_) => cleaned
+            .split(|c| c == ',' || c == '\n' || c == ';')
+            .map(str::to_string)
+            .collect(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for p in pieces {
+        let t = p
+            .trim()
+            .trim_matches(|c: char| {
+                c == '"' || c == '\'' || c == '[' || c == ']' || c == '-' || c == '•' || c == '*' || c == '.' || c.is_numeric()
+            })
+            .trim()
+            .to_lowercase();
+        // (b) preamboli e frasi: mai finire in tassonomia
+        if t.is_empty()
+            || t.len() > 40
+            || t.ends_with(':')
+            || t.split_whitespace().count() > 4
+            || t.contains("parole chiave")
+            || t.contains("keyword")
+            || t.starts_with("ecco")
+            || t.starts_with("here are")
+            || t.starts_with('<')
+        {
+            continue;
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+        if out.len() == 6 {
+            break;
+        }
+    }
+    out
+}
+
 /// Suggest and assign 3-6 topical tags for a document (manual, opt-in).
 #[tauri::command]
 pub async fn autotag_document(app: AppHandle, id: i64) -> Result<Vec<String>, String> {
+    pulse::start(&app, "riassunti", "Tag automatici (AI)");
+    let r = autotag_document_inner(app.clone(), id).await;
+    pulse::done(&app, "riassunti", "Tag automatici (AI)", &r);
+    r
+}
+
+async fn autotag_document_inner(app: AppHandle, id: i64) -> Result<Vec<String>, String> {
     let (enabled, provider, url, model, title, text) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
@@ -8288,22 +8352,49 @@ pub async fn autotag_document(app: AppHandle, id: i64) -> Result<Vec<String>, St
         "Elenca da 3 a 6 parole chiave tematiche per il seguente articolo accademico. Usa termini brevi (1-3 parole), in minuscolo, in inglese. Rispondi SOLO con le parole chiave separate da virgola, senza numerazione né altro.\n\nTitolo: {title}\n\nTesto:\n{text}"
     );
     let client = ai::client().map_err(|e| e.to_string())?;
-    let out = ai::generate(&client, &provider, &url, &model, &prompt, 80)
+    // 400 token, non 80: con un modello «thinking» (gpt-oss, qwen3, deepseek-r1)
+    // un budget minuscolo viene consumato tutto dal ragionamento e la risposta
+    // torna VUOTA — era la causa del «non produce tag» su ogni documento.
+    const BUDGET: i64 = 400;
+    let out = ai::generate_full(&client, &provider, &url, &model, &prompt, BUDGET)
         .await
         .map_err(|e| format!("{e:#}"))?;
-    let tags: Vec<String> = out
-        .split(|c| c == ',' || c == '\n' || c == ';')
-        .map(|s| {
-            s.trim()
-                .trim_matches(|c: char| c == '-' || c == '•' || c == '*' || c == '.' || c.is_numeric())
-                .trim()
-                .to_lowercase()
-        })
-        .filter(|s| !s.is_empty() && s.len() <= 40)
-        .take(6)
-        .collect();
+    let mut tags = parse_tags(&out.text);
+
+    // Un solo tentativo di recupero, e solo quando ha senso: niente da parsare
+    // perché il modello ha ragionato oltre il budget.
+    if tags.is_empty() && (out.truncated || out.text.trim().is_empty()) {
+        let strict = format!(
+            "{prompt}\n\nIMPORTANTE: rispondi con UNA SOLA riga nel formato «parola1, parola2, parola3». Nessun ragionamento, nessuna spiegazione."
+        );
+        if let Ok(retry) = ai::generate_full(&client, &provider, &url, &model, &strict, 900).await {
+            tags = parse_tags(&retry.text);
+            // Ultima risorsa: alcuni modelli mettono l'elenco solo nel ragionamento.
+            if tags.is_empty() {
+                if let Some(line) = retry
+                    .thinking
+                    .lines()
+                    .rev()
+                    .find(|l| l.matches(',').count() >= 2 && l.len() <= 160)
+                {
+                    tags = parse_tags(line);
+                }
+            }
+        }
+    }
+
     if tags.is_empty() {
-        return Err("Il modello non ha prodotto tag utilizzabili".into());
+        // Errori parlanti: la causa vera, non un muro unico e muto.
+        return Err(if out.truncated || out.text.trim().is_empty() {
+            format!(
+                "Il modello «{model}» ha esaurito i token nel ragionamento senza rispondere. Prova un modello senza «thinking» (es. llama3.2, mistral-small) oppure riprova."
+            )
+        } else {
+            format!(
+                "Il modello ha risposto ma senza parole chiave riconoscibili: «{}»",
+                ai::truncate(out.text.trim(), 140)
+            )
+        });
     }
     {
         let state = app.state::<AppState>();
@@ -11995,6 +12086,7 @@ mod url_normalize_tests {
 #[cfg(test)]
 mod ssrf_tests {
     use super::is_safe_fetch_url;
+    use super::parse_tags;
 
     #[test]
     fn accepts_normal_public_https() {
@@ -12035,5 +12127,28 @@ mod ssrf_tests {
         assert!(!is_safe_fetch_url("https://2130706433/x.pdf"));
         // Trailing-dot loopback FQDN form.
         assert!(!is_safe_fetch_url("https://127.0.0.1./x.pdf"));
+    }
+
+    #[test]
+    fn parse_tags_tollera_ragionamento_recinti_e_json() {
+        // Il caso che rompeva tutto: budget esaurito nel ragionamento.
+        assert!(parse_tags("<think>okay, first, understanding the").is_empty());
+        assert!(parse_tags("").is_empty());
+        // Forme normali e forme "istruite".
+        assert_eq!(parse_tags("a, b, c"), vec!["a", "b", "c"]);
+        assert_eq!(parse_tags("```json
+[\"deep learning\",\"nlp\"]
+```"), vec!["deep learning", "nlp"]);
+        assert_eq!(parse_tags("<think>rifletto</think>rag, llm"), vec!["rag", "llm"]);
+        // Preamboli e frasi non devono entrare in tassonomia.
+        let out = parse_tags("Ecco le parole chiave:
+machine learning, questa e una frase troppo lunga per essere un tag");
+        assert_eq!(out, vec!["machine learning"]);
+        // Numerazione, maiuscole e duplicati.
+        assert_eq!(parse_tags("1. Alpha
+2. alpha
+3. Beta"), vec!["alpha", "beta"]);
+        // Mai piu di 6.
+        assert_eq!(parse_tags("a,b,c,d,e,f,g,h").len(), 6);
     }
 }
