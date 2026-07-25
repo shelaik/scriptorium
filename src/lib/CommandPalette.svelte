@@ -371,7 +371,13 @@
         {/each}
       {/each}
       {#if view.flat.length === 0}
-        <div class="empty">Nessun risultato</div>
+        <div class="empty">
+          <p>Nessun comando trovato per «{query}».</p>
+          <p class="emptyhint">
+            Le azioni su un documento compaiono qui quando ne hai uno a fuoco (clic su una scheda).
+            Prova anche il <b>tasto destro</b> su una scheda, o apri la <b>Guida</b> dalla barra.
+          </p>
+        </div>
       {/if}
     </div>
 
@@ -449,6 +455,7 @@
     background: var(--field); border: 1px solid var(--border);
     border-radius: 5px; padding: 0 5px;
   }
+  .emptyhint { font-size: 12px; opacity: 0.75; margin-top: 6px; line-height: 1.5; }
   .empty { padding: 20px 16px; font-size: 13px; color: var(--dim); }
   .foot {
     padding: 8px 16px; font-size: 10.5px; color: var(--faint);

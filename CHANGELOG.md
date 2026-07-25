@@ -2,6 +2,19 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.44 — Revisione dell'interfaccia: le funzioni ora si trovano
+Da un audit completo dell'esperienza d'uso (80 rilievi) è emersa una causa comune ai «c'era ma non l'ho trovato»: **la barra strumenti erano 23 icone mute**. Questa versione affronta il problema alla radice.
+- **Barra con le etichette scritte** sulle porte principali — *Importa · Archivio · Appunti · Progetti · Cura della libreria* — separatori tra i gruppi, e **scorrimento** invece del taglio a finestra stretta (prima, sotto i 950 px, sparivano Aspetto e Sistema→Impostazioni).
+- **Ctrl+K contiene finalmente le azioni sul documento** («Trova PDF…», «Recupera metadati…», «Riferimenti e citazioni»…): esistevano *solo* dietro il tasto destro, benché la guida promettesse il contrario.
+- **«⋯ Altro» nella barra della selezione**: mostrava 7 azioni su 14 — mancavano Trova PDF, Confronta, Rassegna, Cita, Esporta.
+- **Nuovo richiamo «✦ N senza PDF»** accanto a «✦ N senza metadati»: dopo un import da bibliografia restano decine di voci senza file, e la funzione che le risolve era tre livelli più sotto.
+- **Prima schermata utile**: la libreria vuota ora offre quattro pulsanti veri (importa PDF, importa bibliografia/progetto, cerca online, apri la guida) invece di citare un pulsante che non esiste più.
+- **Un solo nome per le stesse cose**: «Collezioni» diventa **Raccolte** ovunque (era lo stesso oggetto con due nomi, a volte nella stessa frase), e dalla barra laterale si arriva all'Archivio con «gestisci →».
+- **Esc chiude i modali** (prima non ne chiudeva nessuno) e **trascinare un `.bib`/`.ris`/`.zip` nella finestra** avvia l'import (prima: silenzio).
+- **«Costellazione» segue il contesto**: se stai guardando una raccolta apre la mappa *di quella raccolta*; la mappa completa resta a un clic.
+- **L'Archivio rispetta i temi** (era nero/ciano fisso anche sulle palette chiare) e le viste a pagina piena non vengono più tagliate in fondo.
+- Palette senza risultati che **spiega dove cercare**, e messaggio di benvenuto **richiamabile** da Sistema → «Rivedi il benvenuto».
+
 ## 0.9.43 — Il progetto Overleaf intero, e i grafi di raccolta finalmente visibili
 - **Dallo stesso zip, anche il progetto LaTeX completo.** L'import «Da bibliografia o progetto…» ora chiede, per un `.zip`, se **ricostruire l'intero progetto** — file `.tex`, immagini, classi, sottocartelle — dentro **Progetti (LaTeX)**, pronto da compilare. Un unico gesto dà: schede dei paper citati, PDF open-access, raccolta **e** il progetto compilabile.
 - **Etichette oneste sullo zip dei Progetti**: il pulsante ora dice «Da .zip (**anche Overleaf**)…» — importava già l'archivio intero, ma sembrava riservato ai *template*.

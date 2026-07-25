@@ -281,6 +281,9 @@
   // those fields — and the references/citations/gap features built on them —
   // stay empty until metadata is fetched.
   let needsMeta = $derived(docs.filter(isBare).length);
+  // Gemello del chip metadati: dopo un import da bibliografia restano decine di
+  // voci senza file, e la funzione che le risolve viveva tre livelli sotto.
+  let needsPdf = $derived(docs.filter((d) => !d.has_file).length);
   let query = $state("");
   let mode = $state<SearchMode>("hybrid");
   let emb = $state<EmbedStatus>({ total: 0, embedded: 0 });
@@ -307,6 +310,11 @@
   let toolMenu = $state<{ id: string; x: number; y: number } | null>(null);
   // Which tool-bar group owns the current view, so its icon shows a "you are here"
   // mark (replaces the active highlight the moved sidebar buttons used to give).
+  // Le porte d'ingresso che l'utente cerca PER NOME portano l'etichetta scritta:
+  // 23 icone mute erano la causa strutturale del «la funzione c'era ma non si trovava».
+  const TOOL_LABELLED = new Set(["g-imp", "g-archivio", "g-notes", "g-projects", "g-tools"]);
+  // Stacchi visivi fra i gruppi: navigazione · creazione · scoperta · manutenzione · sistema.
+  const TOOL_SEP = new Set(["g-ask", "g-notes", "g-redis", "g-tools", "g-help"]);
   let activeToolGroup = $derived.by(() => {
     if (helpModal) return "g-help";
     if (careModal) return "g-tools";
@@ -632,7 +640,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.43";
+  const APP_VERSION = "0.9.44";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -1310,6 +1318,12 @@
       ],
     });
     if (typeof file !== "string") return;
+    await importDroppedBibliography(file);
+  }
+
+  /** La catena di import di una bibliografia/progetto, dato il percorso: usata
+   *  sia dalla voce di menu sia dal trascinamento nella finestra. */
+  async function importDroppedBibliography(file: string) {
     // Uno .zip (progetto Overleaf/LaTeX): la bibliografia si legge da dentro.
     // Va detto che di quell'archivio si prende SOLO la bibliografia: per i PDF
     // e il grafo delle citazioni del proprio lavoro c'è «Progetto LaTeX (.zip)».
@@ -2861,7 +2875,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
   }
 
   async function removeColl(coll: Collection) {
-    if (!(await confirmAsk(`Eliminare la collezione «${coll.name}»? I documenti restano in libreria (le eventuali sotto-raccolte risalgono di un livello).`))) return;
+    if (!(await confirmAsk(`Eliminare la raccolta «${coll.name}»? I documenti restano in libreria (le eventuali sotto-raccolte risalgono di un livello).`))) return;
     await deleteCollection(coll.id);
     if (filter.kind === "collection" && filter.id === coll.id) filter = { kind: "all" };
     await loadDocs();
@@ -2989,6 +3003,16 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
           return;
         }
         const pdfs = p.paths.filter((x) => x.toLowerCase().endsWith(".pdf"));
+        // Bibliografie e progetti trascinati: prima non succedeva NULLA, in
+        // silenzio. Ora si apre la stessa catena della voce di menu.
+        const bibs = p.paths.filter((x) => /\.(bib|bibtex|ris|csljson|csl|zip)$/i.test(x));
+        if (!pdfs.length && bibs.length) {
+          void importDroppedBibliography(bibs[0]);
+          return;
+        }
+        if (bibs.length) {
+          status = `${bibs.length} file di bibliografia ignorati: trascina PDF, oppure usa Importa → Da bibliografia o progetto…`;
+        }
         handleImport(pdfs);
       } else dragOver = false;
     });
@@ -3330,10 +3354,10 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
       { id: "or-find", label: "Recupera metadati…", icon: I.metafind, hint: "Cerca online la scheda giusta (Crossref, arXiv, OpenAlex) e scegli tu quale applicare", action: () => (metaFindId = d.id) },
       { id: "or-meta", label: "Modifica metadati", icon: I.edit, action: () => (editingId = d.id) },
       { id: "or-tag", label: "Tag…", icon: I.tag, hint: "Assegna o togli tag", action: () => (tagPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
-      { id: "or-coll", label: "Collezioni…", icon: I.folder, hint: "Aggiungi a una collezione", action: () => (collPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
+      { id: "or-coll", label: "Raccolte…", icon: I.folder, hint: "Aggiungi a una raccolta", action: () => (collPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
     ];
     if (filter.kind === "collection")
-      orgKids.push({ id: "or-rm", label: `Togli da «${filter.label ?? "collezione"}»`, danger: true, action: () => removeDocFromCurrentCollection(d) });
+      orgKids.push({ id: "or-rm", label: `Togli da «${filter.label ?? "raccolta"}»`, danger: true, action: () => removeDocFromCurrentCollection(d) });
     if (!d.has_file)
       orgKids.push({ id: "or-pdf", label: "Allega PDF…", hint: "Questa voce è solo un riferimento: trova un PDF Open Access o allegane uno da un link", action: () => (refPanel = { doc: d, url: "", busy: false }) });
     const items: RadialItem[] = [
@@ -3343,7 +3367,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
       { id: "d-read", label: "Letto", icon: I.check, checked: d.is_read, hint: d.is_read ? "Segna come da leggere" : "Segna come letto", action: () => toggleRead(d) },
       { id: "d-cite", label: "Cita", icon: I.quote, hint: "Copia citazioni, riferimenti, esplora", children: citeKids },
       { id: "d-ai", label: "AI", icon: I.ai, hint: aiStat?.enabled ? "Riassunto, tag, domande, correlati" : "Correlati (per il resto attiva l'AI locale)", children: aiKids },
-      { id: "d-org", label: "Organizza", icon: I.folder, hint: "Metadati, tag, collezioni", children: orgKids },
+      { id: "d-org", label: "Organizza", icon: I.folder, hint: "Metadati, tag, raccolte", children: orgKids },
       { id: "d-code", label: "Codice & repo", icon: I.code, hint: "Repository GitHub citati + modelli e dataset Hugging Face", action: () => openHf(d) },
       { id: "d-share", label: "Condividi", icon: I.share, hint: "Invia, stampa, mostra file", children: shareKids },
       { id: "d-del", label: "Elimina", icon: I.trash, danger: true, hint: "Sposta nel cestino (recuperabile)", action: () => trashSelected([d.id]) },
@@ -3406,7 +3430,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
       items.push({ id: "s-wiki", label: "Pagina wiki (AI)", icon: I.open, disabled: aiBusyAny || wikiBusy, hint: "Una pagina della Wiki con esattamente questi documenti come fonti (max 10)", action: () => (wikiFromSel = { ids: [...selected].slice(0, 10), concept: "" }) });
     }
     if (tagKids.length) items.push({ id: "s-tag", label: "Aggiungi tag", icon: I.tag, children: tagKids });
-    if (collKids.length) items.push({ id: "s-coll", label: "In collezione", icon: I.folder, children: collKids });
+    if (collKids.length) items.push({ id: "s-coll", label: "In raccolta", icon: I.folder, children: collKids });
     items.push({
       id: "s-cite",
       label: "Cita",
@@ -3460,15 +3484,34 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
         children: [
           { id: "gv-grid", label: "Griglia", icon: I.grid, checked: view === "grid", action: () => (view = "grid") },
           { id: "gv-list", label: "Lista", icon: I.list, checked: view === "list", action: () => (view = "list") },
-          { id: "gv-map", label: "Costellazione", icon: I.map, checked: view === "map", hint: "Mappa semantica della libreria", action: () => { graphScope = null; graph = null; view = "map"; void loadGraph(true); } },
+          {
+            id: "gv-map",
+            label: filter.kind === "collection" && filter.id != null ? "Costellazione della raccolta" : "Costellazione",
+            icon: I.map,
+            checked: view === "map",
+            hint:
+              filter.kind === "collection" && filter.id != null
+                ? "La mappa dei soli paper di questa raccolta (dalla barra in alto torni a tutta la libreria)"
+                : "Mappa semantica della libreria",
+            action: () => {
+              if (filter.kind === "collection" && filter.id != null) {
+                openGraphForCollection(filter.id, filter.label ?? "raccolta");
+              } else {
+                graphScope = null;
+                graph = null;
+                view = "map";
+                void loadGraph(true);
+              }
+            },
+          },
           ...(filter.kind === "collection" && filter.id != null
             ? [{
-                id: "gv-map-coll",
-                label: `Costellazione di «${filter.label ?? "raccolta"}»`,
+                id: "gv-map-all",
+                label: "Costellazione di tutta la libreria",
                 icon: I.map,
-                checked: view === "map" && graphScope?.id === filter.id,
-                hint: "La mappa dei soli paper di questa raccolta (vicinanze ricalcolate al suo interno)",
-                action: () => openGraphForCollection(filter.id as number, filter.label ?? "raccolta"),
+                checked: view === "map" && graphScope == null,
+                hint: "La mappa completa, ignorando il filtro attivo",
+                action: () => { graphScope = null; graph = null; view = "map"; void loadGraph(true); },
               }]
             : []),
           { id: "gv-side", label: "Barra laterale", checked: !sidebarHidden, hint: "Mostra/nascondi (Ctrl+B)", action: () => (sidebarHidden = !sidebarHidden) },
@@ -3596,6 +3639,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
         children: [
           { id: "gy-set", label: "Impostazioni", icon: I.gear, action: () => openSettings() },
           { id: "gy-upd", label: "Controlla aggiornamenti", hint: "Confronta la tua versione con GitHub — solo un avviso, niente installazioni automatiche", action: () => void checkUpdatesNow(true) },
+          { id: "gy-coach", label: "Rivedi il benvenuto", hint: "Ripropone il messaggio di primo avvio (tasto destro, palette, guida)", action: () => { try { localStorage.removeItem("scriptorium-coach-seen"); } catch { /* ignore */ } showCoach = true; } },
           { id: "gy-about", label: "Informazioni", action: () => (aboutModal = true) },
         ],
       },
@@ -3679,6 +3723,10 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
     };
     walk(buildGlobalRadial(), "");
     if (selected.length > 1) walk(buildSelectionRadial(), `Selezione (${selected.length})`);
+    // Anche le azioni sul documento a fuoco: «Trova PDF…», «Recupera metadati…»,
+    // «Riferimenti e citazioni»… vivevano SOLO dietro il tasto destro, mentre la
+    // guida prometteva che tutto fosse digitabile qui.
+    if (panelDoc) walk(buildDocRadial(panelDoc), panelDoc.title ?? "Documento");
     // Navigation
     const nav: [string, string, () => void][] = [
       ["Tutti", "tutta la libreria", () => setFilter({ kind: "all" })],
@@ -3691,7 +3739,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
     ];
     for (const [label, hint, run] of nav) out.push({ id: "nav-" + label, title: label, hint, section: "Vai a", run: () => { leaveReader(); run(); } });
     for (const c of collections)
-      out.push({ id: "nav-c" + c.id, title: `Collezione: ${c.name}`, section: "Vai a", run: () => { leaveReader(); setFilter({ kind: "collection", id: c.id, label: c.name }); } });
+      out.push({ id: "nav-c" + c.id, title: `Raccolta: ${c.name}`, section: "Vai a", run: () => { leaveReader(); setFilter({ kind: "collection", id: c.id, label: c.name }); } });
     for (const t of tags)
       out.push({ id: "nav-t" + t.id, title: `Tag: ${t.name}`, hint: `${t.count} documenti`, section: "Vai a", run: () => { leaveReader(); toggleTagFilter(t.id); } });
     for (const s of savedSearches)
@@ -3806,10 +3854,27 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
       }
     }
     if (e.key === "Escape") {
+      // Ordine: prima i menu volanti, poi i modali (il piu' esterno per ultimo),
+      // infine il pannello di dettaglio. Prima Esc non chiudeva NESSUN modale.
       if (toolMenu || sortPop || indexPop) {
         toolMenu = null;
         sortPop = false;
         indexPop = false;
+      } else if (pathModal) {
+        pathModal = null;
+      } else if (hfModal || citModal || exploreModal || idModal || urlModal || aboutModal) {
+        hfModal = false;
+        citModal = false;
+        exploreModal = false;
+        idModal = false;
+        urlModal = false;
+        aboutModal = false;
+      } else if (careModal) {
+        careModal = false;
+      } else if (settingsModal) {
+        settingsModal = false;
+      } else if (helpModal) {
+        helpModal = false;
       } else if (focusId != null) {
         focusId = null; // chiude il pannello dettaglio
       }
@@ -5164,6 +5229,16 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
         {enriching ? (metaScan ? `recupero… ${metaScan.done}/${metaScan.total}` : "recupero…") : `✦ ${needsMeta} senza metadati`}
       </button>
     {/if}
+    {#if needsPdf > 0}
+      <button
+        class="ambient"
+        onclick={findPdfAllRefs}
+        disabled={!!pdfBatch}
+        title="Cerca online la copia Open Access delle voci senza PDF (arXiv, Unpaywall, OpenAlex, Semantic Scholar). Scarica solo quando la corrispondenza col titolo è certa. Richiede la ricerca online attiva."
+      >
+        {pdfBatch ? `cerco PDF… ${pdfBatch.done}/${pdfBatch.total}` : `✦ ${needsPdf} senza PDF`}
+      </button>
+    {/if}
     <button class="iconbtn" title="Palette comandi — ogni azione, digitando (Ctrl+K)" aria-label="Palette comandi" onclick={(e) => { e.stopPropagation(); paletteOpen = true; }}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3" /></svg>
     </button>
@@ -5171,16 +5246,19 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
 
   <nav class="toolbar" aria-label="Strumenti">
     {#each buildGlobalRadial() as g (g.id)}
+      {#if TOOL_SEP.has(g.id)}<span class="tsep" aria-hidden="true"></span>{/if}
       <button
         class="iconbtn"
         class:menuopen={toolMenu?.id === g.id}
         class:active={activeToolGroup === g.id}
+        class:labelled={TOOL_LABELLED.has(g.id)}
         title={g.hint ? g.label + " — " + g.hint : g.label}
         aria-label={g.label}
         disabled={g.disabled}
         onclick={(e) => openTool(e, g)}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d={g.icon} /></svg>
+        {#if TOOL_LABELLED.has(g.id)}<span class="tlabel">{g.label}</span>{/if}
         {#if g.badge}<span class="toolbadge">{g.badge}</span>{/if}
       </button>
     {/each}
@@ -5317,36 +5395,43 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
         </div>
       {/if}
 
-      <div class="sec">Collezioni</div>
+      <div class="sec secrow">
+        <span>Raccolte</span>
+        <button
+          class="seclink"
+          title="Archivio: raccolte e sotto-raccolte ad albero, trascinamento, suggerimenti"
+          onclick={() => setFilter({ kind: "archivio" })}
+        >gestisci →</button>
+      </div>
       {#each collections as c (c.id)}
         <div class="navrow">
-          <button class="navitem" class:active={filter.kind === "collection" && filter.id === c.id} onclick={() => setFilter({ kind: "collection", id: c.id, label: c.name })} title={`Filtra per la collezione "${c.name}"${c.is_smart ? " (smart: si aggiorna da sola)" : ""}`}>
+          <button class="navitem" class:active={filter.kind === "collection" && filter.id === c.id} onclick={() => setFilter({ kind: "collection", id: c.id, label: c.name })} title={`Filtra per la raccolta "${c.name}"${c.is_smart ? " (smart: si aggiorna da sola)" : ""}`}>
             {c.name}
           </button>
           {#if !c.is_smart}
             <button
               class="x mapx"
-              title={`Costellazione della sola collezione «${c.name}»`}
+              title={`Costellazione della sola raccolta «${c.name}»`}
               aria-label={`Costellazione di ${c.name}`}
               onclick={() => openGraphForCollection(c.id, c.name)}
             >✳</button>
           {/if}
-          <button class="x" title="Elimina la collezione (i documenti restano in libreria)" onclick={() => removeColl(c)}>×</button>
+          <button class="x" title="Elimina la raccolta (i documenti restano in libreria)" onclick={() => removeColl(c)}>×</button>
         </div>
       {/each}
 
       <div class="newcoll">
         <input
-          placeholder="Nuova collezione…"
-          title="Nome della nuova collezione. Premi Invio o «Crea»"
+          placeholder="Nuova raccolta…"
+          title="Nome della nuova raccolta. Premi Invio o «Crea»"
           bind:value={newCollName}
           onkeydown={(e) => e.key === "Enter" && makeCollection()}
         />
-        <label class="smart" title="Collezione automatica: si popola da sola in base a una regola, invece di aggiungere i documenti a mano">
+        <label class="smart" title="Raccolta automatica: si popola da sola in base a una regola, invece di aggiungere i documenti a mano">
           <input type="checkbox" bind:checked={newCollSmart} /> smart
         </label>
         {#if newCollSmart}
-          <select bind:value={smartType} title="Regola di appartenenza della collezione smart">
+          <select bind:value={smartType} title="Regola di appartenenza della raccolta smart">
             <option value="untagged">Senza tag</option>
             <option value="year_gte">Anno ≥</option>
             <option value="tag">Per tag (id)</option>
@@ -5356,7 +5441,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
             <input class="sval" placeholder="valore" title="Valore della regola: anno minimo, id del tag, o testo da cercare" bind:value={smartValue} />
           {/if}
         {/if}
-        <button class="ghost small" onclick={makeCollection} title="Crea la collezione">Crea</button>
+        <button class="ghost small" onclick={makeCollection} title="Crea la raccolta">Crea</button>
       </div>
 
       {#if savedSearches.length}
@@ -5427,7 +5512,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
               <div class="dupgroup">
                 <div class="duphead">
                   <span>{g.length} copie</span>
-                  <button class="ghost small" onclick={() => doMerge(g)} title="Unisci nel primo: sposta tag/collezioni/annotazioni, gli altri finiscono nel cestino">Unisci</button>
+                  <button class="ghost small" onclick={() => doMerge(g)} title="Unisci nel primo: sposta tag/raccolte/annotazioni, gli altri finiscono nel cestino">Unisci</button>
                 </div>
                 {#each g as id, i (id)}
                   <div class="duprow">
@@ -5954,7 +6039,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
               {filter.kind === "related"
                 ? "Correlati a"
                 : filter.kind === "collection"
-                  ? "Collezione"
+                  ? "Raccolta"
                   : filter.kind === "favorite"
                     ? "Preferiti"
                     : filter.kind === "author"
@@ -6014,11 +6099,25 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
               <option value="">+ Tag…</option>
               {#each tags as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
             </select>
-            <select title="Aggiungi i selezionati a una collezione" onchange={(e) => { const c = collections.find((x) => x.id === +e.currentTarget.value); if (c) bulkAddCollection(c); e.currentTarget.value = ""; }}>
-              <option value="">+ Collezione…</option>
+            <select title="Aggiungi i selezionati a una raccolta" onchange={(e) => { const c = collections.find((x) => x.id === +e.currentTarget.value); if (c) bulkAddCollection(c); e.currentTarget.value = ""; }}>
+              <option value="">+ Raccolta…</option>
               {#each collections.filter((c) => !c.is_smart) as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
             </select>
             <button class="del" onclick={() => trashSelected(selected)} title="Sposta i selezionati nel cestino">Elimina</button>
+            <button
+              title="Tutte le azioni sulla selezione: Trova PDF, Confronta, Rassegna, Cita, Esporta…"
+              onclick={(e) => {
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                radial = {
+                  x: r.left,
+                  y: Math.max(120, r.top - 40),
+                  items: buildSelectionRadial(),
+                  title: `${selected.length} selezionati`,
+                  subtitle: "Azioni sulla selezione",
+                  thumb: null,
+                };
+              }}
+            >⋯ Altro</button>
             <button class="pillx" onclick={() => (selected = [])} title="Annulla la selezione" aria-label="Deseleziona">✕</button>
           </div>
         {/if}
@@ -6159,7 +6258,14 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
             {:else if filter.kind !== "all"}
               <p class="big">Vuoto</p><p>Nessun documento in «{filter.label}».</p>
             {:else}
-              <p class="big">Nessun documento</p><p>Trascina qui dei PDF, oppure usa <strong>+ Importa PDF</strong>.</p>
+              <p class="big">La libreria è vuota</p>
+              <p>Trascina qui dei PDF, oppure comincia da una di queste porte:</p>
+              <div class="emptyacts">
+                <button class="primary" onclick={() => importViaDialog()}>Importa PDF dal disco…</button>
+                <button class="ghost" onclick={() => importRefManagerDialog()}>Da bibliografia o progetto (.bib/.zip)…</button>
+                <button class="ghost" onclick={() => setFilter({ kind: "discover" })}>Cerca paper online…</button>
+                <button class="ghost" onclick={() => openHelp()}>Apri la guida</button>
+              </div>
             {/if}
           </div>
         {:else if view === "grid"}
@@ -6397,7 +6503,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
           <button class="mcoll" onclick={() => { addDocToCollection(collPanel!.doc, c); collPanel = null; }}>{c.name}</button>
         {/each}
       {:else}
-        <p class="mempty">Nessuna collezione: creane una dalla barra laterale.</p>
+        <p class="mempty">Nessuna raccolta: creane una dalla barra laterale.</p>
       {/if}
       <button class="mdone" onclick={() => (collPanel = null)}>Chiudi</button>
     </div>
@@ -7021,7 +7127,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
         {/if}
 
         {:else}
-        <p class="dimtext">Copie dello stesso lavoro (per DOI o titolo+anno). «Unisci» tiene la prima e vi trasferisce tag, collezioni e annotazioni; le altre finiscono nel cestino.</p>
+        <p class="dimtext">Copie dello stesso lavoro (per DOI o titolo+anno). «Unisci» tiene la prima e vi trasferisce tag, raccolte e annotazioni; le altre finiscono nel cestino.</p>
         {#if dupGroups.length === 0}
           <p class="dimtext">Nessun duplicato ✓</p>
         {:else}
@@ -7030,7 +7136,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
               <div class="dupgroup">
                 <div class="duphead">
                   <span>{g.length} copie</span>
-                  <button class="ghost small" onclick={() => doMerge(g)} title="Unisci nel primo: sposta tag/collezioni/annotazioni, gli altri finiscono nel cestino">Unisci</button>
+                  <button class="ghost small" onclick={() => doMerge(g)} title="Unisci nel primo: sposta tag/raccolte/annotazioni, gli altri finiscono nel cestino">Unisci</button>
                 </div>
                 {#each g as id, i (id)}
                   <div class="duprow">
@@ -7160,7 +7266,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
           <h3>La griglia e la barra laterale</h3>
           <ul>
             <li><strong>Un clic</strong> su una scheda apre il <strong>pannello di dettaglio</strong> a destra (abstract, riassunto AI, tag modificabili, citazioni, note); <strong>doppio clic</strong> o <kbd>Invio</kbd> aprono il lettore.</li>
-            <li>La <strong>barra laterale</strong> è la navigazione: filtri rapidi (Preferiti, Da leggere, Con codice, Peer-reviewed, Il mio lavoro), tag, collezioni, ricerche salvate, cartella sorvegliata. <kbd>Ctrl</kbd>+<kbd>B</kbd> la mostra/nasconde.</li>
+            <li>La <strong>barra laterale</strong> è la navigazione: filtri rapidi (Preferiti, Da leggere, Con codice, Peer-reviewed, Il mio lavoro), tag, raccolte, ricerche salvate, cartella sorvegliata. <kbd>Ctrl</kbd>+<kbd>B</kbd> la mostra/nasconde.</li>
             <li>Nella vista «Tutti»: la <strong>Panoramica</strong> (da leggere, in lettura, aggiunti questo mese + un paper da riscoprire al giorno) e <strong>Continua a leggere</strong> (gli ultimi PDF aperti). Nel lettore la barra svanisce mentre leggi e lo zoom è ricordato per documento.</li>
             <li><strong>Questa guida è una finestra</strong>: trascinala dalla barra del titolo, ridimensionala dall'angolo in basso a destra (come quasi tutte le finestre di dialogo) e spunta <strong>«in primo piano»</strong> per tenerla visibile — anche sopra il lettore — mentre segui i passaggi.</li>
           </ul>
@@ -7181,7 +7287,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
         <div class="helpsec">
           <h3>Importare</h3>
           <ul>
-            <li><strong>Sei vie</strong> (barra → Importa): <strong>PDF dal disco</strong> (anche trascinandoli nella finestra — restano dove sono, l'app li indicizza; i duplicati si riconoscono dal contenuto); <strong>Da gestore bibliografico</strong> — l'export di <strong>Zotero, Mendeley, EndNote, JabRef…</strong> in <strong>.bib / .ris / CSL-JSON</strong>: porta metadati, aggancia i PDF (dal campo <em>file</em> o da una cartella d'export che indichi) e trasforma le parole chiave in <strong>tag</strong>, senza doppioni (dedup per DOI e per contenuto del PDF; i lavori già nel Cestino tornano visibili); per <strong>identificatore</strong> (DOI / arXiv / ISBN / PMID); <strong>da URL</strong>; <strong>progetto LaTeX (.zip)</strong> — i tuoi paper con la loro bibliografia, marcati «Il mio lavoro»; <strong>Cartella sorvegliata</strong> (importa da sola ciò che ci finisce dentro).</li>
+            <li><strong>Sei vie</strong> (barra → Importa): <strong>PDF dal disco</strong> (anche trascinandoli nella finestra — restano dove sono, l'app li indicizza; i duplicati si riconoscono dal contenuto); <strong>Da bibliografia o progetto</strong> — l'export di <strong>Zotero, Mendeley, EndNote, JabRef…</strong> in <strong>.bib / .ris / CSL-JSON</strong>: porta metadati, aggancia i PDF (dal campo <em>file</em> o da una cartella d'export che indichi) e trasforma le parole chiave in <strong>tag</strong>, senza doppioni (dedup per DOI e per contenuto del PDF; i lavori già nel Cestino tornano visibili); per <strong>identificatore</strong> (DOI / arXiv / ISBN / PMID); <strong>da URL</strong>; <strong>progetto LaTeX (.zip)</strong> — i tuoi paper con la loro bibliografia, marcati «Il mio lavoro»; <strong>Cartella sorvegliata</strong> (importa da sola ciò che ci finisce dentro).</li>
             <li><strong>Dal browser</strong>: copia il link del PDF e torna su Scriptorium — compare «Aggancia» (interruttore in Impostazioni → Connettore); in alternativa il <strong>bookmarklet</strong>, o la Cartella sorvegliata puntata su Download.</li>
             <li><strong>Riferimenti senza PDF</strong> (aggiunti da ricerca online, citazioni, BibTeX o ID): <strong>Trova PDF…</strong> (radiale della scheda, o aprendo la voce) mostra i <strong>candidati</strong> trovati online per identificativo e per titolo (arXiv, Unpaywall, OpenAlex, Semantic Scholar, Crossref) con le prove — «Scarica e allega» quello giusto, «Apri pagina» per controllare, o incolla un link diretto. Sulla <strong>selezione multipla</strong> e in blocco (Cura della libreria → «Trova PDF dei riferimenti») resta automatico: allega solo abbinamenti sicuri, ora anche per titolo su arXiv/S2.</li>
           </ul>
@@ -7190,10 +7296,10 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
         <div class="helpsec">
           <h3>Organizzare</h3>
           <ul>
-            <li><strong>Tag</strong> colorati (la <strong>✎</strong> in sidebar rinomina/ricolora, la <strong>×</strong> elimina; dal pannello dettagli li applichi al volo) e <strong>Collezioni</strong>, anche <em>smart</em> (si popolano da sole con una regola).</li>
+            <li><strong>Tag</strong> colorati (la <strong>✎</strong> in sidebar rinomina/ricolora, la <strong>×</strong> elimina; dal pannello dettagli li applichi al volo) e <strong>Raccolte</strong>, anche <em>smart</em> (si popolano da sole con una regola).</li>
             <li><strong>Filtri</strong> in sidebar (Preferiti, Da leggere, Con codice, Peer-reviewed, Il mio lavoro), <strong>ordinamento combinabile</strong> (chip «Ordina ▾»: un clic attiva, un altro inverte, un terzo toglie), badge <em>preprint / peer-reviewed</em> sulle schede.</li>
             <li><strong>Viste</strong> (barra → Vista): griglia (copertine ridimensionabili con − ▭ +), lista a colonne, <strong>Costellazione</strong> (la mappa semantica — vedi la scheda <em>Scoperta</em>). Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
-            <li><strong>Archivio</strong> (icona cartella sulla barra): le collezioni come <strong>albero navigabile</strong> — sotto-raccolte a piacere, <strong>trascina un paper</strong> su una raccolta per spostarlo (Ctrl = aggiungi anche lì: l'appartenenza è multipla; <strong>sullo sfondo vuoto</strong> = toglilo dalla raccolta), trascina una raccolta su un'altra per annidarla. Eliminare una raccolta non tocca mai i paper (le sotto-raccolte risalgono). Puoi aprire la <strong>Costellazione della sola raccolta</strong> in tre modi: il pulsante <strong>✳</strong> accanto al nome della collezione in sidebar, la voce <em>Costellazione di «nome»</em> nel menu <strong>Vista</strong> mentre la stai guardando, o il pulsante <strong>COSTELLAZIONE</strong> nel pannello dell'Archivio. Le vicinanze vengono ricalcolate al suo interno e il layout è salvato a parte dalla mappa generale. Nel pannello: <strong>✦ Suggerisci</strong> propone i paper affini (somiglianza semantica locale, con soglia di confidenza — mai automatico): scegli la sorgente <em>prima</em> di calcolare — <em>Nome</em> della raccolta (funziona anche a motori spenti: si àncora ai tuoi paper che ne contengono le parole), <em>Contenuto</em> (i paper già dentro) o <em>Entrambi</em> col <strong>peso regolabile</strong>. Il toggle <strong>Ricerca «Novità»</strong> aggancia una ricerca online alla raccolta (le novità accettate <em>entrano da sole nella raccolta</em>, filtrate per pertinenza quando la raccolta ha ≥3 paper indicizzati; spegnendolo la ricerca si rimuove).</li>
+            <li><strong>Archivio</strong> (icona cartella sulla barra): le raccolte come <strong>albero navigabile</strong> — sotto-raccolte a piacere, <strong>trascina un paper</strong> su una raccolta per spostarlo (Ctrl = aggiungi anche lì: l'appartenenza è multipla; <strong>sullo sfondo vuoto</strong> = toglilo dalla raccolta), trascina una raccolta su un'altra per annidarla. Eliminare una raccolta non tocca mai i paper (le sotto-raccolte risalgono). Puoi aprire la <strong>Costellazione della sola raccolta</strong> in tre modi: il pulsante <strong>✳</strong> accanto al nome della raccolta in sidebar, la voce <em>Costellazione di «nome»</em> nel menu <strong>Vista</strong> mentre la stai guardando, o il pulsante <strong>COSTELLAZIONE</strong> nel pannello dell'Archivio. Le vicinanze vengono ricalcolate al suo interno e il layout è salvato a parte dalla mappa generale. Nel pannello: <strong>✦ Suggerisci</strong> propone i paper affini (somiglianza semantica locale, con soglia di confidenza — mai automatico): scegli la sorgente <em>prima</em> di calcolare — <em>Nome</em> della raccolta (funziona anche a motori spenti: si àncora ai tuoi paper che ne contengono le parole), <em>Contenuto</em> (i paper già dentro) o <em>Entrambi</em> col <strong>peso regolabile</strong>. Il toggle <strong>Ricerca «Novità»</strong> aggancia una ricerca online alla raccolta (le novità accettate <em>entrano da sole nella raccolta</em>, filtrate per pertinenza quando la raccolta ha ≥3 paper indicizzati; spegnendolo la ricerca si rimuove).</li>
             <li><strong>Specchio su disco</strong> (chip in alto nell'Archivio): proietta le raccolte in una cartella vera — <code>Raccolta\Sottoraccolta\Autore Anno — Titolo.pdf</code> — con <strong>hardlink</strong> (zero spazio extra), aggiornata da sola a ogni cambio. Comodissima da Esplora risorse e dal terminale. Cancellare o spostare file nello specchio non tocca la libreria (si rigenera); <em>modificare il contenuto</em> di un PDF lì dentro sì, perché è lo stesso file: per annotare usa il lettore.</li>
           </ul>
         </div>
@@ -7390,7 +7496,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
             <dt>…importare la bibliografia di un progetto Overleaf e scaricarne i paper?</dt>
             <dd>Scarica da Overleaf lo <strong>zip del progetto</strong> (Menu → Download → Source) e usa <strong>Importa → «Da bibliografia o progetto…»</strong>: legge il <code>.bib</code> <em>dentro</em> l'archivio (non serve scompattarlo), crea una scheda per ogni voce citata, e — se rispondi sì alle due domande — <strong>cerca e scarica i PDF open-access</strong> (arXiv, Unpaywall, OpenAlex, Semantic Scholar) e mette tutto in una <strong>raccolta</strong> dedicata. Serve la ricerca online attiva. Poi, sulla selezione, «Tag automatici (AI)» per i tag. Alla terza domanda puoi anche far <strong>ricostruire il progetto LaTeX completo</strong> (file .tex, immagini, classi, sottocartelle) dentro <strong>Progetti (LaTeX)</strong>, pronto da compilare. Per importare invece i PDF già compilati che stanno nell'archivio e il grafo delle citazioni del <em>tuo</em> lavoro, usa in aggiunta «Importa → Progetto LaTeX (.zip)…».</dd>
             <dt>…portare la mia libreria da Zotero, Mendeley o EndNote?</dt>
-            <dd>Nel gestore fai <strong>Esporta</strong> in <strong>BibTeX/BibLaTeX, RIS o CSL-JSON</strong> (per avere anche i PDF, in Zotero spunta «Esporta file»). Poi barra → Importa → <strong>Da gestore bibliografico…</strong>, scegli il file e — se i PDF stanno in una cartella a parte — indicala quando te lo chiede. Metadati, PDF e parole chiave (→ tag) entrano insieme, senza doppioni.</dd>
+            <dd>Nel gestore fai <strong>Esporta</strong> in <strong>BibTeX/BibLaTeX, RIS o CSL-JSON</strong> (per avere anche i PDF, in Zotero spunta «Esporta file»). Poi barra → Importa → <strong>Da bibliografia o progetto…</strong>, scegli il file e — se i PDF stanno in una cartella a parte — indicala quando te lo chiede. Metadati, PDF e parole chiave (→ tag) entrano insieme, senza doppioni.</dd>
             <dt>…sistemare un paper arrivato senza titolo o con metadati sbagliati?</dt>
             <dd>Clic su «✦ N senza metadati» in alto per il recupero in blocco (solo abbinamenti sicuri). Per il caso singolo: tasto destro → Organizza → <strong>Recupera metadati…</strong> mostra i candidati trovati online con le prove nel PDF e applichi quello giusto (o incolli un DOI/arXiv). Ritocchi a mano: Modifica metadati. Per tutta la libreria: Impostazioni → Manutenzione → «Verifica e ripara metadati».</dd>
             <dt>…organizzare i paper in cartelle e sottocartelle, anche su disco?</dt>
@@ -8778,8 +8884,33 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
     display: flex; align-items: center; gap: 4px;
     padding: 4px 18px; background: var(--surface);
     border-bottom: 1px solid var(--border-soft);
+    /* A finestra stretta la barra SCORRE invece di tagliare via le ultime voci
+       (Aspetto e Sistema→Impostazioni sparivano sotto ~950px). */
+    overflow-x: auto;
+    scrollbar-width: thin;
   }
-  .toolbar .iconbtn { position: relative; width: 36px; height: 32px; }
+  .toolbar .iconbtn { position: relative; width: 36px; height: 32px; flex: none; }
+  .toolbar .iconbtn.labelled {
+    width: auto; gap: 6px; padding: 0 9px 0 7px;
+  }
+  .toolbar .tlabel { font-size: 12px; line-height: 1; white-space: nowrap; }
+  .secrow { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .seclink {
+    background: none; border: none; color: var(--accent); cursor: pointer;
+    font-size: 11px; padding: 0; text-transform: none; letter-spacing: 0;
+  }
+  .seclink:hover { color: var(--accent-strong); text-decoration: underline; }
+  .emptyacts {
+    display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px;
+  }
+  .toolbar .tsep {
+    flex: none; width: 1px; height: 18px; margin: 0 5px;
+    background: var(--border);
+  }
+  @media (max-width: 1180px) {
+    .toolbar .tlabel { display: none; }
+    .toolbar .iconbtn.labelled { width: 36px; padding: 0; }
+  }
   .toolbar .iconbtn:disabled { opacity: 0.4; cursor: default; }
   .toolbar .iconbtn:disabled:hover { background: transparent; color: inherit; border-color: transparent; }
   .toolbar .iconbtn.active { color: var(--accent); }

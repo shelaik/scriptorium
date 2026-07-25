@@ -624,7 +624,7 @@
     grid-template-columns: 230px minmax(320px, 1fr) minmax(280px, 0.9fr);
     gap: 12px;
     /* fills the main pane below the 60px header, like the notes surface */
-    height: calc(100vh - 60px);
+    height: calc(100vh - 148px);
     min-height: 400px;
     padding: 12px;
     box-sizing: border-box;
