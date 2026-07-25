@@ -39,6 +39,13 @@ fn thumb_dir(app: &AppHandle) -> PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("pdfmanage_thumbnails"))
 }
 
+#[derive(Clone, serde::Serialize)]
+struct ImportProgress {
+    done: usize,
+    total: usize,
+    file: String,
+}
+
 /// Import one or more PDF files by absolute path. Runs off the UI thread.
 #[tauri::command]
 pub async fn import_files(app: AppHandle, paths: Vec<String>) -> Result<ImportSummary, String> {
@@ -93,6 +100,19 @@ pub async fn import_files(app: AppHandle, paths: Vec<String>) -> Result<ImportSu
                 }
             }
             n_done += 1;
+            // Avanzamento verso l'interfaccia: senza, un import lungo sembra
+            // un blocco dell'app (nessuna barra, nessun nome di file).
+            let _ = app.emit(
+                "import-progress",
+                ImportProgress {
+                    done: n_done as usize,
+                    total: n_tot as usize,
+                    file: Path::new(&p)
+                        .file_name()
+                        .map(|x| x.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                },
+            );
             // Throttle: su batch grandi basta ~1 progress su 100 (il ring è finito).
             let step = (n_tot / 100).max(1);
             if n_done % step == 0 || n_done == n_tot {

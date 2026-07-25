@@ -2,6 +2,13 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.46 — Revisione dell'interfaccia, terza parte
+- **L'import dei PDF mostra a che punto è**: barra di avanzamento col nome del file in lavorazione, e **l'elenco dei file non importati resta consultabile** sopra la griglia invece di ridursi a un numero che sparisce.
+- **I messaggi d'errore si possono leggere davvero**: restano 25 secondi invece di 7, si **copiano** con un clic e si chiudono a mano.
+- **Testi più leggibili su tutti gli 11 temi**: il grigio dei testi esplicativi e delle × di eliminazione era sotto la soglia di contrasto (2,9:1) — ora è conforme, senza perdere la gerarchia visiva.
+- **La tastiera vede le schede**: contorno di fuoco visibile e comandi della scheda (⋯, selezione, preferito) che compaiono anche navigando da tastiera.
+- **Una parola sola per ogni cosa**: «appunti» torna a indicare *solo* le note `.md` (per il copia-incolla ora si legge «copiato ✓»), e la nota libera di un paper si chiama **«Nota del documento»** ovunque — prima aveva quattro nomi in quattro pannelli.
+
 ## 0.9.45 — Revisione dell'interfaccia, seconda parte
 - **Import di una bibliografia: un solo pannello di opzioni** al posto di tre o quattro conferme in fila (dove «Annulla» significava a volta «no grazie» e a volta «abbandona tutto»). Ora vedi tutte le scelte insieme — cerca i PDF, raccogli in una raccolta, importa il progetto LaTeX, cartella dei PDF esportati — le regoli e premi **Importa** una volta sola.
 - **Al termine dell'import ti porto dove sono finite le voci** (la raccolta appena creata), invece di lasciarti in «Tutti» a chiederti cosa sia successo.

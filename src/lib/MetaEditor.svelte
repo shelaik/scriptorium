@@ -77,7 +77,7 @@
       </div>
       <label>Rivista / Venue<input bind:value={m.venue} /></label>
       <label>Abstract<textarea rows="5" bind:value={m.abstract_text}></textarea></label>
-      <label>Note<textarea rows="4" bind:value={m.notes} placeholder="Appunti personali su questo documento"></textarea></label>
+      <label>Nota del documento<textarea rows="4" bind:value={m.notes} placeholder="La tua nota su questo paper (diversa dagli Appunti .md)"></textarea></label>
       {#if m.summary}
         <label>Riassunto (AI)<textarea rows="5" readonly value={m.summary}></textarea></label>
       {/if}

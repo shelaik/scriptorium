@@ -640,7 +640,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.45";
+  const APP_VERSION = "0.9.46";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -1192,12 +1192,16 @@
       if (res.duplicates.length) parts.push(`${res.duplicates.length} già presenti`);
       if (res.warnings.length) parts.push(`${res.warnings.length} senza testo`);
       if (res.errors.length) parts.push(`${res.errors.length} errori`);
+      // Gli errori erano solo un numero e venivano buttati: ora restano
+      // consultabili sotto la griglia finche' l'utente non li chiude.
+      importErrors = [...res.errors, ...res.warnings];
       status = parts.join(" · ");
       await loadDocs();
     } catch (e) {
       status = "Errore: " + e;
     } finally {
       busy = false;
+      importProg = null;
     }
   }
 
@@ -1720,7 +1724,7 @@
     }
   }
 
-  // ---- Appunti intelligenti: quando la finestra torna in primo piano e negli
+  // ---- Link copiati dal browser: quando la finestra torna in primo piano e negli
   // appunti c'è un link che sembra un PDF, proponi l'aggancio con un toast.
   // Tutto locale: la lettura avviene solo al focus e non parte nulla finché
   // l'utente non clicca. Interruttore in Impostazioni → Connettore.
@@ -2557,7 +2561,7 @@
     try {
       const text = await citeText([doc.id], format);
       await navigator.clipboard.writeText(text);
-      status = format === "bibtex" ? "BibTeX copiato negli appunti" : "Citazione copiata negli appunti";
+      status = format === "bibtex" ? "BibTeX copiato ✓" : "Citazione copiata ✓";
     } catch (e) {
       status = "Errore copia: " + e;
     }
@@ -2604,7 +2608,7 @@
     }
     try {
       await navigator.clipboard.writeText(t);
-      status = "Titolo copiato negli appunti";
+      status = "Titolo copiato ✓";
     } catch (e) {
       status = "Errore copia: " + e;
     }
@@ -2714,9 +2718,9 @@
   async function copyDoi(doi: string) {
     try {
       await navigator.clipboard.writeText(doi);
-      status = "DOI copiato negli appunti";
+      status = "DOI copiato ✓";
     } catch {
-      status = "Impossibile copiare negli appunti";
+      status = "Impossibile copiare";
     }
   }
 
@@ -2940,6 +2944,7 @@
   let askP: Promise<() => void> | undefined;
   let connP: Promise<() => void> | undefined;
   let wikiP: Promise<() => void> | undefined;
+  let importP: Promise<() => void> | undefined;
   let metaP: Promise<() => void> | undefined;
   let clearTimer: ReturnType<typeof setTimeout> | undefined;
   onMount(() => {
@@ -3057,6 +3062,9 @@
     wikiP = listen<{ phase: string; done: number; total: number; concept: string }>("wiki-progress", (e) => {
       wikiProg = e.payload.phase === "done" ? null : e.payload;
     });
+    importP = listen<{ done: number; total: number; file: string }>("import-progress", (e) => {
+      importProg = e.payload;
+    });
     metaP = listen<MetaRecoverProgress>("meta-progress", (e) => {
       metaScan = e.payload.phase === "running" ? e.payload : null;
     });
@@ -3077,6 +3085,7 @@
       askP?.then((f) => f());
       connP?.then((f) => f());
       wikiP?.then((f) => f());
+      importP?.then((f) => f());
       metaP?.then((f) => f());
       novitaP?.then((f) => f());
       clearTimeout(searchTimer);
@@ -3261,7 +3270,7 @@
         return;
       }
       await navigator.clipboard.writeText(p);
-      status = "Percorso copiato negli appunti";
+      status = "Percorso copiato ✓";
     } catch (e) {
       status = "Errore: " + e;
     }
@@ -3355,7 +3364,7 @@
       orgKids.push({ id: "or-pdf", label: "Allega PDF…", hint: "Questa voce è solo un riferimento: trova un PDF Open Access o allegane uno da un link", action: () => (refPanel = { doc: d, url: "", busy: false }) });
     const items: RadialItem[] = [
       { id: "d-open", label: "Apri", icon: I.open, hint: "Leggi nel visore integrato", action: () => openDocument(d) },
-      { id: "d-copyt", label: "Copia titolo", icon: I.copy, hint: "Copia il titolo del paper negli appunti", disabled: !(d.title ?? "").trim(), action: () => copyTitle(d) },
+      { id: "d-copyt", label: "Copia titolo", icon: I.copy, hint: "Copia il titolo del paper", disabled: !(d.title ?? "").trim(), action: () => copyTitle(d) },
       { id: "d-fav", label: "Preferito", icon: I.star, checked: d.favorite, hint: d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti", action: () => toggleFavorite(d) },
       { id: "d-read", label: "Letto", icon: I.check, checked: d.is_read, hint: d.is_read ? "Segna come da leggere" : "Segna come letto", action: () => toggleRead(d) },
       { id: "d-cite", label: "Cita", icon: I.quote, hint: "Copia citazioni, riferimenti, esplora", children: citeKids },
@@ -4988,7 +4997,7 @@
       await navigator.clipboard.writeText(text);
       status = fmt === "md" ? "Markdown copiato" : fmt === "latex" ? "Copiato con \\cite{…}" : "Copiato con [@citekey]";
     } catch {
-      status = "Impossibile copiare negli appunti";
+      status = "Impossibile copiare";
     }
   }
   async function saveAiDoc() {
@@ -5067,11 +5076,20 @@
   }
 
   // Status messages surface as a quiet toast that fades on its own.
+  // Avanzamento dell'import PDF (evento `import-progress` dal backend): senza,
+  // un import lungo sembrava un blocco dell'app.
+  let importProg = $state<{ done: number; total: number; file: string } | null>(null);
+  let importErrors = $state<string[]>([]);
+  let statusIsError = $state(false);
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     if (!status) return;
     clearTimeout(statusTimer);
-    statusTimer = setTimeout(() => (status = ""), 7000);
+    // Gli errori sono proprio i messaggi che vale la pena leggere: 25s invece
+    // di 7, e comunque copiabili e chiudibili a mano.
+    const looksErr = /errore|impossibile|non riesco|fallit|disattivat|non trovat/i.test(status);
+    statusIsError = looksErr;
+    statusTimer = setTimeout(() => (status = ""), looksErr ? 25000 : 7000);
   });
 
   const MODES: { value: SearchMode; label: string; desc: string }[] = [
@@ -6185,6 +6203,14 @@
             </div>
           </section>
         {/if}
+        {#if importErrors.length}
+          <div class="imperr">
+            <span><b>{importErrors.length}</b> file non importati o senza testo:</span>
+            <ul>{#each importErrors.slice(0, 12) as e (e)}<li>{e}</li>{/each}</ul>
+            {#if importErrors.length > 12}<span class="bibhint">…e altri {importErrors.length - 12}</span>{/if}
+            <button class="ghost small" onclick={() => (importErrors = [])}>Ho capito</button>
+          </div>
+        {/if}
         {#if view === "map"}
           {#if graphScope}
             <div class="scopebar">
@@ -6686,7 +6712,7 @@
     {#if clipOffer}
       <div class="toast clipoffer">
         <div class="clipbody">
-          <span class="cliptitle">Link PDF negli appunti</span>
+          <span class="cliptitle">Hai copiato un link a un PDF</span>
           <span class="clipurl" title={clipOffer}>{clipOffer}</span>
         </div>
         <button class="ghost small" onclick={clipGrab} disabled={clipBusy}>{clipBusy ? "…" : "Aggancia"}</button>
@@ -6698,6 +6724,12 @@
         <span>{aiBatch.kind === "summary" ? "Riassunto AI" : "Tag automatici AI"}: {aiBatch.done}/{aiBatch.total}</span>
         <div class="bar"><div class="fill" style="width:{aiBatch.total ? (aiBatch.done / aiBatch.total) * 100 : 0}%"></div></div>
         <button class="ghost small" onclick={() => (batchCancel = true)} title="Interrompi l'operazione AI in corso">Stop</button>
+      </div>
+    {/if}
+    {#if importProg && importProg.done < importProg.total}
+      <div class="toast">
+        <span>Import: {importProg.done}/{importProg.total} — {importProg.file}</span>
+        <div class="bar"><div class="fill" style="width:{importProg.total ? (importProg.done / importProg.total) * 100 : 0}%"></div></div>
       </div>
     {/if}
     {#if metaScan}
@@ -6715,7 +6747,13 @@
       </div>
     {/if}
     {#if status}
-      <div class="toast">{status}</div>
+      <div class="toast" class:toasterr={statusIsError}>
+        <span class="toasttxt">{status}</span>
+        {#if statusIsError}
+          <button class="toastbtn" title="Copia il messaggio" onclick={() => { void navigator.clipboard.writeText(status); }}>copia</button>
+        {/if}
+        <button class="toastbtn" title="Chiudi" aria-label="Chiudi" onclick={() => (status = "")}>✕</button>
+      </div>
     {/if}
   </div>
 
@@ -7354,7 +7392,7 @@
         <div class="helpsec">
           <h3>Condividere e stampare</h3>
           <ul>
-            <li>Tasto destro → <strong>Condividi</strong>: <strong>WhatsApp / Teams / Gmail</strong> aprono la bozza col messaggio pronto e il <strong>PDF è già copiato negli appunti di sistema</strong> — incollalo con <kbd>Ctrl</kbd>+<kbd>V</kbd>; <strong>Outlook desktop</strong> allega il file da solo. Funziona anche sulla <strong>selezione multipla</strong>.</li>
+            <li>Tasto destro → <strong>Condividi</strong>: <strong>WhatsApp / Teams / Gmail</strong> aprono la bozza col messaggio pronto e il <strong>PDF è già copiato ✓ di sistema</strong> — incollalo con <kbd>Ctrl</kbd>+<kbd>V</kbd>; <strong>Outlook desktop</strong> allega il file da solo. Funziona anche sulla <strong>selezione multipla</strong>.</li>
             <li><strong>Stampa</strong>: dal lettore (menu <strong>⋯ Altro</strong> o radiale) per il documento aperto, o dal radiale della selezione per stamparne più d'uno.</li>
           </ul>
         </div>
@@ -7553,7 +7591,7 @@
             <dt>…copiare una citazione pronta?</dt>
             <dd>Tasto destro sul paper → Cita: APA, IEEE, BibTeX, citekey, <code>\cite</code>, <code>[@…]</code>. Con più paper selezionati ottieni <code>\cite&#123;k1,k2&#125;</code> o tutte le voci BibTeX insieme.</dd>
             <dt>…mandare un paper a un collega?</dt>
-            <dd>Tasto destro → Condividi: WhatsApp/Teams/Gmail aprono il messaggio pronto e il PDF è già negli appunti di sistema (incollalo con <kbd>Ctrl</kbd>+<kbd>V</kbd>); Outlook desktop lo allega da solo.</dd>
+            <dd>Tasto destro → Condividi: WhatsApp/Teams/Gmail aprono il messaggio pronto e il PDF è già copiato (incollalo con <kbd>Ctrl</kbd>+<kbd>V</kbd>); Outlook desktop lo allega da solo.</dd>
             <dt>…estrarre una tabella che viene male?</dt>
             <dd>Nella finestra della tabella cambia motore: <strong>Modello</strong> per le tabelle dei paper (anche senza bordi), <strong>Ollama</strong> per le scansioni. Il rettangolo deve coprire tutta la tabella.</dd>
             <dt>…correggere una formula riconosciuta male?</dt>
@@ -7760,12 +7798,12 @@
               </p>
 
               <h3 class="settitle">Appunti intelligenti</h3>
-              <label class="setrow" title="Quando torni su Scriptorium, se negli appunti c'è un link che sembra un PDF compare un suggerimento «Aggancia»">
+              <label class="setrow" title="Quando torni su Scriptorium, se hai copiato un link che sembra un PDF compare un suggerimento «Aggancia»">
                 <input type="checkbox" bind:checked={clipAssist} /> Suggerisci l'aggancio dei link PDF copiati
               </label>
               <p class="sethint">
                 Il metodo più semplice: <strong>copia il link</strong> del PDF nel browser e torna su Scriptorium —
-                comparirà il suggerimento in basso a destra. Gli appunti vengono letti solo quando l'app torna in primo
+                comparirà il suggerimento in basso a destra. Il testo copiato viene letto solo quando l'app torna in primo
                 piano e non lasciano mai il tuo computer; non parte nulla finché non clicchi «Aggancia».
               </p>
             {:else if settingsTab === "mcp"}
@@ -7868,7 +7906,7 @@
     --field: #fffdf8;
     --text: #2c2e35;
     --dim: #63666e;
-    --faint: #8c8f97;
+    --faint: #6f727a;
     --border: #e2dccd;
     --border-soft: #ebe5d7;
     --accent: #2b4a78;
@@ -7911,7 +7949,7 @@
   }
   :global(body[data-theme="dark"]) {
     --bg: #14171d; --surface: #1b1f27; --panel: #161a21; --field: #11141a;
-    --text: #e6e8ec; --dim: #9aa1ad; --faint: #6b7280;
+    --text: #e6e8ec; --dim: #9aa1ad; --faint: #7c8494;
     --border: #2a2f3a; --border-soft: #21262f;
     --accent: #6f9bf0; --accent-strong: #8fb4f5; --accent-soft: #1e2a40; --accent-soft2: #294063;
     --on-accent: #0f1722; --hover: #20252e;
@@ -7931,7 +7969,7 @@
   }
   :global(body[data-theme="pastel"]) {
     --bg: #f7f5fb; --surface: #ffffff; --panel: #f0ecf8; --field: #ffffff;
-    --text: #4a4458; --dim: #7c768e; --faint: #a7a1b8;
+    --text: #4a4458; --dim: #7c768e; --faint: #7a7490;
     --border: #e6e0f0; --border-soft: #efeaf7;
     --accent: #8e7cc3; --accent-strong: #7a66b5; --accent-soft: #efeafa; --accent-soft2: #e1d7f3;
     --on-accent: #fff; --hover: #f1edf9;
@@ -7941,7 +7979,7 @@
   }
   :global(body[data-theme="medieval"]) {
     --bg: #ece0c2; --surface: #f5ecd4; --panel: #e2d2a9; --field: #f5ecd4;
-    --text: #3a2c18; --dim: #6b5836; --faint: #94815c;
+    --text: #3a2c18; --dim: #6b5836; --faint: #6f5f3e;
     --border: #cbb585; --border-soft: #d9c699;
     --accent: #7c2118; --accent-strong: #611812; --accent-soft: #e6d2a8; --accent-soft2: #d8bf8a;
     --on-accent: #f5ecd4; --hover: #e4d3a6;
@@ -7952,7 +7990,7 @@
   /* ===== New palettes ===== */
   :global(body[data-theme="sepia"]) {
     --bg: #f4ecdf; --surface: #fbf5ea; --panel: #ece0cc; --field: #fbf5ea;
-    --text: #3b3024; --dim: #6f5f4a; --faint: #9a8a72;
+    --text: #3b3024; --dim: #6f5f4a; --faint: #756550;
     --border: #ddcbb0; --border-soft: #e7d9c2;
     --accent: #9a5b24; --accent-strong: #7e4818; --accent-soft: #f0e2cc; --accent-soft2: #e3cda8;
     --on-accent: #fbf5ea; --hover: #ece0cc;
@@ -7962,7 +8000,7 @@
   }
   :global(body[data-theme="solarized"]) {
     --bg: #fdf6e3; --surface: #fffbf0; --panel: #eee8d5; --field: #fffbf0;
-    --text: #3a4d52; --dim: #657b83; --faint: #93a1a1;
+    --text: #3a4d52; --dim: #657b83; --faint: #6b7b7b;
     --border: #e3dcc4; --border-soft: #ece5d0;
     --accent: #268bd2; --accent-strong: #1a6fae; --accent-soft: #e3eef2; --accent-soft2: #cfe2ec;
     --on-accent: #fffbf0; --hover: #eee8d5;
@@ -7972,7 +8010,7 @@
   }
   :global(body[data-theme="sage"]) {
     --bg: #eef2ec; --surface: #f8fbf6; --panel: #e2e9dd; --field: #f8fbf6;
-    --text: #2f3a30; --dim: #5d6b5c; --faint: #8a9789;
+    --text: #2f3a30; --dim: #5d6b5c; --faint: #67735f;
     --border: #d3ddcd; --border-soft: #e0e8da;
     --accent: #4f7a52; --accent-strong: #3d6440; --accent-soft: #e3eede; --accent-soft2: #cfe0c9;
     --on-accent: #f8fbf6; --hover: #e2e9dd;
@@ -7982,7 +8020,7 @@
   }
   :global(body[data-theme="nord"]) {
     --bg: #2e3440; --surface: #3b4252; --panel: #353c4a; --field: #2b303b;
-    --text: #eceff4; --dim: #b4bcca; --faint: #7b8494;
+    --text: #eceff4; --dim: #b4bcca; --faint: #8b93a3;
     --border: #434c5e; --border-soft: #3a4252;
     --accent: #88c0d0; --accent-strong: #a3d0dd; --accent-soft: #3a4654; --accent-soft2: #4a5a6a;
     --on-accent: #2e3440; --hover: #3f4859;
@@ -7992,7 +8030,7 @@
   }
   :global(body[data-theme="graphite"]) {
     --bg: #1c1c1f; --surface: #252528; --panel: #202023; --field: #19191c;
-    --text: #e8e8ea; --dim: #a0a0a6; --faint: #6e6e75;
+    --text: #e8e8ea; --dim: #a0a0a6; --faint: #85858c;
     --border: #34343a; --border-soft: #2a2a2f;
     --accent: #c2a878; --accent-strong: #d4bd92; --accent-soft: #2e2a22; --accent-soft2: #433d30;
     --on-accent: #1c1c1f; --hover: #2b2b2f;
@@ -8002,7 +8040,7 @@
   }
   :global(body[data-theme="forest"]) {
     --bg: #12201a; --surface: #1a2c23; --panel: #16271f; --field: #0f1c16;
-    --text: #e3efe7; --dim: #9bb6a6; --faint: #6c8676;
+    --text: #e3efe7; --dim: #9bb6a6; --faint: #7f9a89;
     --border: #284339; --border-soft: #1f352c;
     --accent: #6fc28d; --accent-strong: #8fd2a6; --accent-soft: #1c3328; --accent-soft2: #28493a;
     --on-accent: #0f1c16; --hover: #213a2e;
@@ -8171,6 +8209,15 @@
     display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
     pointer-events: none;
   }
+  .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .card:focus-within .dots, .card:focus-within .cardsel, .card:focus-within .starbtn { opacity: 1; }
+  .toasttxt { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .toastbtn {
+    flex: none; background: none; border: 1px solid var(--border); color: var(--dim);
+    border-radius: 5px; font-size: 11px; padding: 2px 7px; cursor: pointer;
+  }
+  .toastbtn:hover { color: var(--accent); border-color: var(--accent); }
+  .toast.toasterr { border-color: color-mix(in srgb, var(--danger, #d33) 55%, var(--border)); }
   .toast {
     display: flex; align-items: center; gap: 10px; pointer-events: auto;
     background: color-mix(in srgb, var(--surface) 94%, transparent);
@@ -8955,6 +9002,12 @@
     font-size: 11px; padding: 0; text-transform: none; letter-spacing: 0;
   }
   .seclink:hover { color: var(--accent-strong); text-decoration: underline; }
+  .imperr {
+    margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: var(--r-md); background: var(--panel); font-size: 12px; color: var(--dim);
+  }
+  .imperr ul { margin: 6px 0; padding-left: 18px; max-height: 140px; overflow: auto; }
+  .imperr li { overflow-wrap: anywhere; }
   .loaderr {
     font-size: 12px; color: var(--dim); max-width: 60ch; margin: 6px auto 0;
     overflow-wrap: anywhere;

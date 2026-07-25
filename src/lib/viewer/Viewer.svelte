@@ -881,9 +881,9 @@
     }
     try {
       await navigator.clipboard.writeText(str);
-      setNotice("Copiato negli appunti ✓");
+      setNotice("Copiato ✓");
     } catch {
-      setNotice("Impossibile copiare negli appunti");
+      setNotice("Impossibile copiare");
     }
   }
   async function saveFormatted(str: string, base: string, ext: string) {
@@ -1014,9 +1014,9 @@
     if (!t) return;
     try {
       await navigator.clipboard.writeText(t);
-      setNotice("Testo copiato negli appunti ✓");
+      setNotice("Testo copiato ✓");
     } catch {
-      setNotice("Impossibile copiare negli appunti");
+      setNotice("Impossibile copiare");
     }
   }
   /** The live PDF text selection, if any — read at right-click time for the radial.
@@ -1064,9 +1064,9 @@
     }
     try {
       await navigator.clipboard.writeText(latex);
-      setNotice("LaTeX copiato negli appunti ✓");
+      setNotice("LaTeX copiato ✓");
     } catch {
-      setNotice("Impossibile copiare negli appunti");
+      setNotice("Impossibile copiare");
     }
   }
   /** Recognize the currently-cropped formula image (in the modal) as LaTeX.
@@ -1419,7 +1419,7 @@
       await navigator.clipboard.writeText(buildAnnoMarkdown());
       setNotice("Annotazioni copiate in Markdown ✓");
     } catch {
-      setNotice("Impossibile copiare negli appunti");
+      setNotice("Impossibile copiare");
     }
   }
   async function exportAnnoMarkdown() {
@@ -1857,9 +1857,9 @@
     if (!lens?.answer) return;
     try {
       await navigator.clipboard.writeText(lens.answer);
-      setNotice("Risposta copiata negli appunti ✓");
+      setNotice("Risposta copiata ✓");
     } catch {
-      setNotice("Impossibile copiare negli appunti");
+      setNotice("Impossibile copiare");
     }
   }
 
@@ -1975,7 +1975,7 @@
       { id: "find", label: "Cerca", hint: "Cerca nel documento (Ctrl+F)", action: () => { openFind(); } },
       { id: "toc", label: "Indice", disabled: !outline.length, checked: showToc, hint: "Indice del documento", action: () => (showToc = !showToc) },
       { id: "annos", label: "Annotazioni", checked: panel === "annos", hint: "Pannello delle annotazioni (A)", action: () => (panel = panel === "annos" ? "none" : "annos") },
-      { id: "notes", label: "Nota del documento", checked: panel === "notes", hint: "Appunto libero su questo documento (E)", action: () => (panel = panel === "notes" ? "none" : "notes") },
+      { id: "notes", label: "Nota del documento", checked: panel === "notes", hint: "Nota libera su questo documento (E)", action: () => (panel = panel === "notes" ? "none" : "notes") },
       {
         id: "tools",
         label: "Strumenti",
@@ -2178,7 +2178,7 @@
         <button class:active={showToc} onclick={() => (showToc = !showToc)} title="Mostra/nascondi l'indice del documento">Indice</button>
       {/if}
       <button class:active={panel === "annos"} onclick={() => (panel = panel === "annos" ? "none" : "annos")} title="Indice delle annotazioni di questo documento (A)">Annotazioni</button>
-      <button class:active={panel === "notes"} onclick={() => (panel = panel === "notes" ? "none" : "notes")} title="Nota del documento: un appunto libero su questo paper (E)">Nota doc{#if !notesSaved}<span class="dot" aria-label="non salvate">•</span>{/if}</button>
+      <button class:active={panel === "notes"} onclick={() => (panel = panel === "notes" ? "none" : "notes")} title="Nota del documento: un appunto libero su questo paper (E)">Nota del doc.{#if !notesSaved}<span class="dot" aria-label="non salvate">•</span>{/if}</button>
       <span class="tsep"></span>
       <button class:active={!!moreOpen} onclick={toggleMore} title="Altri strumenti: rotazione, estrazione, stampa, condivisione…">⋯ Altro</button>
       <span class="tsep"></span>
@@ -2273,7 +2273,7 @@
               bind:value={docNotes}
               oninput={onNotesInput}
               onblur={flushNotes}
-              placeholder="Appunto libero su questo documento… (salvataggio automatico)"
+              placeholder="Nota libera su questo documento… (salvataggio automatico)"
             ></textarea>
             <div class="notesfoot">{notesSaved ? "Salvato ✓" : "Salvataggio…"}</div>
           </div>
@@ -2417,7 +2417,7 @@
       {/if}
       <div class="lensft">
         <button onclick={copyLensAnswer} disabled={!lens.answer || lens.busy}>Copia</button>
-        <button onclick={lensToNotes} disabled={!lens.answer || lens.busy} title="Aggiungi la risposta alla Nota del documento">→ Nota doc</button>
+        <button onclick={lensToNotes} disabled={!lens.answer || lens.busy} title="Aggiungi la risposta alla Nota del documento">→ Nota del doc.</button>
         <span style="flex:1"></span>
         <button onclick={closeLens}>Chiudi</button>
       </div>
