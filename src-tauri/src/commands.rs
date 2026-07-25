@@ -4339,6 +4339,8 @@ pub struct RefImportSummary {
     pub pdfs_downloaded: usize,
     /// Raccolta creata/usata per le voci importate, se richiesta.
     pub collection: Option<String>,
+    /// Progetto LaTeX ricostruito dallo .zip (slug), se richiesto.
+    pub project: Option<String>,
     pub errors: Vec<String>,
 }
 
@@ -4552,9 +4554,10 @@ pub async fn import_reference_manager(
     pdf_dir: Option<String>,
     find_pdfs: Option<bool>,
     collection: Option<String>,
+    latex_project: Option<String>,
 ) -> Result<RefImportSummary, String> {
     pulse::start(&app, "biblio", "Import da gestore bibliografico");
-    let r = import_reference_manager_chain(app.clone(), path, pdf_dir, find_pdfs, collection).await;
+    let r = import_reference_manager_chain(app.clone(), path, pdf_dir, find_pdfs, collection, latex_project).await;
     match &r {
         Ok(s) => pulse::ok(
             &app,
@@ -4573,13 +4576,16 @@ pub async fn import_reference_manager(
 /// La catena completa: import → (opz.) raccolta → (opz.) download dei PDF
 /// open-access delle voci rimaste senza file. Ogni fase è indipendente: se il
 /// download fallisce, l'import resta valido (gli errori finiscono nel riepilogo).
+#[allow(clippy::too_many_arguments)]
 async fn import_reference_manager_chain(
     app: AppHandle,
     path: String,
     pdf_dir: Option<String>,
     find_pdfs: Option<bool>,
     collection: Option<String>,
+    latex_project: Option<String>,
 ) -> Result<RefImportSummary, String> {
+    let zip_source = path.clone();
     let app2 = app.clone();
     let (mut summary, touched) = tauri::async_runtime::spawn_blocking(move || {
         import_reference_manager_inner(&app2, &path, pdf_dir.as_deref())
@@ -4680,6 +4686,18 @@ async fn import_reference_manager_chain(
             let _ = app.emit("library-changed", ());
         }
     }
+    // 3) Progetto LaTeX completo dallo stesso .zip (sorgenti, immagini, classi:
+    //    l'archivio viene estratto per intero e diventa compilabile qui dentro).
+    //    Fase NON fatale come le altre: un import valido non deve diventare errore.
+    if let Some(name) = latex_project.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        match create_project_from_zip(app.clone(), app.state::<AppState>(), name.to_string(), zip_source) {
+            Ok(slug) => {
+                summary.project = Some(slug);
+                pulse::blip(&app, "latex", &format!("Progetto «{name}» ricostruito dallo .zip"));
+            }
+            Err(e) => summary.errors.push(format!("Progetto LaTeX non creato: {e}")),
+        }
+    }
     // Lo specchio va riallineato ORA: prima i membri erano tutti solo-riferimento
     // (esclusi dalla proiezione) e la cartella sarebbe rimasta vuota.
     if summary.collection.is_some() || summary.pdfs_downloaded > 0 {
@@ -4776,6 +4794,7 @@ fn import_reference_manager_inner(
         dois_resolved: 0,
         pdfs_downloaded: 0,
         collection: None,
+        project: None,
         errors: Vec::new(),
     };
 

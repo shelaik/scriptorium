@@ -252,7 +252,7 @@
     if (creating) return;
     const picked = await openDialog({
       multiple: false,
-      filters: [{ name: "Template LaTeX (.zip)", extensions: ["zip"] }],
+      filters: [{ name: "Progetto o template LaTeX (.zip)", extensions: ["zip"] }],
     });
     if (typeof picked !== "string") return;
     let name = newName.trim();
@@ -433,9 +433,9 @@
         class="tbtn"
         onclick={doCreateFromZip}
         disabled={creating}
-        title="Crea un progetto da un template .zip scaricato (Overleaf, IEEE, ACM…)"
+        title="Crea un progetto da uno .zip: il TUO progetto scaricato da Overleaf (Menu → Download → Source) oppure un template (IEEE, ACM…). Estrae tutto: .tex, immagini, classi e sottocartelle."
       >
-        Da .zip…
+        Da .zip (anche Overleaf)…
       </button>
     </div>
     <div class="projlist">

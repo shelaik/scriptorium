@@ -2,6 +2,11 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.43 — Il progetto Overleaf intero, e i grafi di raccolta finalmente visibili
+- **Dallo stesso zip, anche il progetto LaTeX completo.** L'import «Da bibliografia o progetto…» ora chiede, per un `.zip`, se **ricostruire l'intero progetto** — file `.tex`, immagini, classi, sottocartelle — dentro **Progetti (LaTeX)**, pronto da compilare. Un unico gesto dà: schede dei paper citati, PDF open-access, raccolta **e** il progetto compilabile.
+- **Etichette oneste sullo zip dei Progetti**: il pulsante ora dice «Da .zip (**anche Overleaf**)…» — importava già l'archivio intero, ma sembrava riservato ai *template*.
+- **La Costellazione di una raccolta si trova**: oltre al pulsante nell'Archivio, ora c'è il segno **✳** accanto a ogni collezione nella barra laterale e la voce *«Costellazione di …»* nel menu **Vista** mentre la stai guardando.
+
 ## 0.9.42 — Overleaf: la via sicura, spiegata
 - **Nuova FAQ «lavorare con Overleaf»**: si può scrivere nel proprio progetto online, ma **non facendo passare le credenziali da Scriptorium** — Overleaf non ha un'API pubblica di scrittura e l'unica alternativa sarebbe custodire un token valido su *tutti* i progetti dell'account. La guida spiega le due strade pulite: il **ponte Git** di Overleaf usato dal **Terminale** integrato (le credenziali restano nel gestore di Windows, l'app non le vede mai) e, per il piano gratuito, il giro dello `.zip`.
 - **Nuovo pulsante «+ .gitignore»** nei Progetti: prepara la cartella per la sincronizzazione con Git escludendo i prodotti della compilazione.

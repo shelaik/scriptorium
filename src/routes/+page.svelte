@@ -632,7 +632,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.42";
+  const APP_VERSION = "0.9.43";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -1356,14 +1356,30 @@
     ))
       ? base
       : undefined;
+    // Catena opzionale 3 (solo .zip): ricostruisci qui dentro il progetto LaTeX
+    // completo — sorgenti, immagini, classi — pronto da compilare.
+    let latexProject: string | undefined;
+    if (
+      isZip &&
+      (await confirmAsk(
+        `Importare anche il progetto LaTeX completo come «${base}»?
+
+Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un progetto compilabile qui dentro, con Progetti (LaTeX).`,
+        "Sì, importa il progetto",
+        false,
+      ))
+    ) {
+      latexProject = base;
+    }
     status = findPdfs ? "Importo la bibliografia e cerco i PDF…" : "Importo la bibliografia…";
     try {
-      const res = await importReferenceManager(file, pdfDir, findPdfs, collection);
+      const res = await importReferenceManager(file, pdfDir, findPdfs, collection, latexProject);
       const parts = [`${res.added} aggiunti`];
       if (res.pdfs_attached) parts.push(`${res.pdfs_attached} con PDF`);
       if (res.pdfs_downloaded) parts.push(`${res.pdfs_downloaded} PDF scaricati`);
       if (res.tags_applied) parts.push(`${res.tags_applied} tag`);
       if (res.collection) parts.push(`raccolta «${res.collection}»`);
+      if (res.project) parts.push("progetto LaTeX creato");
       if (res.duplicates) parts.push(`${res.duplicates} già presenti`);
       if (res.dois_resolved) parts.push(`${res.dois_resolved} DOI recuperati`);
       if (res.errors.length) parts.push(`${res.errors.length} errori`);
@@ -3444,7 +3460,17 @@
         children: [
           { id: "gv-grid", label: "Griglia", icon: I.grid, checked: view === "grid", action: () => (view = "grid") },
           { id: "gv-list", label: "Lista", icon: I.list, checked: view === "list", action: () => (view = "list") },
-          { id: "gv-map", label: "Costellazione", icon: I.map, checked: view === "map", hint: "Mappa semantica della libreria", action: () => (view = "map") },
+          { id: "gv-map", label: "Costellazione", icon: I.map, checked: view === "map", hint: "Mappa semantica della libreria", action: () => { graphScope = null; graph = null; view = "map"; void loadGraph(true); } },
+          ...(filter.kind === "collection" && filter.id != null
+            ? [{
+                id: "gv-map-coll",
+                label: `Costellazione di «${filter.label ?? "raccolta"}»`,
+                icon: I.map,
+                checked: view === "map" && graphScope?.id === filter.id,
+                hint: "La mappa dei soli paper di questa raccolta (vicinanze ricalcolate al suo interno)",
+                action: () => openGraphForCollection(filter.id as number, filter.label ?? "raccolta"),
+              }]
+            : []),
           { id: "gv-side", label: "Barra laterale", checked: !sidebarHidden, hint: "Mostra/nascondi (Ctrl+B)", action: () => (sidebarHidden = !sidebarHidden) },
           ...SORT_KEYS.map((k) => ({
             id: "gs-" + k,
@@ -5297,6 +5323,14 @@
           <button class="navitem" class:active={filter.kind === "collection" && filter.id === c.id} onclick={() => setFilter({ kind: "collection", id: c.id, label: c.name })} title={`Filtra per la collezione "${c.name}"${c.is_smart ? " (smart: si aggiorna da sola)" : ""}`}>
             {c.name}
           </button>
+          {#if !c.is_smart}
+            <button
+              class="x mapx"
+              title={`Costellazione della sola collezione «${c.name}»`}
+              aria-label={`Costellazione di ${c.name}`}
+              onclick={() => openGraphForCollection(c.id, c.name)}
+            >✳</button>
+          {/if}
           <button class="x" title="Elimina la collezione (i documenti restano in libreria)" onclick={() => removeColl(c)}>×</button>
         </div>
       {/each}
@@ -7159,7 +7193,7 @@
             <li><strong>Tag</strong> colorati (la <strong>✎</strong> in sidebar rinomina/ricolora, la <strong>×</strong> elimina; dal pannello dettagli li applichi al volo) e <strong>Collezioni</strong>, anche <em>smart</em> (si popolano da sole con una regola).</li>
             <li><strong>Filtri</strong> in sidebar (Preferiti, Da leggere, Con codice, Peer-reviewed, Il mio lavoro), <strong>ordinamento combinabile</strong> (chip «Ordina ▾»: un clic attiva, un altro inverte, un terzo toglie), badge <em>preprint / peer-reviewed</em> sulle schede.</li>
             <li><strong>Viste</strong> (barra → Vista): griglia (copertine ridimensionabili con − ▭ +), lista a colonne, <strong>Costellazione</strong> (la mappa semantica — vedi la scheda <em>Scoperta</em>). Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
-            <li><strong>Archivio</strong> (icona cartella sulla barra): le collezioni come <strong>albero navigabile</strong> — sotto-raccolte a piacere, <strong>trascina un paper</strong> su una raccolta per spostarlo (Ctrl = aggiungi anche lì: l'appartenenza è multipla; <strong>sullo sfondo vuoto</strong> = toglilo dalla raccolta), trascina una raccolta su un'altra per annidarla. Eliminare una raccolta non tocca mai i paper (le sotto-raccolte risalgono). Dal pannello puoi anche aprire la <strong>Costellazione della sola raccolta</strong> (le vicinanze vengono ricalcolate al suo interno, e il layout è salvato a parte dalla mappa generale). Nel pannello: <strong>✦ Suggerisci</strong> propone i paper affini (somiglianza semantica locale, con soglia di confidenza — mai automatico): scegli la sorgente <em>prima</em> di calcolare — <em>Nome</em> della raccolta (funziona anche a motori spenti: si àncora ai tuoi paper che ne contengono le parole), <em>Contenuto</em> (i paper già dentro) o <em>Entrambi</em> col <strong>peso regolabile</strong>. Il toggle <strong>Ricerca «Novità»</strong> aggancia una ricerca online alla raccolta (le novità accettate <em>entrano da sole nella raccolta</em>, filtrate per pertinenza quando la raccolta ha ≥3 paper indicizzati; spegnendolo la ricerca si rimuove).</li>
+            <li><strong>Archivio</strong> (icona cartella sulla barra): le collezioni come <strong>albero navigabile</strong> — sotto-raccolte a piacere, <strong>trascina un paper</strong> su una raccolta per spostarlo (Ctrl = aggiungi anche lì: l'appartenenza è multipla; <strong>sullo sfondo vuoto</strong> = toglilo dalla raccolta), trascina una raccolta su un'altra per annidarla. Eliminare una raccolta non tocca mai i paper (le sotto-raccolte risalgono). Puoi aprire la <strong>Costellazione della sola raccolta</strong> in tre modi: il pulsante <strong>✳</strong> accanto al nome della collezione in sidebar, la voce <em>Costellazione di «nome»</em> nel menu <strong>Vista</strong> mentre la stai guardando, o il pulsante <strong>COSTELLAZIONE</strong> nel pannello dell'Archivio. Le vicinanze vengono ricalcolate al suo interno e il layout è salvato a parte dalla mappa generale. Nel pannello: <strong>✦ Suggerisci</strong> propone i paper affini (somiglianza semantica locale, con soglia di confidenza — mai automatico): scegli la sorgente <em>prima</em> di calcolare — <em>Nome</em> della raccolta (funziona anche a motori spenti: si àncora ai tuoi paper che ne contengono le parole), <em>Contenuto</em> (i paper già dentro) o <em>Entrambi</em> col <strong>peso regolabile</strong>. Il toggle <strong>Ricerca «Novità»</strong> aggancia una ricerca online alla raccolta (le novità accettate <em>entrano da sole nella raccolta</em>, filtrate per pertinenza quando la raccolta ha ≥3 paper indicizzati; spegnendolo la ricerca si rimuove).</li>
             <li><strong>Specchio su disco</strong> (chip in alto nell'Archivio): proietta le raccolte in una cartella vera — <code>Raccolta\Sottoraccolta\Autore Anno — Titolo.pdf</code> — con <strong>hardlink</strong> (zero spazio extra), aggiornata da sola a ogni cambio. Comodissima da Esplora risorse e dal terminale. Cancellare o spostare file nello specchio non tocca la libreria (si rigenera); <em>modificare il contenuto</em> di un PDF lì dentro sì, perché è lo stesso file: per annotare usa il lettore.</li>
           </ul>
         </div>
@@ -7296,7 +7330,8 @@
             <li>Icona <strong>Progetti (LaTeX)</strong> sulla barra. Ogni progetto è una <strong>cartella vera</strong> (in <code>projects/</code> nei dati dell'app) con <code>main.tex</code> e <code>refs.bib</code>. Crea da <strong>5 modelli</strong> (articolo, paper a due colonne, relazione/tesi, presentazione beamer, minimale) oppure «<strong>Da .zip…</strong>» con un template scaricato — i link a <strong>Overleaf / IEEE / ACM / Springer / Elsevier</strong> sono lì sotto.</li>
             <li><strong>Cita</strong>: cerca nella tua libreria e inserisce <code>\cite&#123;citekey&#125;</code> al cursore. <strong>Sincronizza bibliografia</strong>: riscrive <code>refs.bib</code> con tutta la libreria. Salvataggio automatico (o <kbd>Ctrl</kbd>+<kbd>S</kbd>).</li>
             <li><strong>Compila</strong> usa il compilatore di sistema: <strong>Tectonic</strong>, oppure <strong>MiKTeX</strong> (via texify, non serve Perl), oppure latexmk. L'anteprima del PDF appare accanto all'editor; se il PDF esce con avvisi lo vedi comunque, col log a un clic. Senza compilatore: <code>winget install Tectonic.Tectonic</code>.</li>
-                      <li><strong>Sincronizzare con Overleaf</strong>: con il ponte Git di Overleaf (funzione a pagamento) puoi fare <code>git clone</code> della cartella del progetto dal <strong>Terminale</strong> integrato e lavorare con <code>git pull</code>/<code>git push</code> — le credenziali restano nel gestore di Windows, mai dentro Scriptorium. Il pulsante <strong>+ .gitignore</strong> prepara la cartella escludendo i prodotti della compilazione. Senza il ponte, si passa dallo <code>.zip</code> (vedi la FAQ su Overleaf).</li>
+                      <li><strong>Portare qui un progetto Overleaf</strong>: «Da .zip (anche Overleaf)…» ricostruisce l'intero progetto — .tex, immagini, classi, sottocartelle — pronto da compilare; lo stesso lo fa la terza domanda dell'import «Da bibliografia o progetto…».</li>
+            <li><strong>Sincronizzare con Overleaf</strong>: con il ponte Git di Overleaf (funzione a pagamento) puoi fare <code>git clone</code> della cartella del progetto dal <strong>Terminale</strong> integrato e lavorare con <code>git pull</code>/<code>git push</code> — le credenziali restano nel gestore di Windows, mai dentro Scriptorium. Il pulsante <strong>+ .gitignore</strong> prepara la cartella escludendo i prodotti della compilazione. Senza il ponte, si passa dallo <code>.zip</code> (vedi la FAQ su Overleaf).</li>
 </ul>
         </div>
 
@@ -7353,7 +7388,7 @@
               </ul>
             </dd>
             <dt>…importare la bibliografia di un progetto Overleaf e scaricarne i paper?</dt>
-            <dd>Scarica da Overleaf lo <strong>zip del progetto</strong> (Menu → Download → Source) e usa <strong>Importa → «Da bibliografia o progetto…»</strong>: legge il <code>.bib</code> <em>dentro</em> l'archivio (non serve scompattarlo), crea una scheda per ogni voce citata, e — se rispondi sì alle due domande — <strong>cerca e scarica i PDF open-access</strong> (arXiv, Unpaywall, OpenAlex, Semantic Scholar) e mette tutto in una <strong>raccolta</strong> dedicata. Serve la ricerca online attiva. Poi, sulla selezione, «Tag automatici (AI)» per i tag. Per importare anche i PDF che stanno nell'archivio e il grafo delle citazioni del <em>tuo</em> lavoro, usa in aggiunta «Importa → Progetto LaTeX (.zip)…».</dd>
+            <dd>Scarica da Overleaf lo <strong>zip del progetto</strong> (Menu → Download → Source) e usa <strong>Importa → «Da bibliografia o progetto…»</strong>: legge il <code>.bib</code> <em>dentro</em> l'archivio (non serve scompattarlo), crea una scheda per ogni voce citata, e — se rispondi sì alle due domande — <strong>cerca e scarica i PDF open-access</strong> (arXiv, Unpaywall, OpenAlex, Semantic Scholar) e mette tutto in una <strong>raccolta</strong> dedicata. Serve la ricerca online attiva. Poi, sulla selezione, «Tag automatici (AI)» per i tag. Alla terza domanda puoi anche far <strong>ricostruire il progetto LaTeX completo</strong> (file .tex, immagini, classi, sottocartelle) dentro <strong>Progetti (LaTeX)</strong>, pronto da compilare. Per importare invece i PDF già compilati che stanno nell'archivio e il grafo delle citazioni del <em>tuo</em> lavoro, usa in aggiunta «Importa → Progetto LaTeX (.zip)…».</dd>
             <dt>…portare la mia libreria da Zotero, Mendeley o EndNote?</dt>
             <dd>Nel gestore fai <strong>Esporta</strong> in <strong>BibTeX/BibLaTeX, RIS o CSL-JSON</strong> (per avere anche i PDF, in Zotero spunta «Esporta file»). Poi barra → Importa → <strong>Da gestore bibliografico…</strong>, scegli il file e — se i PDF stanno in una cartella a parte — indicala quando te lo chiede. Metadati, PDF e parole chiave (→ tag) entrano insieme, senza doppioni.</dd>
             <dt>…sistemare un paper arrivato senza titolo o con metadati sbagliati?</dt>
@@ -8827,6 +8862,8 @@
     background: var(--panel);
   }
   .scopebar b { color: var(--text); }
+  .mapx { color: var(--accent); font-size: 11px; }
+  .mapx:hover { color: var(--accent-strong); }
 
   /* "Riscopri" spotlight card */
   .spotcard {

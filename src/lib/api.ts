@@ -79,6 +79,8 @@ export interface RefImportSummary {
   pdfs_downloaded: number;
   /** Raccolta in cui sono finite le voci importate, se richiesta. */
   collection: string | null;
+  /** Progetto LaTeX ricostruito dallo .zip (slug), se richiesto. */
+  project: string | null;
   errors: string[];
 }
 /** Import a bibliography exported by any reference manager (BibTeX/BibLaTeX, RIS,
@@ -90,12 +92,15 @@ export const importReferenceManager = (
   pdfDir?: string,
   findPdfs?: boolean,
   collection?: string,
+  /** Nome del progetto LaTeX da ricostruire dallo .zip (sorgenti, immagini, classi). */
+  latexProject?: string,
 ) =>
   invoke<RefImportSummary>("import_reference_manager", {
     path,
     pdfDir: pdfDir ?? null,
     findPdfs: findPdfs ?? null,
     collection: collection ?? null,
+    latexProject: latexProject ?? null,
   });
 
 export interface LatexImportSummary {
