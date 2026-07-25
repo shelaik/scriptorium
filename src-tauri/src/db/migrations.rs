@@ -325,6 +325,19 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     // Ricerca «Novità» agganciata a una raccolta (vista Archivio): le novità
     // accettate dal suo feed entrano direttamente nella raccolta.
     add_column_if_missing(conn, "saved_searches", "collection_id", "INTEGER")?;
+    // Posizioni della Costellazione ristretta a una raccolta. Tabella SEPARATA
+    // da graph_positions: un layout fatto dentro una raccolta non deve
+    // sovrascrivere (in silenzio) le coordinate della mappa dell'intera libreria.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS graph_positions_scoped (
+           scope_id    INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+           document_id INTEGER NOT NULL REFERENCES documents(id)   ON DELETE CASCADE,
+           x REAL NOT NULL,
+           y REAL NOT NULL,
+           PRIMARY KEY (scope_id, document_id)
+         );",
+    )
+    .context("creating graph_positions_scoped")?;
     backfill_github_urls(conn)?;
     // Assign citekeys to any documents that don't have one yet (cheap no-op once full).
     super::citekey::backfill(conn)?;

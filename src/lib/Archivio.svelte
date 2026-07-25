@@ -42,9 +42,12 @@
 
   let {
     onOpenGrid,
+    onOpenGraph,
     onChanged,
   }: {
     onOpenGrid: (id: number, label: string) => void;
+    /** Apre la Costellazione ristretta a questa raccolta. */
+    onOpenGraph?: (id: number, label: string) => void;
     /** Chiamata dopo ogni mutazione delle raccolte, così la sidebar resta fresca. */
     onChanged?: () => void;
   } = $props();
@@ -661,6 +664,9 @@
         {#if selNode.key !== "unfiled"}
           <div class="pacts">
             <button class="pbtn" onclick={() => onOpenGrid(selNode.id as number, selNode.name)}>APRI NELLA GRIGLIA</button>
+            {#if onOpenGraph}
+              <button class="pbtn" onclick={() => onOpenGraph?.(selNode.id as number, selNode.name)} title="La Costellazione ristretta a questa raccolta (vicinanze ricalcolate al suo interno)">COSTELLAZIONE</button>
+            {/if}
             {#if renaming}
               <input
                 class="mkinput"

@@ -987,14 +987,27 @@ export interface SimilarityGraph {
   total: number;
 }
 
-/** K-nearest-neighbour similarity graph over all embedded documents (k default 4, minSim default 0.55). */
-export async function similarityGraph(k?: number, minSim?: number): Promise<SimilarityGraph> {
-  return invoke<SimilarityGraph>("similarity_graph", { k: k ?? null, minSim: minSim ?? null });
+/** K-nearest-neighbour similarity graph over all embedded documents (k default 4, minSim default 0.55).
+ *  Con `collectionId` il grafo è ristretto a quella raccolta e alle sue sotto-raccolte
+ *  (vicinanze ricalcolate DENTRO l'ambito, posizioni salvate a parte). */
+export async function similarityGraph(
+  k?: number,
+  minSim?: number,
+  collectionId?: number | null,
+): Promise<SimilarityGraph> {
+  return invoke<SimilarityGraph>("similarity_graph", {
+    k: k ?? null,
+    minSim: minSim ?? null,
+    collectionId: collectionId ?? null,
+  });
 }
 
-/** Persist the Costellazione's settled node positions (map stays stable across sessions). */
-export const saveGraphPositions = (positions: { id: number; x: number; y: number }[]) =>
-  invoke<void>("save_graph_positions", { positions });
+/** Persist the Costellazione's settled node positions (map stays stable across sessions).
+ *  Con `collectionId` il layout è quello della raccolta e non tocca la mappa globale. */
+export const saveGraphPositions = (
+  positions: { id: number; x: number; y: number }[],
+  collectionId?: number | null,
+) => invoke<void>("save_graph_positions", { positions, collectionId: collectionId ?? null });
 
 /** Explain / translate / answer a question about a selected passage with the local LLM.
  *  Streams "explain-token" events ({ token: string; req: string | null }) while generating —

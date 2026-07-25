@@ -632,7 +632,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.40";
+  const APP_VERSION = "0.9.41";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -3796,12 +3796,31 @@
   // minSim = similarity floor. Persisted so the user's tuning survives restarts.
   let graphK = $state(Number(localStorage.getItem("scriptorium-graph-k")) || 4);
   let graphMinSim = $state(Number(localStorage.getItem("scriptorium-graph-minsim")) || 0.55);
+  // Ambito della Costellazione: null = tutta la libreria, altrimenti una
+  // raccolta (con le sue sotto-raccolte). Le posizioni sono salvate a parte.
+  let graphScope = $state<{ id: number; name: string } | null>(null);
+  /** Apre la mappa ristretta a una raccolta (dalla vista Archivio o dalla sidebar). */
+  function openGraphForCollection(id: number, name: string) {
+    graphScope = { id, name };
+    graph = null;
+    graphError = false;
+    view = "map";
+    setFilter({ kind: "collection", id, label: name });
+    void loadGraph(true);
+  }
+  function clearGraphScope() {
+    if (!graphScope) return;
+    graphScope = null;
+    graph = null;
+    graphError = false;
+    void loadGraph(true);
+  }
   async function loadGraph(force = false) {
     if (graphLoading || (graph && !force) || (graphError && !force)) return;
     graphLoading = true;
     graphError = false;
     try {
-      graph = await similarityGraph(graphK, graphMinSim);
+      graph = await similarityGraph(graphK, graphMinSim, graphScope?.id ?? null);
     } catch (e) {
       graphError = true;
       status = "Mappa semantica: " + e;
@@ -5678,6 +5697,7 @@
       {:else if filter.kind === "archivio"}
         <Archivio
           onOpenGrid={(id, label) => setFilter({ kind: "collection", id, label })}
+          onOpenGraph={(id, label) => openGraphForCollection(id, label)}
           onChanged={() => void loadSidebar()}
         />
       {:else if filter.kind === "novita"}
@@ -6040,6 +6060,12 @@
           </section>
         {/if}
         {#if view === "map"}
+          {#if graphScope}
+            <div class="scopebar">
+              Costellazione della raccolta <b>{graphScope.name}</b> — vicinanze calcolate solo qui dentro
+              <button class="ghost small" onclick={clearGraphScope}>Torna a tutta la libreria</button>
+            </div>
+          {/if}
           <div class="mapwrap">
             <Constellation
               {graph}
@@ -6074,7 +6100,7 @@
               onRefresh={() => loadGraph(true)}
               params={{ k: graphK, minSim: graphMinSim }}
               onParams={(k, minSim) => setGraphParams(k, minSim)}
-              onSavePositions={(pos) => saveGraphPositions(pos).catch(() => {})}
+              onSavePositions={(pos) => saveGraphPositions(pos, graphScope?.id ?? null).catch(() => {})}
               ghosts={mapGhosts}
               onExplore={(id, rel) => exploreFromNode(id, rel)}
               onGhostAdd={(key) => addGhostToLibrary(key)}
@@ -7133,7 +7159,7 @@
             <li><strong>Tag</strong> colorati (la <strong>✎</strong> in sidebar rinomina/ricolora, la <strong>×</strong> elimina; dal pannello dettagli li applichi al volo) e <strong>Collezioni</strong>, anche <em>smart</em> (si popolano da sole con una regola).</li>
             <li><strong>Filtri</strong> in sidebar (Preferiti, Da leggere, Con codice, Peer-reviewed, Il mio lavoro), <strong>ordinamento combinabile</strong> (chip «Ordina ▾»: un clic attiva, un altro inverte, un terzo toglie), badge <em>preprint / peer-reviewed</em> sulle schede.</li>
             <li><strong>Viste</strong> (barra → Vista): griglia (copertine ridimensionabili con − ▭ +), lista a colonne, <strong>Costellazione</strong> (la mappa semantica — vedi la scheda <em>Scoperta</em>). Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
-            <li><strong>Archivio</strong> (icona cartella sulla barra): le collezioni come <strong>albero navigabile</strong> — sotto-raccolte a piacere, <strong>trascina un paper</strong> su una raccolta per spostarlo (Ctrl = aggiungi anche lì: l'appartenenza è multipla; <strong>sullo sfondo vuoto</strong> = toglilo dalla raccolta), trascina una raccolta su un'altra per annidarla. Eliminare una raccolta non tocca mai i paper (le sotto-raccolte risalgono). Nel pannello: <strong>✦ Suggerisci</strong> propone i paper affini (somiglianza semantica locale, con soglia di confidenza — mai automatico): scegli la sorgente <em>prima</em> di calcolare — <em>Nome</em> della raccolta (funziona anche a motori spenti: si àncora ai tuoi paper che ne contengono le parole), <em>Contenuto</em> (i paper già dentro) o <em>Entrambi</em> col <strong>peso regolabile</strong>. Il toggle <strong>Ricerca «Novità»</strong> aggancia una ricerca online alla raccolta (le novità accettate <em>entrano da sole nella raccolta</em>, filtrate per pertinenza quando la raccolta ha ≥3 paper indicizzati; spegnendolo la ricerca si rimuove).</li>
+            <li><strong>Archivio</strong> (icona cartella sulla barra): le collezioni come <strong>albero navigabile</strong> — sotto-raccolte a piacere, <strong>trascina un paper</strong> su una raccolta per spostarlo (Ctrl = aggiungi anche lì: l'appartenenza è multipla; <strong>sullo sfondo vuoto</strong> = toglilo dalla raccolta), trascina una raccolta su un'altra per annidarla. Eliminare una raccolta non tocca mai i paper (le sotto-raccolte risalgono). Dal pannello puoi anche aprire la <strong>Costellazione della sola raccolta</strong> (le vicinanze vengono ricalcolate al suo interno, e il layout è salvato a parte dalla mappa generale). Nel pannello: <strong>✦ Suggerisci</strong> propone i paper affini (somiglianza semantica locale, con soglia di confidenza — mai automatico): scegli la sorgente <em>prima</em> di calcolare — <em>Nome</em> della raccolta (funziona anche a motori spenti: si àncora ai tuoi paper che ne contengono le parole), <em>Contenuto</em> (i paper già dentro) o <em>Entrambi</em> col <strong>peso regolabile</strong>. Il toggle <strong>Ricerca «Novità»</strong> aggancia una ricerca online alla raccolta (le novità accettate <em>entrano da sole nella raccolta</em>, filtrate per pertinenza quando la raccolta ha ≥3 paper indicizzati; spegnendolo la ricerca si rimuove).</li>
             <li><strong>Specchio su disco</strong> (chip in alto nell'Archivio): proietta le raccolte in una cartella vera — <code>Raccolta\Sottoraccolta\Autore Anno — Titolo.pdf</code> — con <strong>hardlink</strong> (zero spazio extra), aggiornata da sola a ogni cambio. Comodissima da Esplora risorse e dal terminale. Cancellare o spostare file nello specchio non tocca la libreria (si rigenera); <em>modificare il contenuto</em> di un PDF lì dentro sì, perché è lo stesso file: per annotare usa il lettore.</li>
           </ul>
         </div>
@@ -8779,6 +8805,19 @@
 
   /* Costellazione host: fills the visible main area (header + strip ≈ 105px) */
   .mapwrap { position: relative; height: calc(100vh - 108px); min-height: 340px; }
+  .scopebar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--dim);
+    padding: 6px 10px;
+    margin-bottom: 4px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+  }
+  .scopebar b { color: var(--text); }
 
   /* "Riscopri" spotlight card */
   .spotcard {

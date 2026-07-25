@@ -2,6 +2,10 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.41 — Una Costellazione per ogni raccolta
+- **Nuovo: la mappa semantica ristretta a una raccolta.** Dall'**Archivio**, sul pannello di una raccolta, il pulsante «Costellazione» apre il grafo dei *soli* paper di quella raccolta (sotto-raccolte comprese). Le **vicinanze vengono ricalcolate al suo interno**: senza questo, i vicini di ogni paper cadrebbero fuori raccolta e la mappa uscirebbe senza collegamenti.
+- Il **layout della raccolta è salvato a parte**: spostare i nodi lì dentro non tocca più le posizioni della mappa dell'intera libreria. Una barra in alto ricorda l'ambito attivo e permette di tornare alla vista generale.
+
 ## 0.9.40 — Metadati: molti più recuperi, stessa precisione
 - **Il titolo non è più il collo di bottiglia.** Il recupero identificava il paper da *una sola* lettura del titolo dalla prima pagina: bastava che il PDF ci incollasse l'intestazione dell'editore («Published as a conference paper at ICLR 2026») o la riga degli autori perché il filtro di sicurezza — che pretende la corrispondenza esatta delle parole distintive — respingesse il record giusto. Ora vengono generate **più varianti** del titolo e provate tutte **contro lo stesso identico filtro**: più recuperi, zero rischio in più di etichettare male un documento.
 - **Due fonti in più: OpenAlex e Semantic Scholar.** Coprono conferenze come NeurIPS, ICLR e CVPR, che Crossref non indicizza — la fetta più grande dei mancati recuperi in una libreria di informatica. Quando la fonte fornisce un DOI, il record completo viene comunque preso da Crossref.

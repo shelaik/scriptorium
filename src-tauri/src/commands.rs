@@ -2041,9 +2041,48 @@ pub async fn similarity_graph(
     state: tauri::State<'_, AppState>,
     k: Option<usize>,
     min_sim: Option<f64>,
+    collection_id: Option<i64>,
 ) -> Result<SimilarityGraphData, String> {
     let k = k.unwrap_or(4).clamp(1, 8);
     let min_sim = min_sim.unwrap_or(0.55).clamp(0.0, 0.95);
+    // Ambito: nessuno (tutta la libreria) o una raccolta con i suoi discendenti.
+    // NB il KNN va poi ricalcolato DENTRO l'ambito: filtrare i soli nodi
+    // lascerebbe il grafo senza archi, perché i vicini globali cadono fuori.
+    let scope: Option<std::collections::HashSet<i64>> = match collection_id {
+        None => None,
+        Some(cid) => {
+            let conn = state.db.lock();
+            // Chiusura transitiva sulle sotto-raccolte (tetto di profondità).
+            let mut ids = vec![cid];
+            let mut frontier = vec![cid];
+            for _ in 0..64 {
+                if frontier.is_empty() {
+                    break;
+                }
+                let mut next = Vec::new();
+                for p in frontier {
+                    let mut stmt = conn
+                        .prepare_cached("SELECT id FROM collections WHERE parent_id = ?1")
+                        .map_err(|e| e.to_string())?;
+                    let kids: Vec<i64> = stmt
+                        .query_map(params![p], |r| r.get(0))
+                        .map_err(|e| e.to_string())?
+                        .filter_map(Result::ok)
+                        .collect();
+                    next.extend(kids);
+                }
+                ids.extend(next.iter().copied());
+                frontier = next;
+            }
+            let mut members: std::collections::HashSet<i64> = std::collections::HashSet::new();
+            for c in ids {
+                if let Ok(list) = ids_in_collection(&conn, c) {
+                    members.extend(list);
+                }
+            }
+            Some(members)
+        }
+    };
 
     // Docs processed per DB lock acquisition: the O(n×KNN) pass is sliced so
     // concurrent commands can interleave instead of stalling for seconds.
@@ -2107,20 +2146,47 @@ pub async fn similarity_graph(
         };
         (total, embedded, docs)
     };
+    // Ambito attivo: tieni solo i suoi membri e riporta i conteggi dell'ambito,
+    // così il richiamo «costruisci l'indice» non mente sul totale.
+    let (total, embedded, docs) = match &scope {
+        None => (total, embedded, docs),
+        Some(set) => {
+            let kept: Vec<_> = docs.into_iter().filter(|d| set.contains(&d.0)).collect();
+            (set.len() as i64, kept.len() as i64, kept)
+        }
+    };
     let node_ids: std::collections::HashSet<i64> = docs.iter().map(|d| d.0).collect();
 
     // Saved layout positions (previous sessions) — a pure cache, may be empty.
     let saved: std::collections::HashMap<i64, (f32, f32)> = {
         let conn = state.db.lock();
-        let mut stmt = conn
-            .prepare("SELECT document_id, x, y FROM graph_positions")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, (r.get::<_, f64>(1)? as f32, r.get::<_, f64>(2)? as f32)))
-            })
-            .map_err(|e| e.to_string())?;
-        rows.filter_map(Result::ok).collect()
+        // Con un ambito attivo si leggono le SUE coordinate: quelle globali,
+        // su un sottoinsieme, darebbero una nuvola sparsa dentro l'estensione
+        // dell'intera libreria — l'opposto della leggibilita' cercata.
+        match collection_id {
+            Some(cid) => {
+                let mut stmt = conn
+                    .prepare("SELECT document_id, x, y FROM graph_positions_scoped WHERE scope_id = ?1")
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(params![cid], |r| {
+                        Ok((r.get::<_, i64>(0)?, (r.get::<_, f64>(1)? as f32, r.get::<_, f64>(2)? as f32)))
+                    })
+                    .map_err(|e| e.to_string())?;
+                rows.filter_map(Result::ok).collect()
+            }
+            None => {
+                let mut stmt = conn
+                    .prepare("SELECT document_id, x, y FROM graph_positions")
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok((r.get::<_, i64>(0)?, (r.get::<_, f64>(1)? as f32, r.get::<_, f64>(2)? as f32)))
+                    })
+                    .map_err(|e| e.to_string())?;
+                rows.filter_map(Result::ok).collect()
+            }
+        }
     };
 
     // PCA seed positions from the embeddings (deterministic; off the async thread —
@@ -2138,7 +2204,61 @@ pub async fn similarity_graph(
     // returns distance = 1 - cosine similarity. The lock is re-acquired per
     // chunk so other commands aren't starved during the pass.
     let mut edge_map: std::collections::HashMap<(i64, i64), f64> = std::collections::HashMap::new();
+    // AMBITO: il KNN di sqlite-vec cerca su TUTTA la libreria, quindi in una
+    // raccolta di poche decine di paper i vicini cadrebbero quasi tutti fuori e
+    // il grafo uscirebbe SENZA ARCHI. Dentro un ambito si calcola quindi il
+    // coseno esatto a coppie, che su queste dimensioni è immediato.
+    if scope.is_some() {
+        let ids: Vec<i64> = docs.iter().map(|d| d.0).collect();
+        let vecs: Vec<Vec<f32>> = docs
+            .iter()
+            .map(|d| {
+                let mut v: Vec<f32> = d
+                    .7
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect();
+                norm(&mut v);
+                v
+            })
+            .collect();
+        let n = ids.len();
+        let ms = min_sim as f32;
+        let pairs: Vec<((i64, i64), f64)> = tauri::async_runtime::spawn_blocking(move || {
+            let mut out: Vec<((i64, i64), f64)> = Vec::new();
+            for i in 0..n {
+                // I k vicini più simili di i, sopra soglia.
+                let mut best: Vec<(usize, f32)> = Vec::new();
+                for j in 0..n {
+                    if i == j || vecs[i].len() != vecs[j].len() {
+                        continue;
+                    }
+                    let sim: f32 = vecs[i].iter().zip(vecs[j].iter()).map(|(a, b)| a * b).sum();
+                    if sim >= ms {
+                        best.push((j, sim));
+                    }
+                }
+                best.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                for (j, sim) in best.into_iter().take(k) {
+                    let key = if ids[i] < ids[j] { (ids[i], ids[j]) } else { (ids[j], ids[i]) };
+                    out.push((key, f64::from(sim)));
+                }
+            }
+            out
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        for (key, sim) in pairs {
+            let w = edge_map.entry(key).or_insert(sim);
+            if sim > *w {
+                *w = sim;
+            }
+        }
+    }
     for chunk in docs.chunks(CHUNK) {
+        if scope.is_some() {
+            break; // archi già calcolati dentro l'ambito
+        }
         let conn = state.db.lock();
         let mut knn = conn
             .prepare_cached(
@@ -2363,9 +2483,25 @@ pub struct NodePos {
 pub fn save_graph_positions(
     state: State<'_, AppState>,
     positions: Vec<NodePos>,
+    collection_id: Option<i64>,
 ) -> Result<(), String> {
     let mut conn = state.db.lock();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // Un layout costruito DENTRO una raccolta va su una tabella sua: scriverlo
+    // su graph_positions scombinerebbe in silenzio la mappa dell'intera libreria.
+    if let Some(cid) = collection_id {
+        {
+            let mut st = tx
+                .prepare("INSERT OR REPLACE INTO graph_positions_scoped (scope_id, document_id, x, y) VALUES (?1, ?2, ?3, ?4)")
+                .map_err(|e| e.to_string())?;
+            for p in positions.iter().take(4000) {
+                if p.id > 0 && p.x.is_finite() && p.y.is_finite() {
+                    let _ = st.execute(params![cid, p.id, p.x as f64, p.y as f64]);
+                }
+            }
+        }
+        return tx.commit().map_err(|e| e.to_string());
+    }
     {
         let mut doc_stmt = tx
             .prepare("INSERT OR REPLACE INTO graph_positions (document_id, x, y) VALUES (?1, ?2, ?3)")
