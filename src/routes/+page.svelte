@@ -632,7 +632,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.41";
+  const APP_VERSION = "0.9.42";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -7296,7 +7296,8 @@
             <li>Icona <strong>Progetti (LaTeX)</strong> sulla barra. Ogni progetto è una <strong>cartella vera</strong> (in <code>projects/</code> nei dati dell'app) con <code>main.tex</code> e <code>refs.bib</code>. Crea da <strong>5 modelli</strong> (articolo, paper a due colonne, relazione/tesi, presentazione beamer, minimale) oppure «<strong>Da .zip…</strong>» con un template scaricato — i link a <strong>Overleaf / IEEE / ACM / Springer / Elsevier</strong> sono lì sotto.</li>
             <li><strong>Cita</strong>: cerca nella tua libreria e inserisce <code>\cite&#123;citekey&#125;</code> al cursore. <strong>Sincronizza bibliografia</strong>: riscrive <code>refs.bib</code> con tutta la libreria. Salvataggio automatico (o <kbd>Ctrl</kbd>+<kbd>S</kbd>).</li>
             <li><strong>Compila</strong> usa il compilatore di sistema: <strong>Tectonic</strong>, oppure <strong>MiKTeX</strong> (via texify, non serve Perl), oppure latexmk. L'anteprima del PDF appare accanto all'editor; se il PDF esce con avvisi lo vedi comunque, col log a un clic. Senza compilatore: <code>winget install Tectonic.Tectonic</code>.</li>
-          </ul>
+                      <li><strong>Sincronizzare con Overleaf</strong>: con il ponte Git di Overleaf (funzione a pagamento) puoi fare <code>git clone</code> della cartella del progetto dal <strong>Terminale</strong> integrato e lavorare con <code>git pull</code>/<code>git push</code> — le credenziali restano nel gestore di Windows, mai dentro Scriptorium. Il pulsante <strong>+ .gitignore</strong> prepara la cartella escludendo i prodotti della compilazione. Senza il ponte, si passa dallo <code>.zip</code> (vedi la FAQ su Overleaf).</li>
+</ul>
         </div>
 
         <div class="helpsec">
@@ -7343,6 +7344,14 @@
           <dl class="faq">
             <dt>…aggiungere il PDF che ho appena scaricato col browser?</dt>
             <dd>Copia il link del PDF e torna su Scriptorium: compare «Aggancia». Oppure punta la Cartella sorvegliata su Download: entra da solo.</dd>
+            <dt>…lavorare con Overleaf: si può scrivere direttamente nel mio progetto online?</dt>
+            <dd>
+              <strong>Non tramite Scriptorium, ed è una scelta voluta.</strong> Overleaf non ha un'API pubblica per scrivere nei progetti: l'unica via sarebbe custodire le tue credenziali (o un token valido su <em>tutti</em> i tuoi progetti) dentro l'app — una responsabilità che non vogliamo prenderci, oltre che contraria alle condizioni d'uso di Overleaf. Le due strade pulite sono:
+              <ul>
+                <li><strong>Con il ponte Git</strong> (funzione a pagamento di Overleaf): su Overleaf apri Menu → Git e copia l'indirizzo, genera un token dalle impostazioni dell'account, poi dal <strong>Terminale</strong> di Scriptorium fai <code>git clone</code> nella cartella dei progetti e lavora con <code>git pull</code>/<code>git push</code>. Le credenziali restano nel gestore di Windows: Scriptorium non le vede mai. Il pulsante <strong>+ .gitignore</strong> nei Progetti prepara la cartella. Limiti dichiarati da Overleaf: solo il ramo principale, e un push può spostare o perdere commenti e revisioni.</li>
+                <li><strong>Senza il ponte</strong> (piano gratuito): su Overleaf Menu → Download → Source per lo <code>.zip</code>, poi «Importa → Da .zip…» nei Progetti; per tornare indietro carichi lo zip su Overleaf. È manuale, ma è un limite di Overleaf, non nostro.</li>
+              </ul>
+            </dd>
             <dt>…importare la bibliografia di un progetto Overleaf e scaricarne i paper?</dt>
             <dd>Scarica da Overleaf lo <strong>zip del progetto</strong> (Menu → Download → Source) e usa <strong>Importa → «Da bibliografia o progetto…»</strong>: legge il <code>.bib</code> <em>dentro</em> l'archivio (non serve scompattarlo), crea una scheda per ogni voce citata, e — se rispondi sì alle due domande — <strong>cerca e scarica i PDF open-access</strong> (arXiv, Unpaywall, OpenAlex, Semantic Scholar) e mette tutto in una <strong>raccolta</strong> dedicata. Serve la ricerca online attiva. Poi, sulla selezione, «Tag automatici (AI)» per i tag. Per importare anche i PDF che stanno nell'archivio e il grafo delle citazioni del <em>tuo</em> lavoro, usa in aggiunta «Importa → Progetto LaTeX (.zip)…».</dd>
             <dt>…portare la mia libreria da Zotero, Mendeley o EndNote?</dt>

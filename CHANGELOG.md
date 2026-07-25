@@ -2,6 +2,10 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.42 — Overleaf: la via sicura, spiegata
+- **Nuova FAQ «lavorare con Overleaf»**: si può scrivere nel proprio progetto online, ma **non facendo passare le credenziali da Scriptorium** — Overleaf non ha un'API pubblica di scrittura e l'unica alternativa sarebbe custodire un token valido su *tutti* i progetti dell'account. La guida spiega le due strade pulite: il **ponte Git** di Overleaf usato dal **Terminale** integrato (le credenziali restano nel gestore di Windows, l'app non le vede mai) e, per il piano gratuito, il giro dello `.zip`.
+- **Nuovo pulsante «+ .gitignore»** nei Progetti: prepara la cartella per la sincronizzazione con Git escludendo i prodotti della compilazione.
+
 ## 0.9.41 — Una Costellazione per ogni raccolta
 - **Nuovo: la mappa semantica ristretta a una raccolta.** Dall'**Archivio**, sul pannello di una raccolta, il pulsante «Costellazione» apre il grafo dei *soli* paper di quella raccolta (sotto-raccolte comprese). Le **vicinanze vengono ricalcolate al suo interno**: senza questo, i vicini di ogni paper cadrebbero fuori raccolta e la mappa uscirebbe senza collegamenti.
 - Il **layout della raccolta è salvato a parte**: spostare i nodi lì dentro non tocca più le posizioni della mappa dell'intera libreria. Una barra in alto ricorda l'ambito attivo e permette di tornare alla vista generale.

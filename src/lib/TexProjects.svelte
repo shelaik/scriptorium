@@ -41,6 +41,37 @@
     }
   });
 
+  /** `.gitignore` adatto a LaTeX: serve a chi sincronizza la cartella del
+   *  progetto con Git — per esempio col ponte Git di Overleaf — e non vuole
+   *  versionare i prodotti della compilazione. */
+  const GITIGNORE = [
+    "# Prodotti della compilazione LaTeX (Tectonic/latexmk)",
+    "main.pdf",
+    "*.aux",
+    "*.log",
+    "*.out",
+    "*.bbl",
+    "*.blg",
+    "*.fls",
+    "*.fdb_latexmk",
+    "*.synctex.gz",
+    "*.toc",
+    "_build/",
+    "*.tmp-write",
+    "",
+  ].join("\n");
+  async function addGitignore() {
+    if (!current) return;
+    try {
+      await writeProjectFile(current, ".gitignore", GITIGNORE);
+      files = await projectFiles(current);
+      errorMsg = "";
+      syncMsg = ".gitignore scritto nella cartella del progetto";
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
   /** Extensions we can open in the text editor (the rest is preview-only). */
   const TEXT_EXT = ["tex", "bib", "sty", "cls", "bst", "txt", "md"];
 
@@ -448,6 +479,13 @@
       </div>
       <button class="tbtn ghost" onclick={() => current && revealProjectDir(current)}>
         Apri cartella
+      </button>
+      <button
+        class="tbtn ghost"
+        onclick={addGitignore}
+        title="Scrive un .gitignore adatto a LaTeX — utile se sincronizzi questa cartella con Git (per esempio col ponte Git di Overleaf)"
+      >
+        + .gitignore
       </button>
     {/if}
   </aside>
