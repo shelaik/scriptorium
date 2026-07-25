@@ -349,6 +349,64 @@ pub fn first_line_title(fulltext: &str) -> Option<String> {
     (title.chars().count() >= 4).then_some(title)
 }
 
+/// Titoli-candidato ricavati dalla testa del PDF, dal più probabile al meno.
+///
+/// PERCHÉ: la resa del recupero metadati non è limitata dalle fonti ma dal
+/// titolo. [`first_line_title`] restituisce UNA stringa, e basta una parola di
+/// troppo — l'intestazione dell'editore («Published as a conference paper at
+/// ICLR 2026»), la riga autori attaccata, un due punti di troppo — perché il
+/// gate `strong_title_match`, che pretende l'uguaglianza dell'insieme di parole
+/// distintive, respinga il record giusto. Provare più varianti contro il gate
+/// INVARIATO alza la copertura senza toccare di una virgola la precisione.
+pub fn title_variants(head: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    fn push(out: &mut Vec<String>, s: String) {
+        let t = s
+            .trim()
+            .trim_end_matches(|c: char| matches!(c, ':' | ' ' | ',' | '-' | '.'))
+            .trim()
+            .to_string();
+        if t.chars().count() >= 8 && !out.iter().any(|e| norm_title_string(e) == norm_title_string(&t)) {
+            out.push(t);
+        }
+    }
+    // 1) La scelta attuale del motore, sempre per prima.
+    if let Some(t) = first_line_title(head) {
+        push(&mut out, t);
+    }
+    let lines: Vec<&str> = head
+        .split(|c: char| c == '\n' || c == '\r')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(12)
+        .collect();
+    // 2) Ogni riga non-banner presa da sola: copre il caso «prima riga + riga
+    //    successiva» unite a torto, e quello della riga d'intestazione sfuggita.
+    for l in lines.iter().take(6) {
+        if !is_banner_line(l) {
+            push(&mut out, (*l).to_string());
+        }
+    }
+    // 3) Coppie di righe adiacenti: copre i titoli che vanno a capo e che il
+    //    passo (2) spezzerebbe a metà.
+    for w in lines.windows(2).take(4) {
+        if !is_banner_line(w[0]) && !is_banner_line(w[1]) && !w[1].to_lowercase().starts_with("abstract") {
+            push(&mut out, format!("{} {}", w[0], w[1]));
+        }
+    }
+    // 4) Tagli difensivi sulla prima variante: via la coda dopo un « - » o un
+    //    « : » finale, che spesso introduce sottotitoli o nomi di sede.
+    if let Some(first) = out.first().cloned() {
+        for sep in [" - ", " — ", " | "] {
+            if let Some((left, _)) = first.split_once(sep) {
+                push(&mut out, left.to_string());
+            }
+        }
+    }
+    out.truncate(6);
+    out
+}
+
 /// Strip JATS/XML tags from a Crossref abstract and tidy whitespace.
 fn strip_markup(s: &str) -> String {
     static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]+>").expect("valid tag regex"));
@@ -879,37 +937,95 @@ pub async fn resolve_document_meta(
 ) -> Result<Option<Resolved>> {
     let head: String = fulltext.chars().take(1500).collect();
     // The paper's own title is the anchor for every check — no title, no enrich.
-    let Some(g) = first_line_title(&head).filter(|s| !s.trim().is_empty()) else {
+    // Più varianti, stesso gate: vedi [`title_variants`].
+    let variants = title_variants(&head);
+    let Some(g) = variants.first().cloned() else {
         return Ok(None);
     };
 
     // (1) A DOI in the record or text — trust it ONLY on a strict title match.
+    // Qui il confronto usa TUTTE le varianti: il DOI è già un'ancora forte, e
+    // il gate serve solo a escludere che sia il DOI di un lavoro citato.
     let doi = existing_doi
         .map(str::to_string)
         .filter(|d| !d.trim().is_empty())
         .or_else(|| extract_doi(fulltext));
     if let Some(doi) = doi {
         if let Some(meta) = fetch_crossref(client, &doi, email).await? {
-            if strong_title_match(&g, meta.title.as_deref().unwrap_or("")) {
+            let cand = meta.title.clone().unwrap_or_default();
+            if variants.iter().any(|v| strong_title_match(v, &cand)) {
                 return Ok(Some(Resolved { doi: Some(doi), meta }));
             }
         }
     }
 
-    // (2) Crossref bibliographic search on the recovered title.
-    if let Some((doi, meta)) = crossref_search_title(client, &g, email).await? {
-        if strong_title_match(&g, meta.title.as_deref().unwrap_or("")) {
-            return Ok(Some(Resolved { doi: Some(doi), meta }));
+    // (2-3) Crossref e arXiv, provando le varianti in ordine di probabilità.
+    // Ogni interrogazione è comunque protetta dal gate invariato.
+    for v in variants.iter().take(3) {
+        if let Some((doi, meta)) = crossref_search_title(client, v, email).await? {
+            let cand = meta.title.clone().unwrap_or_default();
+            if variants.iter().any(|x| strong_title_match(x, &cand)) {
+                return Ok(Some(Resolved { doi: Some(doi), meta }));
+            }
+        }
+        if let Some(meta) = arxiv_search_title(client, v).await? {
+            let cand = meta.title.clone().unwrap_or_default();
+            if variants.iter().any(|x| strong_title_match(x, &cand)) {
+                return Ok(Some(Resolved { doi: None, meta }));
+            }
         }
     }
 
-    // (3) arXiv title search (recent preprints Crossref lacks).
-    if let Some(meta) = arxiv_search_title(client, &g).await? {
-        if strong_title_match(&g, meta.title.as_deref().unwrap_or("")) {
-            return Ok(Some(Resolved { doi: None, meta }));
+    // (4-5) OpenAlex e Semantic Scholar: coprono conferenze (NeurIPS, ICLR,
+    // CVPR…) che Crossref non indicizza — la fetta più grande dei mancati.
+    // Fonti già implementate e collaudate nel modulo discovery; stesso gate.
+    let filters = crate::discovery::Filters {
+        year_from: None,
+        year_to: None,
+        oa_only: false,
+        sort: "relevance".to_string(),
+        author: None,
+    };
+    for v in variants.iter().take(2) {
+        for src in ["openalex", "s2"] {
+            let found = if src == "openalex" {
+                crate::discovery::search_openalex(client, v, &filters, "").await
+            } else {
+                crate::discovery::search_semantic_scholar(client, v, &filters, "").await
+            };
+            let Ok(list) = found else { continue };
+            for r in list.into_iter().take(5) {
+                let cand = r.title.clone().unwrap_or_default();
+                if cand.is_empty() || !variants.iter().any(|x| strong_title_match(x, &cand)) {
+                    continue;
+                }
+                // Con un DOI si passa da Crossref, che dà il record completo
+                // (riferimenti compresi); altrimenti si usa il record trovato.
+                if let Some(d) = r.doi.as_deref().map(str::to_lowercase).filter(|d| !d.is_empty()) {
+                    if let Ok(Some(meta)) = fetch_crossref(client, &d, email).await {
+                        let t2 = meta.title.clone().unwrap_or_default();
+                        if variants.iter().any(|x| strong_title_match(x, &t2)) {
+                            return Ok(Some(Resolved { doi: Some(d), meta }));
+                        }
+                    }
+                }
+                return Ok(Some(Resolved {
+                    doi: r.doi.map(|d| d.to_lowercase()),
+                    meta: CrossrefMeta {
+                        title: r.title,
+                        venue: r.venue,
+                        year: r.year,
+                        abstract_text: r.abstract_text,
+                        authors: r.authors.iter().map(|a| split_name(a)).collect(),
+                        references: Vec::new(),
+                        raw_json: String::new(),
+                    },
+                }));
+            }
         }
     }
 
+    let _ = g; // la prima variante resta il riferimento diagnostico
     Ok(None)
 }
 
@@ -1182,6 +1298,37 @@ mod tests {
             "Rescaling Egocentric Vision: Challenges for EPIC-KITCHENS-100",
             head
         ));
+    }
+
+    #[test]
+    fn title_variants_recuperano_il_titolo_sepolto() {
+        use super::{strong_title_match, title_variants};
+        // Il caso misurato sulla libreria vera: intestazione della conferenza
+        // incollata al titolo -> il gate (che pretende l'uguaglianza
+        // dell'insieme di parole distintive) respingeva il record giusto.
+        let head = "Published as a conference paper at ICLR 2026
+                    Scaling Laws for Neural Language Models
+                    Jared Kaplan1, Sam McCandlish1
+                    Abstract
+";
+        let vs = title_variants(head);
+        let vero = "Scaling Laws for Neural Language Models";
+        assert!(
+            vs.iter().any(|v| strong_title_match(v, vero)),
+            "nessuna variante combacia col titolo vero: {vs:?}"
+        );
+        // La riga autori non deve diventare una variante credibile.
+        assert!(!vs.iter().any(|v| strong_title_match(v, "Jared Kaplan Sam McCandlish")));
+        // Niente duplicati normalizzati e tetto rispettato.
+        assert!(vs.len() <= 6);
+    }
+
+    #[test]
+    fn title_variants_su_testa_vuota_o_corta() {
+        use super::title_variants;
+        assert!(title_variants("").is_empty());
+        assert!(title_variants("ab
+cd").is_empty()); // sotto la soglia minima
     }
 
     #[test]

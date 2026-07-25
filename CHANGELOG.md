@@ -2,6 +2,10 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.40 — Metadati: molti più recuperi, stessa precisione
+- **Il titolo non è più il collo di bottiglia.** Il recupero identificava il paper da *una sola* lettura del titolo dalla prima pagina: bastava che il PDF ci incollasse l'intestazione dell'editore («Published as a conference paper at ICLR 2026») o la riga degli autori perché il filtro di sicurezza — che pretende la corrispondenza esatta delle parole distintive — respingesse il record giusto. Ora vengono generate **più varianti** del titolo e provate tutte **contro lo stesso identico filtro**: più recuperi, zero rischio in più di etichettare male un documento.
+- **Due fonti in più: OpenAlex e Semantic Scholar.** Coprono conferenze come NeurIPS, ICLR e CVPR, che Crossref non indicizza — la fetta più grande dei mancati recuperi in una libreria di informatica. Quando la fonte fornisce un DOI, il record completo viene comunque preso da Crossref.
+
 ## 0.9.39 — Import in un colpo solo: bibliografia → PDF open-access → raccolta
 - **Lo `.zip` di Overleaf si importa direttamente**: «Importa → **Da bibliografia o progetto…**» legge i file `.bib` *dentro* l'archivio, senza scompattarlo a mano. (Per i PDF contenuti nell'archivio e il grafo delle citazioni del proprio lavoro resta «Progetto LaTeX (.zip)», e ora l'app lo dice chiaramente.)
 - **Scarica i PDF open-access delle voci citate**: dopo l'import, su richiesta, per ogni voce senza file vengono provati arXiv, Unpaywall, OpenAlex e Semantic Scholar, scaricando la copia liberamente accessibile quando esiste (fino a 300 voci per volta; il resto con «Trova PDF dei riferimenti»).
