@@ -19,8 +19,71 @@ pub struct ParsedRef {
     /// Local PDF path hints (BibTeX `file`, RIS `L1`/`L4`, or a `.pdf` URL). May be
     /// absolute, relative to the export folder, or carry only a usable basename.
     pub files: Vec<String>,
+    /// Identificatore arXiv (dal campo `eprint` con `archivePrefix=arXiv`, o da un
+    /// URL arxiv.org). È la chiave che permette il download deterministico del PDF
+    /// quando manca il DOI — il caso tipico delle bibliografie di informatica.
+    pub arxiv_id: Option<String>,
     /// Citation key / record id, used only as a fallback synthetic path.
     pub key: String,
+}
+
+/// Ricava l'id arXiv da un testo qualsiasi (URL, note, campo eprint).
+/// La versione (`v2`) viene tolta: due voci che citano v1 e v2 sono lo stesso
+/// lavoro e devono collassare sullo stesso identificativo.
+pub(crate) fn arxiv_from_text(s: &str) -> Option<String> {
+    crate::metadata::extract_arxiv_ids(s, 1)
+        .into_iter()
+        .next()
+        .map(|id| strip_version(&id))
+}
+
+/// `2103.00020v2` → `2103.00020` (lascia intatti gli id vecchio stile).
+fn strip_version(id: &str) -> String {
+    match id.rsplit_once('v') {
+        Some((base, ver)) if !ver.is_empty() && ver.chars().all(|c| c.is_ascii_digit()) => base.to_string(),
+        _ => id.to_string(),
+    }
+}
+
+/// Forma canonica nuda `NNNN.NNNNN` (con eventuale `vN`), senza il marcatore
+/// «arXiv» che `extract_arxiv_ids` pretende: è così che i `.bib` scrivono
+/// `eprint = {2103.00020}`.
+fn bare_arxiv_id(s: &str) -> Option<String> {
+    let t = s.trim().trim_start_matches("arXiv:").trim_start_matches("arxiv:").trim();
+    let core = t.split_once('v').map(|(a, _)| a).unwrap_or(t);
+    let (y, n) = core.split_once('.')?;
+    let ok = y.len() == 4
+        && y.chars().all(|c| c.is_ascii_digit())
+        && (4..=5).contains(&n.len())
+        && n.chars().all(|c| c.is_ascii_digit());
+    ok.then(|| core.to_string())
+}
+
+/// Un `eprint` è un id arXiv se lo dice `archivePrefix`/`eprinttype`, oppure se
+/// ha già la forma canonica `NNNN.NNNNN` (molti export omettono il prefisso).
+pub(crate) fn arxiv_from_eprint(eprint: Option<&str>, prefix: Option<&str>) -> Option<String> {
+    let e = eprint?.trim();
+    if e.is_empty() {
+        return None;
+    }
+    let declared = prefix.map(|p| p.trim().to_ascii_lowercase());
+    let says_arxiv = declared.as_deref().is_some_and(|p| p.contains("arxiv"));
+    // Un prefisso dichiarato NON-arXiv (es. HAL) esclude: mai indovinare.
+    if declared.is_some() && !says_arxiv {
+        return None;
+    }
+    // `arXiv:2103.00020v2` (marcato) → poi la forma nuda `2103.00020`.
+    if let Some(id) = arxiv_from_text(e) {
+        return Some(id);
+    }
+    if let Some(id) = bare_arxiv_id(e) {
+        return Some(id);
+    }
+    // Vecchio stile `math/0211159`: accettato solo se il prefisso lo dichiara.
+    if says_arxiv && e.contains('/') && e.len() <= 24 && !e.contains(' ') {
+        return Some(e.trim_start_matches("arXiv:").to_string());
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +169,15 @@ fn bib_entry_to_parsed(e: &crate::bibtex::BibEntry) -> Option<ParsedRef> {
     }
     dedup_keep_order(&mut keywords);
     let files = get("file").map(|v| parse_bibtex_file_field(&v)).unwrap_or_default();
+    // arXiv: `eprint` + `archivePrefix`/`eprinttype`, oppure un URL arxiv.org,
+    // oppure la nota (`note = {arXiv:2103.00020}`) usata da parecchi export.
+    let arxiv_id = arxiv_from_eprint(
+        get("eprint").as_deref(),
+        get("archiveprefix").or_else(|| get("eprinttype")).as_deref(),
+    )
+    .or_else(|| url.as_deref().and_then(arxiv_from_text))
+    .or_else(|| get("note").as_deref().and_then(arxiv_from_text))
+    .or_else(|| get("journal").as_deref().and_then(arxiv_from_text));
     if title.is_none() && doi.is_none() {
         return None;
     }
@@ -119,6 +191,7 @@ fn bib_entry_to_parsed(e: &crate::bibtex::BibEntry) -> Option<ParsedRef> {
         authors,
         keywords,
         files,
+        arxiv_id,
         key: e.key.clone(),
     })
 }
@@ -363,6 +436,13 @@ impl RisRecord {
         }
         dedup_keep_order(&mut self.keywords);
         dedup_keep_order(&mut self.files);
+        // RIS non ha un campo eprint: l'id arXiv, se c'è, sta in un URL o nelle note.
+        let arxiv_id = self
+            .url
+            .as_deref()
+            .and_then(arxiv_from_text)
+            .or_else(|| self.urls.iter().find_map(|u| arxiv_from_text(u)))
+            .or_else(|| self.abstract_text.as_deref().and_then(arxiv_from_text));
         Some(ParsedRef {
             title,
             doi,
@@ -373,6 +453,7 @@ impl RisRecord {
             authors,
             keywords: self.keywords,
             files: self.files,
+            arxiv_id,
             key: self.id.unwrap_or_default(),
         })
     }
@@ -449,16 +530,24 @@ fn csl_item_to_parsed(it: &serde_json::Value) -> Option<ParsedRef> {
         }
     }
     dedup_keep_order(&mut keywords);
+    let url = s("URL").or_else(|| s("url"));
+    // CSL-JSON: l'id arXiv arriva da `number`/`note`/URL a seconda dell'esportatore.
+    let arxiv_id = url
+        .as_deref()
+        .and_then(arxiv_from_text)
+        .or_else(|| s("number").as_deref().and_then(arxiv_from_text))
+        .or_else(|| s("note").as_deref().and_then(arxiv_from_text));
     Some(ParsedRef {
         title,
         doi,
-        url: s("URL").or_else(|| s("url")),
+        url,
         year,
         venue,
         abstract_text: s("abstract"),
         authors,
         keywords,
         files: Vec::new(), // CSL-JSON carries no file paths
+        arxiv_id,
         key: s("id").unwrap_or_default(),
     })
 }
@@ -519,6 +608,27 @@ fn dedup_keep_order(v: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn arxiv_da_eprint_e_url() {
+        use super::{arxiv_from_eprint, arxiv_from_text, parse, RefFormat};
+        // Il caso Overleaf tipico: eprint + archivePrefix.
+        assert_eq!(arxiv_from_eprint(Some("2103.00020"), Some("arXiv")), Some("2103.00020".into()));
+        assert_eq!(arxiv_from_eprint(Some("arXiv:2103.00020v2"), Some("arxiv")), Some("2103.00020".into()));
+        // Senza prefisso dichiarato ma con forma canonica: si accetta.
+        assert_eq!(arxiv_from_eprint(Some("2103.00020"), None), Some("2103.00020".into()));
+        // Un eprint di altra natura non deve passare per arXiv.
+        assert_eq!(arxiv_from_eprint(Some("hal-01234567"), Some("HAL")), None);
+        assert_eq!(arxiv_from_eprint(None, Some("arXiv")), None);
+        assert_eq!(arxiv_from_text("https://arxiv.org/abs/2401.12345"), Some("2401.12345".into()));
+        // End-to-end su una voce BibTeX reale senza DOI.
+        let refs = parse(
+            "@article{k, title={T}, author={A B}, eprint={2103.00020}, archivePrefix={arXiv}}",
+            RefFormat::Bibtex,
+        );
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].arxiv_id.as_deref(), Some("2103.00020"));
+    }
+
     use super::*;
 
     #[test]

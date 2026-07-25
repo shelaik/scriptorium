@@ -75,14 +75,28 @@ export interface RefImportSummary {
   duplicates: number;
   tags_applied: number;
   dois_resolved: number;
+  /** PDF open-access scaricati dopo l'import (opzione «trova i PDF»). */
+  pdfs_downloaded: number;
+  /** Raccolta in cui sono finite le voci importate, se richiesta. */
+  collection: string | null;
   errors: string[];
 }
 /** Import a bibliography exported by any reference manager (BibTeX/BibLaTeX, RIS,
  *  CSL-JSON): creates library items, attaches PDFs found in the entries' `file`
  *  field or in an optional export folder, and maps keywords to tags. If online
  *  discovery is on, recovers missing DOIs (title → Crossref). */
-export const importReferenceManager = (path: string, pdfDir?: string) =>
-  invoke<RefImportSummary>("import_reference_manager", { path, pdfDir: pdfDir ?? null });
+export const importReferenceManager = (
+  path: string,
+  pdfDir?: string,
+  findPdfs?: boolean,
+  collection?: string,
+) =>
+  invoke<RefImportSummary>("import_reference_manager", {
+    path,
+    pdfDir: pdfDir ?? null,
+    findPdfs: findPdfs ?? null,
+    collection: collection ?? null,
+  });
 
 export interface LatexImportSummary {
   imported: number;

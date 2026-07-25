@@ -4118,9 +4118,19 @@ fn bib_to_ref(e: &bibtex::BibEntry) -> Option<metadata::ResolvedRef> {
                 .collect()
         })
         .unwrap_or_default();
-    let path_id = match &doi {
-        Some(d) => format!("ref:doi:{d}"),
-        None => {
+    // Come in parsed_to_ref: un id arXiv vale quanto un DOI per trovare il PDF.
+    // Solo fonti che parlano DELL'articolo: eprint+archivePrefix e un URL
+    // arxiv.org. Mai `note`/`journal`: un «see also arXiv:1706.03762» darebbe
+    // l'identita' di un lavoro CITATO (classe mislabel che l'app combatte).
+    let arxiv_id = refimport::arxiv_from_eprint(
+        get("eprint").as_deref(),
+        get("archiveprefix").or_else(|| get("eprinttype")).as_deref(),
+    )
+    .or_else(|| get("url").as_deref().filter(|u| u.contains("arxiv.org")).and_then(refimport::arxiv_from_text));
+    let path_id = match (&doi, &arxiv_id) {
+        (Some(d), _) => format!("ref:doi:{d}"),
+        (None, Some(a)) => format!("ref:arxiv:{a}"), // id grezzo: vedi parsed_to_ref
+        (None, None) => {
             let token = if !e.key.is_empty() {
                 e.key.clone()
             } else {
@@ -4189,6 +4199,10 @@ pub struct RefImportSummary {
     pub tags_applied: usize,
     /// DOIs recovered online (title → Crossref) for entries that had none.
     pub dois_resolved: usize,
+    /// PDF open-access scaricati dopo l'import (opzione «scarica i PDF»).
+    pub pdfs_downloaded: usize,
+    /// Raccolta creata/usata per le voci importate, se richiesta.
+    pub collection: Option<String>,
     pub errors: Vec<String>,
 }
 
@@ -4212,9 +4226,16 @@ fn parsed_to_ref(p: &refimport::ParsedRef, doi: Option<String>) -> Option<metada
     if p.title.is_none() && doi.is_none() {
         return None;
     }
-    let path_id = match &doi {
-        Some(d) => format!("ref:doi:{d}"),
-        None => {
+    // L'ordine conta: `ref:arxiv:<id>` sblocca in «Trova PDF» il ramo
+    // deterministico (arxiv.org/pdf/<id>) invece della sola ricerca per titolo.
+    let path_id = match (&doi, &p.arxiv_id) {
+        (Some(d), _) => format!("ref:doi:{d}"),
+        // NIENTE safe_component: l'id e' gia' validato per forma e i caratteri
+        // `.`/`/` sono legali nel percorso sintetico (come in ref:doi:). Sanificarlo
+        // produrrebbe 2103_00020 -> URL arXiv morto e chiave di dedup divergente
+        // da quella scritta da metadata (ref:arxiv:<id> grezzo).
+        (None, Some(a)) => format!("ref:arxiv:{a}"),
+        (None, None) => {
             let token = if !p.key.is_empty() { p.key.clone() } else { p.title.clone().unwrap_or_default() };
             format!("ref:import:{}", safe_component(&token))
         }
@@ -4393,37 +4414,213 @@ pub async fn import_reference_manager(
     app: AppHandle,
     path: String,
     pdf_dir: Option<String>,
+    find_pdfs: Option<bool>,
+    collection: Option<String>,
 ) -> Result<RefImportSummary, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        pulse::start(&app, "biblio", "Import da gestore bibliografico");
-        let r = import_reference_manager_inner(&app, &path, pdf_dir.as_deref());
-        match &r {
-            Ok(s) => pulse::ok(
-                &app,
-                "biblio",
-                "Import da gestore bibliografico",
-                &format!("{}: {} voci, {} nuove, {} PDF agganciati, {} doppioni", s.format, s.entries, s.added, s.pdfs_attached, s.duplicates),
+    pulse::start(&app, "biblio", "Import da gestore bibliografico");
+    let r = import_reference_manager_chain(app.clone(), path, pdf_dir, find_pdfs, collection).await;
+    match &r {
+        Ok(s) => pulse::ok(
+            &app,
+            "biblio",
+            "Import da gestore bibliografico",
+            &format!(
+                "{}: {} voci, {} nuove, {} PDF agganciati, {} scaricati, {} doppioni",
+                s.format, s.entries, s.added, s.pdfs_attached, s.pdfs_downloaded, s.duplicates
             ),
-            Err(e) => pulse::err(&app, "biblio", "Import da gestore bibliografico", e),
-        }
-        r
-    })
-    .await
-    .map_err(|e| format!("Task fallito: {e}"))?
+        ),
+        Err(e) => pulse::err(&app, "biblio", "Import da gestore bibliografico", e),
+    }
+    r
 }
 
+/// La catena completa: import → (opz.) raccolta → (opz.) download dei PDF
+/// open-access delle voci rimaste senza file. Ogni fase è indipendente: se il
+/// download fallisce, l'import resta valido (gli errori finiscono nel riepilogo).
+async fn import_reference_manager_chain(
+    app: AppHandle,
+    path: String,
+    pdf_dir: Option<String>,
+    find_pdfs: Option<bool>,
+    collection: Option<String>,
+) -> Result<RefImportSummary, String> {
+    let app2 = app.clone();
+    let (mut summary, touched) = tauri::async_runtime::spawn_blocking(move || {
+        import_reference_manager_inner(&app2, &path, pdf_dir.as_deref())
+    })
+    .await
+    .map_err(|e| format!("Task fallito: {e}"))??;
+
+    // 1) Raccolta: crea (o riusa) e mette dentro tutto ciò che l'import ha toccato.
+    if let Some(name) = collection.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        // Fase NON fatale: l'import e' gia' committato, un intoppo qui non deve
+        // trasformare un import riuscito in un errore per l'utente.
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let cid: Result<i64, String> = (|| {
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM collections WHERE name = ?1 AND is_smart = 0 ORDER BY id LIMIT 1",
+                    params![name],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            match existing {
+                Some(id) => Ok(id),
+                None => {
+                    conn.execute("INSERT INTO collections (name, is_smart) VALUES (?1, 0)", params![name])
+                        .map_err(|e| e.to_string())?;
+                    Ok(conn.last_insert_rowid())
+                }
+            }
+        })();
+        match cid {
+            Ok(cid) => {
+                for id in &touched {
+                    let _ = conn.execute(
+                        "INSERT OR IGNORE INTO collection_members (collection_id, document_id) VALUES (?1, ?2)",
+                        params![cid, id],
+                    );
+                }
+                summary.collection = Some(name.to_string());
+            }
+            Err(e) => summary.errors.push(format!("Raccolta «{name}» non creata: {e}")),
+        }
+        drop(conn);
+    }
+
+    // 2) PDF open-access per le voci senza file (usa lo stesso motore di «Trova PDF»).
+    if find_pdfs.unwrap_or(false) && !touched.is_empty() {
+        // Tetto come nelle altre fasi online (cfr. il recupero DOI): una
+        // bibliografia enorme non deve diventare un'attesa di ore.
+        const MAX_LOOKUPS: usize = 300;
+        let (online, missing): (bool, Vec<i64>) = {
+            let state = app.state::<AppState>();
+            let conn = state.db.lock();
+            let online = setting(&conn, "discovery_enabled").as_deref() == Some("1");
+            let ids = touched
+                .iter()
+                .copied()
+                .filter(|id| {
+                    conn.query_row(
+                        "SELECT path FROM documents WHERE id = ?1 AND deleted_at IS NULL",
+                        params![id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .map(|p| p.starts_with("ref:"))
+                    .unwrap_or(false)
+                })
+                .collect();
+            (online, ids)
+        };
+        if !online {
+            // UN messaggio chiaro, non N errori identici uno per voce.
+            summary.errors.push(
+                "PDF non cercati: la ricerca online è disattivata (Impostazioni → Ricerca online)".into(),
+            );
+        } else {
+            let total = missing.len().min(MAX_LOOKUPS);
+            if missing.len() > MAX_LOOKUPS {
+                summary.errors.push(format!(
+                    "Cercati i PDF delle prime {MAX_LOOKUPS} voci su {}: rilancia «Trova PDF dei riferimenti» per le altre",
+                    missing.len()
+                ));
+            }
+            for (i, id) in missing.into_iter().take(MAX_LOOKUPS).enumerate() {
+                match find_pdf(app.clone(), id).await {
+                    // "attached" e' l'unico esito in cui un file e' stato scritto.
+                    Ok(s) if s == "attached" => summary.pdfs_downloaded += 1,
+                    Ok(_) => {}
+                    Err(e) => {
+                        if summary.errors.len() < 25 {
+                            summary.errors.push(format!("PDF non trovato (id {id}): {e}"));
+                        }
+                    }
+                }
+                pulse::progress(&app, "biblio", "Ricerca PDF open-access", (i + 1) as u64, total as u64);
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            let _ = app.emit("library-changed", ());
+        }
+    }
+    // Lo specchio va riallineato ORA: prima i membri erano tutti solo-riferimento
+    // (esclusi dalla proiezione) e la cartella sarebbe rimasta vuota.
+    if summary.collection.is_some() || summary.pdfs_downloaded > 0 {
+        crate::mirror::request_sync(&app);
+    }
+    Ok(summary)
+}
+
+/// Legge la bibliografia da un `.zip` (progetto Overleaf/LaTeX): concatena tutti
+/// i `.bib` contenuti, così l'utente può dare direttamente l'archivio scaricato
+/// senza scompattarlo a mano. Limiti difensivi come nell'import LaTeX.
+fn bib_text_from_zip(zip_path: &str) -> Result<String, String> {
+    const MAX_ENTRIES: usize = 50_000;
+    const MAX_BIB_BYTES: u64 = 32 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("Apertura .zip: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Lettura .zip: {e}"))?;
+    let mut out = String::new();
+    let mut total: u64 = 0;
+    for i in 0..archive.len().min(MAX_ENTRIES) {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.is_dir() || entry.size() > MAX_BIB_BYTES {
+            continue;
+        }
+        // enclosed_name(): rifiuta percorsi assoluti e `..` (guardia zip-slip).
+        let Some(rel) = entry.enclosed_name().map(|r| r.to_path_buf()) else { continue };
+        if rel.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref() != Some("bib") {
+            continue;
+        }
+        // `.take()` sul lettore: `entry.size()` è la dimensione DICHIARATA
+        // nell'header, non ci si fida da sola. E lettura lossy: un .bib latin-1
+        // non deve sparire in silenzio (diventerebbe «nessun .bib», fuorviante).
+        use std::io::Read;
+        let mut buf: Vec<u8> = Vec::new();
+        if (&mut entry).take(MAX_BIB_BYTES).read_to_end(&mut buf).is_ok() {
+            total += buf.len() as u64;
+            out.push_str(&String::from_utf8_lossy(&buf));
+            out.push('\n');
+            if total >= MAX_TOTAL_BYTES {
+                break;
+            }
+        }
+    }
+    if out.trim().is_empty() {
+        return Err("Nessun file .bib trovato nell'archivio (uno .zip di Overleaf deve contenerne almeno uno)".into());
+    }
+    Ok(out)
+}
+
+/// Restituisce il riepilogo e gli id dei documenti creati o toccati (servono
+/// alla catena: raccolta e ricerca dei PDF open-access).
 fn import_reference_manager_inner(
     app: &AppHandle,
     path: &str,
     pdf_dir: Option<&str>,
-) -> Result<RefImportSummary, String> {
-    let mut text = std::fs::read_to_string(path).map_err(|e| format!("Lettura file: {e}"))?;
+) -> Result<(RefImportSummary, Vec<i64>), String> {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str());
+    let mut text = if ext.map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false) {
+        bib_text_from_zip(path)?
+    } else {
+        std::fs::read_to_string(path).map_err(|e| format!("Lettura file: {e}"))?
+    };
     if text.starts_with('\u{feff}') {
         text.remove(0); // strip a UTF-8 BOM so CSL-JSON parses and the first RIS tag is seen
     }
-    let ext = Path::new(path).extension().and_then(|e| e.to_str());
-    let format = refimport::detect_format(ext, &text);
+    // Dentro uno .zip la bibliografia è sempre BibTeX: non far decidere l'estensione.
+    let format = if ext.map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false) {
+        refimport::RefFormat::Bibtex
+    } else {
+        refimport::detect_format(ext, &text)
+    };
     let refs = refimport::parse(&text, format);
+    let mut touched: Vec<i64> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
     let state = app.state::<AppState>();
     let data_dir = app.path().app_data_dir().map_err(|e| format!("app_data_dir: {e}"))?;
@@ -4441,6 +4638,8 @@ fn import_reference_manager_inner(
         duplicates: 0,
         tags_applied: 0,
         dois_resolved: 0,
+        pdfs_downloaded: 0,
+        collection: None,
         errors: Vec::new(),
     };
 
@@ -4614,11 +4813,14 @@ fn import_reference_manager_inner(
 
         if let Some(id) = doc_id {
             summary.tags_applied += apply_tags(&conn, id, &r.keywords);
+            if seen_ids.insert(id) {
+                touched.push(id);
+            }
         }
     }
 
     let _ = app.emit("library-changed", ());
-    Ok(summary)
+    Ok((summary, touched))
 }
 
 /// Summary of a LaTeX-project (.zip) import.

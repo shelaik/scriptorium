@@ -632,7 +632,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.38";
+  const APP_VERSION = "0.9.39";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -1303,28 +1303,67 @@
     const file = await open({
       multiple: false,
       filters: [
-        { name: "Bibliografia (BibTeX / RIS / CSL-JSON)", extensions: ["bib", "bibtex", "ris", "json", "csljson", "csl", "txt"] },
+        {
+          name: "Bibliografia o progetto (BibTeX / RIS / CSL-JSON / .zip)",
+          extensions: ["bib", "bibtex", "ris", "json", "csljson", "csl", "txt", "zip"],
+        },
       ],
     });
     if (typeof file !== "string") return;
+    // Uno .zip (progetto Overleaf/LaTeX): la bibliografia si legge da dentro.
+    // Va detto che di quell'archivio si prende SOLO la bibliografia: per i PDF
+    // e il grafo delle citazioni del proprio lavoro c'è «Progetto LaTeX (.zip)».
+    const isZip = file.toLowerCase().endsWith(".zip");
+    if (
+      isZip &&
+      !(await confirmAsk(
+        "Dello .zip verrà letta solo la BIBLIOGRAFIA (i file .bib): ogni voce citata diventa una scheda in libreria.\n\nI PDF contenuti nell'archivio e il grafo delle citazioni del tuo lavoro si importano invece con «Importa → Progetto LaTeX (.zip)…».",
+        "Va bene, procedi",
+        false,
+      ))
+    ) {
+      return;
+    }
     // Optionally point at the export's PDF folder (Zotero "Export Files", etc.) so
     // attachments get pulled in. Skippable — if the file itself carries PDF paths,
     // those are used automatically.
     let pdfDir: string | undefined;
-    if (await confirmAsk(
-      "Indicare una cartella con i PDF esportati?\n\nServe solo se la tua esportazione tiene i PDF in una cartella a parte (es. Zotero «Esporta file»). Se i percorsi dei PDF sono già dentro il file, puoi saltare.",
-      "Scegli cartella…",
-      false,
-    )) {
+    if (
+      !isZip &&
+      (await confirmAsk(
+        "Indicare una cartella con i PDF esportati?\n\nServe solo se la tua esportazione tiene i PDF in una cartella a parte (es. Zotero «Esporta file»). Se i percorsi dei PDF sono già dentro il file, puoi saltare.",
+        "Scegli cartella…",
+        false,
+      ))
+    ) {
       const dir = await open({ directory: true });
       if (typeof dir === "string") pdfDir = dir;
     }
-    status = "Importo la bibliografia…";
+    // Catena opzionale 1: scarica i PDF open-access delle voci senza file.
+    const findPdfs = await confirmAsk(
+      "Cercare online i PDF open-access delle voci senza file?\n\nDopo l'import, per ogni voce priva di PDF vengono provati arXiv, Unpaywall, OpenAlex e Semantic Scholar, scaricando la copia liberamente accessibile quando esiste. Serve la ricerca online attiva; su bibliografie lunghe può richiedere qualche minuto.",
+      "Sì, cerca i PDF",
+      false,
+    );
+    // Catena opzionale 2: raccogli tutto in una raccolta col nome del file
+    // (un nome vuoto — es. file «.bib» — ricadrebbe in un no-op silenzioso).
+    const base =
+      (file.split(/[\\/]/).pop() ?? "").replace(/\.[^.]+$/, "").trim() || "Bibliografia importata";
+    const collection = (await confirmAsk(
+      `Mettere le voci importate in una raccolta «${base}»?\n\nUtile per ritrovarle insieme nell'Archivio (e per i suggerimenti semantici). Potrai rinominarla lì.`,
+      "Sì, raccogli",
+      false,
+    ))
+      ? base
+      : undefined;
+    status = findPdfs ? "Importo la bibliografia e cerco i PDF…" : "Importo la bibliografia…";
     try {
-      const res = await importReferenceManager(file, pdfDir);
+      const res = await importReferenceManager(file, pdfDir, findPdfs, collection);
       const parts = [`${res.added} aggiunti`];
       if (res.pdfs_attached) parts.push(`${res.pdfs_attached} con PDF`);
+      if (res.pdfs_downloaded) parts.push(`${res.pdfs_downloaded} PDF scaricati`);
       if (res.tags_applied) parts.push(`${res.tags_applied} tag`);
+      if (res.collection) parts.push(`raccolta «${res.collection}»`);
       if (res.duplicates) parts.push(`${res.duplicates} già presenti`);
       if (res.dois_resolved) parts.push(`${res.dois_resolved} DOI recuperati`);
       if (res.errors.length) parts.push(`${res.errors.length} errori`);
@@ -3390,7 +3429,7 @@
         hint: "PDF, BibTeX, identificatori, URL",
         children: [
           { id: "gi-pdf", label: "PDF dal disco…", action: () => importViaDialog() },
-          { id: "gi-bib", label: "Da gestore bibliografico…", hint: "Zotero, Mendeley, EndNote… (.bib/.ris/CSL-JSON) + PDF + tag", action: () => importRefManagerDialog() },
+          { id: "gi-bib", label: "Da bibliografia o progetto…", hint: "Zotero/Mendeley/EndNote (.bib/.ris/CSL-JSON) o uno .zip Overleaf: crea le schede, scarica i PDF open-access, tag e raccolta", action: () => importRefManagerDialog() },
           { id: "gi-tex", label: "Progetto LaTeX (.zip)…", hint: "I tuoi paper: PDF + bibliografia", action: () => importLatexDialog() },
           { id: "gi-id", label: "Per identificatore…", hint: "DOI / arXiv / ISBN / PMID", action: () => (idModal = true) },
           { id: "gi-url", label: "Da URL…", hint: "Scarica un PDF da un link", action: () => openUrlModal() },
@@ -7278,6 +7317,8 @@
           <dl class="faq">
             <dt>…aggiungere il PDF che ho appena scaricato col browser?</dt>
             <dd>Copia il link del PDF e torna su Scriptorium: compare «Aggancia». Oppure punta la Cartella sorvegliata su Download: entra da solo.</dd>
+            <dt>…importare la bibliografia di un progetto Overleaf e scaricarne i paper?</dt>
+            <dd>Scarica da Overleaf lo <strong>zip del progetto</strong> (Menu → Download → Source) e usa <strong>Importa → «Da bibliografia o progetto…»</strong>: legge il <code>.bib</code> <em>dentro</em> l'archivio (non serve scompattarlo), crea una scheda per ogni voce citata, e — se rispondi sì alle due domande — <strong>cerca e scarica i PDF open-access</strong> (arXiv, Unpaywall, OpenAlex, Semantic Scholar) e mette tutto in una <strong>raccolta</strong> dedicata. Serve la ricerca online attiva. Poi, sulla selezione, «Tag automatici (AI)» per i tag. Per importare anche i PDF che stanno nell'archivio e il grafo delle citazioni del <em>tuo</em> lavoro, usa in aggiunta «Importa → Progetto LaTeX (.zip)…».</dd>
             <dt>…portare la mia libreria da Zotero, Mendeley o EndNote?</dt>
             <dd>Nel gestore fai <strong>Esporta</strong> in <strong>BibTeX/BibLaTeX, RIS o CSL-JSON</strong> (per avere anche i PDF, in Zotero spunta «Esporta file»). Poi barra → Importa → <strong>Da gestore bibliografico…</strong>, scegli il file e — se i PDF stanno in una cartella a parte — indicala quando te lo chiede. Metadati, PDF e parole chiave (→ tag) entrano insieme, senza doppioni.</dd>
             <dt>…sistemare un paper arrivato senza titolo o con metadati sbagliati?</dt>

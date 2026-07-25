@@ -2,6 +2,12 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.39 — Import in un colpo solo: bibliografia → PDF open-access → raccolta
+- **Lo `.zip` di Overleaf si importa direttamente**: «Importa → **Da bibliografia o progetto…**» legge i file `.bib` *dentro* l'archivio, senza scompattarlo a mano. (Per i PDF contenuti nell'archivio e il grafo delle citazioni del proprio lavoro resta «Progetto LaTeX (.zip)», e ora l'app lo dice chiaramente.)
+- **Scarica i PDF open-access delle voci citate**: dopo l'import, su richiesta, per ogni voce senza file vengono provati arXiv, Unpaywall, OpenAlex e Semantic Scholar, scaricando la copia liberamente accessibile quando esiste (fino a 300 voci per volta; il resto con «Trova PDF dei riferimenti»).
+- **Raccolta dedicata**: sempre su richiesta, tutte le voci importate finiscono in una raccolta col nome del file — pronta per l'Archivio e i suggerimenti semantici.
+- **Le voci arXiv senza DOI ora si scaricano davvero**: `eprint`/`archivePrefix` e i link `arxiv.org` vengono riconosciuti (BibTeX, RIS e CSL-JSON), così il PDF si prende dall'indirizzo esatto invece di sperare in una ricerca per titolo. Per precisione, l'identificativo si legge solo da campi che parlano *dell'articolo* — mai da note che citano altri lavori.
+
 ## 0.9.38 — I tag automatici funzionano di nuovo
 - **Corretto: «Tag automatici (AI)» falliva sempre** su chi usa un modello «con ragionamento» (gpt-oss, qwen3, deepseek-r1 e simili). La funzione chiedeva al modello appena **80 token** — il budget più piccolo dell'app, mentre «Riassumi» ne ha 360 — e il ragionamento li consumava tutti lasciando la risposta vuota: il risultato era l'errore «Il modello non ha prodotto tag utilizzabili» su ogni documento. Ora il budget è adeguato, la lettura della risposta **tollera** ragionamento (`<think>…`), recinti markdown, elenchi JSON e preamboli, c'è **un tentativo di recupero** se il modello sfora, e gli errori **dicono la causa** invece di un messaggio unico e muto.
 - **Corretto (silenzioso, peggiore): tag-spazzatura in libreria.** Con i modelli che stampano il ragionamento nel testo, parole come `<think>` o `okay` finivano tra i tag senza alcun errore. Ora vengono scartate, insieme a frasi, preamboli e duplicati.
