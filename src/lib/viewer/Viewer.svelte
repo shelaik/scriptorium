@@ -22,7 +22,8 @@
   import { extractTable, exportTable, aiCleanTable, extractRegionText, writeTextFile, writeBinaryFile, aiExplain, formulaToLatex, mathocrStatus, formulaToLatexAi, tableFromImageAi, textFromImageAi, getAiSettings, aiListModels, extractTableModel, tablestructStatus } from "$lib/api";
   import { escapeLatex, textToLatex, tableToLatex, tableToMarkdown, tableToCsv, richMdToPlain, richMdToLatex } from "$lib/latex";
   import { renderMathString } from "$lib/math";
-  import { save } from "@tauri-apps/plugin-dialog";
+  import { save, open as openDialog } from "@tauri-apps/plugin-dialog";
+  import { relinkDocument, relinkApplyMapping, MISSING_FILE_MARKER, type RelinkResult } from "$lib/api";
   import ShareMenu from "$lib/ShareMenu.svelte";
   import RadialMenu from "$lib/RadialMenu.svelte";
   import type { RadialItem } from "$lib/radial";
@@ -38,6 +39,7 @@
     onClose,
     onSendToNote,
     onOpenNotes,
+    onRelinked,
   }: {
     id: number;
     title: string;
@@ -56,6 +58,8 @@
     ) => void;
     /** Close the reader and jump to the Appunti (.md notes) surface; handled by +page. */
     onOpenNotes?: () => void;
+    /** A moved PDF was re-pointed: the library list is stale (path changed). */
+    onRelinked?: () => void;
   } = $props();
 
   // ----- Zoom memory: remember the last used scale per document (localStorage) -----
@@ -576,6 +580,7 @@
   async function load() {
     loading = true;
     error = "";
+    missingPath = "";
     try {
       const buf = (await invoke("read_pdf", { id })) as ArrayBuffer;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -607,9 +612,66 @@
       await renderPages();
       if (restorePage > 1) scrollToPage(restorePage, "instant");
     } catch (e) {
-      error = "Impossibile aprire il PDF: " + e;
+      const s = String(e);
+      // A moved file is recoverable: show the path we expected and offer to
+      // re-point the document, instead of a dead-end error.
+      if (s.includes(MISSING_FILE_MARKER)) {
+        missingPath = s.slice(s.indexOf(MISSING_FILE_MARKER) + MISSING_FILE_MARKER.length).trim();
+        error = "";
+      } else {
+        error = "Impossibile aprire il PDF: " + e;
+      }
     } finally {
       loading = false;
+    }
+  }
+
+  // ----- Il PDF non è più al percorso salvato: ricollegalo -----
+  let missingPath = $state("");
+  let relinkBusy = $state(false);
+  let relinkInfo = $state<RelinkResult | null>(null);
+  let relinkMsg = $state("");
+
+  async function pickAndRelink() {
+    if (relinkBusy) return;
+    // Occupato PRIMA del dialogo: altrimenti due clic aprono due selettori.
+    relinkBusy = true;
+    relinkMsg = "";
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+        title: "Dov'è finito questo PDF?",
+      });
+      if (typeof picked !== "string") return;
+      const res = await relinkDocument(id, picked);
+      relinkInfo = res;
+      missingPath = "";
+      if (res.had_hash && !res.hash_match) {
+        relinkMsg = "Collegato — attenzione: il file scelto non è identico all'originale.";
+      }
+      await load(); // the document opens for real now
+      onRelinked?.();
+    } catch (e) {
+      relinkMsg = "Non riesco a ricollegare: " + e;
+    } finally {
+      relinkBusy = false;
+    }
+  }
+
+  async function applyRelinkMapping() {
+    const info = relinkInfo;
+    if (!info?.old_prefix || !info.new_prefix || relinkBusy) return;
+    relinkBusy = true;
+    try {
+      const n = await relinkApplyMapping(info.old_prefix, info.new_prefix);
+      relinkMsg = n === 1 ? "Ricollegato anche 1 altro file." : `Ricollegati anche ${n} file.`;
+      relinkInfo = null;
+      onRelinked?.();
+    } catch (e) {
+      relinkMsg = "Non riesco: " + e;
+    } finally {
+      relinkBusy = false;
     }
   }
 
@@ -2341,6 +2403,44 @@
 
   {#if loading}<div class="msg">Caricamento…</div>{/if}
   {#if error}<div class="msg err">{error}</div>{/if}
+  {#if missingPath}
+    <div class="msg relink">
+      <p class="rtitle">Il PDF non è più dov'era</p>
+      <p class="rpath">{missingPath}</p>
+      <p class="rhint">
+        L'hai spostato o rinominato fuori da Scriptorium. Indicami dov'è ora: appunti, evidenziazioni,
+        tag e nota restano tutti al loro posto.
+      </p>
+      <div class="racts">
+        <button class="rbtn primary" disabled={relinkBusy} onclick={pickAndRelink}>
+          {relinkBusy ? "…" : "Ritrova il file…"}
+        </button>
+        <button class="rbtn" onclick={onClose}>Chiudi</button>
+      </div>
+      {#if relinkMsg}<p class="rmsg">{relinkMsg}</p>{/if}
+    </div>
+  {/if}
+  {#if relinkInfo && relinkInfo.mappable > 0}
+    <div class="msg relink low">
+      <p class="rtitle">Altri {relinkInfo.mappable} file sono nella stessa cartella</p>
+      <p class="rhint">
+        Hai spostato un'intera cartella: posso ricollegarli tutti allo stesso modo, verificando
+        l'impronta di ciascun file — chi non corrisponde viene lasciato stare.
+      </p>
+      <div class="racts">
+        <button class="rbtn primary" disabled={relinkBusy} onclick={applyRelinkMapping}>
+          {relinkBusy ? "…" : `Ricollega gli altri ${relinkInfo.mappable}`}
+        </button>
+        <button class="rbtn" onclick={() => (relinkInfo = null)}>No, grazie</button>
+      </div>
+      {#if relinkMsg}<p class="rmsg">{relinkMsg}</p>{/if}
+    </div>
+  {:else if relinkMsg && !missingPath}
+    <div class="msg relink low">
+      <p class="rmsg">{relinkMsg}</p>
+      <div class="racts"><button class="rbtn" onclick={() => (relinkMsg = "")}>Ho capito</button></div>
+    </div>
+  {/if}
   {#if notice}<div class="toast">{notice}</div>{/if}
 
   {#if selBtn}
@@ -3271,6 +3371,42 @@
     font-size: 15px;
   }
   .msg.err { color: var(--danger); max-width: 60%; text-align: center; }
+  /* Il PDF non è più al percorso salvato: pannello di recupero, non un errore. */
+  .msg.relink {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 22px;
+    max-width: 520px;
+    text-align: center;
+    box-shadow: 0 8px 28px rgba(44, 46, 53, 0.22);
+    z-index: 60;
+  }
+  /* Il seguito (ricollega anche gli altri) non deve coprire il PDF appena aperto. */
+  .msg.relink.low { top: auto; bottom: 26px; transform: translateX(-50%); }
+  .msg.relink .rtitle { margin: 0 0 6px; color: var(--text); font-size: 15px; font-weight: 600; }
+  .msg.relink .rpath {
+    margin: 0 0 10px;
+    color: var(--faint);
+    font-size: 12px;
+    font-family: ui-monospace, Consolas, monospace;
+    word-break: break-all;
+  }
+  .msg.relink .rhint { margin: 0 0 14px; color: var(--dim); font-size: 13px; line-height: 1.45; }
+  .msg.relink .rmsg { margin: 12px 0 0; color: var(--dim); font-size: 12.5px; }
+  .msg.relink .racts { display: flex; gap: 8px; justify-content: center; }
+  .msg.relink .rbtn {
+    background: var(--field);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 7px 14px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .msg.relink .rbtn:hover:not(:disabled) { border-color: var(--accent); }
+  .msg.relink .rbtn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .msg.relink .rbtn:disabled { opacity: 0.6; cursor: default; }
   .toast {
     position: fixed;
     left: 50%;

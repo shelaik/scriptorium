@@ -15,6 +15,11 @@
     searchDocuments,
     searchNotes,
     type NoteHit,
+    searchAnnotations,
+    annotationCounts,
+    type AnnotationHit,
+    relinkDocument,
+    relinkApplyMapping,
     relatedDocuments,
     ragIndexStatus,
     buildRagIndex,
@@ -261,6 +266,9 @@
   });
   let results = $state<DocumentItem[]>([]);
   let noteResults = $state<NoteHit[]>([]); // standalone-note hits for the current search
+  let annoResults = $state<AnnotationHit[]>([]); // highlight/comment hits, library-wide
+  /** documentId → how many annotations it has (badge on the card). */
+  let annoCounts = $state<Record<number, number>>({});
   let thumbs = $state<Record<number, string>>({});
   let rebuildingThumbs = $state(false);
   let tags = $state<Tag[]>([]);
@@ -640,7 +648,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.46";
+  const APP_VERSION = "0.9.47";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -818,6 +826,7 @@
       searching = false;
       results = [];
       noteResults = [];
+      annoResults = [];
       return;
     }
     searchTimer = setTimeout(async () => {
@@ -833,10 +842,17 @@
       } finally {
         if (myId === searchSeq) searching = false;
       }
-      // Notes are a best-effort, separate source — never block the doc results.
+      // Notes and highlights are best-effort, separate sources — never block the
+      // doc results, and never let one source's failure hide the other's hits.
       try {
         const nr = await searchNotes(q);
         if (myId === searchSeq) noteResults = nr;
+      } catch {
+        /* ignore */
+      }
+      try {
+        const ar = await searchAnnotations(q);
+        if (myId === searchSeq) annoResults = ar;
       } catch {
         /* ignore */
       }
@@ -960,6 +976,15 @@
       facets = await libraryFacets();
     } catch {
       /* counts are advisory; leave the previous values on error */
+    }
+    // Highlight counts for the card badge: one grouped query, not one per card.
+    try {
+      const pairs = await annotationCounts();
+      const map: Record<number, number> = {};
+      for (const [docId, n] of pairs) map[docId] = n;
+      annoCounts = map;
+    } catch {
+      /* badges are advisory */
     }
   }
 
@@ -2666,6 +2691,49 @@
     }
   }
 
+  // Re-point a document whose PDF was moved outside Scriptorium. Same command as
+  // the reader's recovery panel; here it works down the "file mancanti" list, and
+  // after the first success it offers to fix the whole moved folder at once.
+  let relinkBusy = $state<number | null>(null);
+  async function relinkFromCare(id: number, title: string | null) {
+    if (relinkBusy != null) return;
+    // Segna occupato PRIMA di aprire il dialogo: due clic rapidi aprivano due
+    // selettori di file sullo stesso documento.
+    relinkBusy = id;
+    try {
+      const picked = await open({
+        multiple: false,
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+        title: `Dov'è finito «${title ?? "questo PDF"}»?`,
+      });
+      if (typeof picked !== "string") return;
+      const res = await relinkDocument(id, picked);
+      status =
+        res.had_hash && !res.hash_match
+          ? "Ricollegato ✓ — attenzione: il file scelto non è identico all'originale"
+          : "Ricollegato ✓";
+      await loadDocs();
+      if (careModal && careTab === "salute") await openHealth();
+      if (res.mappable > 0 && res.old_prefix && res.new_prefix) {
+        const ok = await confirmAsk(
+          `Altri ${res.mappable} file mancanti sono nella stessa cartella spostata. Li ricollego tutti? Verifico l'impronta di ciascuno: chi non corrisponde resta com'è.`,
+          "Ricollega tutti",
+          false,
+        );
+        if (ok) {
+          const n = await relinkApplyMapping(res.old_prefix, res.new_prefix);
+          status = n === 1 ? "Ricollegato anche 1 altro file ✓" : `Ricollegati anche ${n} file ✓`;
+          await loadDocs();
+          if (careModal && careTab === "salute") await openHealth();
+        }
+      }
+    } catch (e) {
+      status = "Non riesco a ricollegare: " + e;
+    } finally {
+      relinkBusy = null;
+    }
+  }
+
   // ----- Citation gap-finder -----
   let gaps = $state<GapItem[]>([]);
   let gapsLoading = $state(false);
@@ -2911,28 +2979,78 @@
   }
 
   /** Tool-bar icon click: open the group's dropdown, or run it if it's a leaf. */
-  function openTool(e: MouseEvent, g: RadialItem) {
+  async function openTool(e: MouseEvent, g: RadialItem) {
     e.stopPropagation();
     if (g.disabled) return; // defensive: a disabled top-level icon does nothing
     sortPop = false;
     indexPop = false;
     if (g.children && g.children.length) {
       if (toolMenu?.id === g.id) {
-        toolMenu = null;
+        closeToolMenu(true);
         return;
       }
       const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
       toolMenu = { id: g.id, x: r.left, y: r.bottom + 6 };
+      // Con la tastiera il menu si apriva "vuoto": il fuoco restava sull'icona e
+      // le frecce scorrevano la pagina sotto. Ora la prima voce prende il fuoco
+      // (col mouse non si vede l'anello, :focus-visible non scatta).
+      await tick();
+      toolMenuItems()[0]?.focus();
     } else {
-      toolMenu = null;
+      closeToolMenu(false);
       g.action?.();
+    }
+  }
+
+  /** The enabled entries of the open tool menu, in visual order. */
+  function toolMenuItems(): HTMLButtonElement[] {
+    return Array.from(document.querySelectorAll<HTMLButtonElement>(".toolmenu .medit:not(:disabled)"));
+  }
+
+  /** Close the dropdown; `restore` puts the focus back on the icon that opened it
+   *  (mandatory after Escape, or the keyboard user is left nowhere). */
+  function closeToolMenu(restore: boolean) {
+    const id = toolMenu?.id;
+    toolMenu = null;
+    // Sincrono di proposito: l'icona è sempre nel DOM (solo il menu è
+    // condizionale) e con Tab il fuoco va rimesso PRIMA che il browser lo
+    // sposti, altrimenti riparte dall'inizio della pagina.
+    if (restore && id) {
+      document.querySelector<HTMLButtonElement>(`.toolbar button[data-tool="${CSS.escape(id)}"]`)?.focus();
+    }
+  }
+
+  /** Arrow-key navigation inside an open tool menu. */
+  function toolMenuKey(e: KeyboardEvent) {
+    const items = toolMenuItems();
+    if (!items.length) return;
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const go = (i: number) => {
+      e.preventDefault();
+      items[(i + items.length) % items.length]?.focus();
+    };
+    switch (e.key) {
+      case "ArrowDown": go(at + 1); break;
+      case "ArrowUp": go(at < 0 ? items.length - 1 : at - 1); break;
+      case "Home": go(0); break;
+      case "End": go(items.length - 1); break;
+      case "Escape":
+        e.preventDefault();
+        e.stopPropagation(); // la cascata globale chiuderebbe anche altro
+        closeToolMenu(true);
+        break;
+      case "Tab":
+        // Rimetti il fuoco sull'icona e lascia proseguire il Tab da lì: il
+        // fuoco non deve MAI finire sul body (ripartirebbe da capo).
+        closeToolMenu(true);
+        break;
     }
   }
 
   /** Run a tool-menu entry (ignoring disabled ones) and close the menu. */
   function runTool(it: RadialItem) {
     if (it.disabled) return;
-    toolMenu = null;
+    closeToolMenu(false);
     it.action?.();
   }
 
@@ -5265,6 +5383,9 @@
         class:labelled={TOOL_LABELLED.has(g.id)}
         title={g.hint ? g.label + " — " + g.hint : g.label}
         aria-label={g.label}
+        data-tool={g.id}
+        aria-haspopup={g.children?.length ? "menu" : undefined}
+        aria-expanded={g.children?.length ? toolMenu?.id === g.id : undefined}
         disabled={g.disabled}
         onclick={(e) => openTool(e, g)}
       >
@@ -6203,6 +6324,28 @@
             </div>
           </section>
         {/if}
+        {#if query.trim() && annoResults.length && view !== "map"}
+          <section class="noteresults">
+            <h2 class="shelfh">Evidenziazioni ({annoResults.length})</h2>
+            <div class="notehits">
+              {#each annoResults as a (a.id)}
+                <button
+                  class="notehit anno"
+                  style={a.color ? `--annodot:${a.color}` : ""}
+                  onclick={() => openById(a.document_id, a.page)}
+                  title="Apri il documento alla pagina {a.page}"
+                >
+                  <span class="nhtitle">
+                    <span class="annodot" aria-hidden="true"></span>
+                    {a.doc_title ?? "Senza titolo"} · p. {a.page}
+                  </span>
+                  <span class="nhsnip">{a.snippet || a.quote || a.note || ""}</span>
+                  {#if a.note && a.quote}<span class="nhnote">✎ {a.note}</span>{/if}
+                </button>
+              {/each}
+            </div>
+          </section>
+        {/if}
         {#if importErrors.length}
           <div class="imperr">
             <span><b>{importErrors.length}</b> file non importati o senza testo:</span>
@@ -6267,8 +6410,12 @@
         {:else if displayed.length === 0}
           <div class="empty">
             {#if query.trim()}
-              {#if noteResults.length}
-                <p class="big">Nessun documento</p><p>Ma {noteResults.length === 1 ? "c'è 1 appunto" : `ci sono ${noteResults.length} appunti`} qui sopra che corrispond{noteResults.length === 1 ? "e" : "ono"}.</p>
+              {#if noteResults.length || annoResults.length}
+                {@const bits = [
+                  noteResults.length ? (noteResults.length === 1 ? "1 appunto" : `${noteResults.length} appunti`) : "",
+                  annoResults.length ? (annoResults.length === 1 ? "1 evidenziazione" : `${annoResults.length} evidenziazioni`) : "",
+                ].filter(Boolean)}
+                <p class="big">Nessun documento</p><p>Ma qui sopra {bits.length === 1 && !bits[0].startsWith("1 ") ? "ci sono" : bits.length > 1 ? "ci sono" : "c'è"} {bits.join(" e ")} che corrispond{bits.length === 1 && bits[0].startsWith("1 ") ? "e" : "ono"}.</p>
               {:else}
                 <p class="big">Nessun risultato</p><p>Prova un'altra ricerca o cambia modalità.</p>
               {/if}
@@ -6316,6 +6463,7 @@
                   {#if d.year || d.venue}<p class="venue">{[d.venue, d.year].filter(Boolean).join(" · ")}</p>{/if}
                   {#if d.citekey && !isBare(d)}<button type="button" class="ckey" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}
                   {#if d.has_summary}<span class="aisum" title="Riassunto AI già presente — lo trovi in «Modifica metadati» (il batch AI salta questo documento)">✦ AI</span>{/if}
+                  {#if annoCounts[d.id]}<span class="annobadge" title="{annoCounts[d.id]} evidenziazioni: cercale da qui, la ricerca guarda anche dentro le tue note sul PDF">✎ {annoCounts[d.id]}</span>{/if}
                   {#if isBare(d)}<button class="metamiss" title="Cerca online la scheda giusta per QUESTO documento e scegli tu quale applicare" onclick={(e) => { e.stopPropagation(); metaFindId = d.id; }}>ⓘ recupera i metadati…</button>{/if}
                   {#if d.pub_status}<div class="badgerow">{@render pubBadge(d.pub_status, d.paper_url)}</div>{/if}
                   {#if d.github_url}
@@ -6444,6 +6592,7 @@
       onClose={() => { openDoc = null; openDocPage = null; }}
       onSendToNote={(content, page, pos, opts) => openSendToNote(openDoc, { content, page, collapse: !opts?.code && !opts?.raw, label: opts?.label, code: opts?.code, raw: opts?.raw }, pos)}
       onOpenNotes={() => { openDoc = null; openDocPage = null; openNotesView(); }}
+      onRelinked={() => { void loadDocs(); if (careModal) void openCare(careTab); }}
     />
     {/key}
   {/if}
@@ -6461,20 +6610,21 @@
 
   {#if toolMenu}
     {@const grp = buildGlobalRadial().find((g) => g.id === toolMenu?.id)}
-    <div class="menu toolmenu" use:clamp={{ x: toolMenu.x, y: toolMenu.y }}>
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div class="menu toolmenu" role="menu" tabindex="-1" aria-label={grp?.label ?? "Menu"} use:clamp={{ x: toolMenu.x, y: toolMenu.y }} onkeydown={toolMenuKey}>
       {#if grp}<div class="mtitle">{grp.label}</div>{/if}
       {#each grp?.children ?? [] as it (it.id)}
         {#if it.children && it.children.length}
           <div class="menusec">{it.label}</div>
           {#each it.children as ch (ch.id)}
-            <button class="medit sub" class:danger={ch.danger} disabled={ch.disabled} title={ch.hint ?? null} onclick={() => runTool(ch)}>
+            <button class="medit sub" role="menuitem" class:danger={ch.danger} disabled={ch.disabled} title={ch.hint ?? null} onclick={() => runTool(ch)}>
               <span>{ch.label}</span>
               {#if ch.checked}<span class="mtick">✓</span>{/if}
               {#if ch.badge}<span class="mbadge">{ch.badge}</span>{/if}
             </button>
           {/each}
         {:else}
-          <button class="medit" class:danger={it.danger} disabled={it.disabled} title={it.hint ?? null} onclick={() => runTool(it)}>
+          <button class="medit" role="menuitem" class:danger={it.danger} disabled={it.disabled} title={it.hint ?? null} onclick={() => runTool(it)}>
             <span>{it.label}</span>
             {#if it.checked}<span class="mtick">✓</span>{/if}
             {#if it.badge}<span class="mbadge">{it.badge}</span>{/if}
@@ -7141,11 +7291,11 @@
           <p class="dimtext">Analisi in corso…</p>
         {:else if health}
           {@const cats = [
-            { label: "File mancanti sul disco", rows: health.missing_file, hint: "Il PDF non è più al percorso salvato.", ocr: false, find: false },
-            { label: "PDF senza testo estratto", rows: health.no_text, hint: "Probabili scansioni (immagine): non cercabili né indicizzabili. «OCR» riconosce il testo con il motore di Windows.", ocr: true, find: false },
-            { label: "Metadati incompleti", rows: health.no_metadata, hint: "Manca titolo, anno o autori. «✦ senza metadati» in alto li recupera in blocco; «Trova…» cerca i candidati online per il singolo documento e scegli tu.", ocr: false, find: true },
-            { label: "Senza incorporamento semantico", rows: health.no_embedding, hint: "Esclusi dalla ricerca semantica e da «Correlati».", ocr: false, find: false },
-            { label: "Senza copertina", rows: health.no_thumbnail, hint: "Nessuna anteprima generata.", ocr: false, find: false },
+            { label: "File mancanti sul disco", rows: health.missing_file, hint: "Il PDF non è più al percorso salvato: l'hai spostato o rinominato fuori da Scriptorium. «Ricollega…» ti fa indicare dov'è ora — appunti, evidenziazioni e tag restano; se hai spostato un'intera cartella, dopo il primo ti propongo di sistemare anche gli altri.", ocr: false, find: false, relink: true },
+            { label: "PDF senza testo estratto", rows: health.no_text, hint: "Probabili scansioni (immagine): non cercabili né indicizzabili. «OCR» riconosce il testo con il motore di Windows.", ocr: true, find: false, relink: false },
+            { label: "Metadati incompleti", rows: health.no_metadata, hint: "Manca titolo, anno o autori. «✦ senza metadati» in alto li recupera in blocco; «Trova…» cerca i candidati online per il singolo documento e scegli tu.", ocr: false, find: true, relink: false },
+            { label: "Senza incorporamento semantico", rows: health.no_embedding, hint: "Esclusi dalla ricerca semantica e da «Correlati».", ocr: false, find: false, relink: false },
+            { label: "Senza copertina", rows: health.no_thumbnail, hint: "Nessuna anteprima generata.", ocr: false, find: false, relink: false },
           ]}
           <p class="dimtext">{health.total} documenti analizzati.</p>
           {#each cats as cat (cat.label)}
@@ -7159,6 +7309,7 @@
                       <button class="hflink" onclick={() => openHealthRow(r.id)} title={r.path}>{r.title ?? r.path.split(/[\\/]/).pop()}</button>
                       {#if cat.ocr}<button class="hflink small" disabled={ocrBusy === r.id} onclick={() => runOcr(r.id)} title="Riconosci il testo della scansione (motore OCR di Windows) e rendilo cercabile">{ocrBusy === r.id ? "OCR…" : "OCR"}</button>{/if}
                       {#if cat.find}<button class="hflink small" onclick={() => (metaFindId = r.id)} title="Cerca online la scheda giusta (Crossref, arXiv, OpenAlex) e confermala tu">Trova…</button>{/if}
+                      {#if cat.relink}<button class="hflink small" disabled={relinkBusy === r.id} onclick={() => relinkFromCare(r.id, r.title)} title="Indica dov'è finito il file: la scheda con appunti, evidenziazioni e tag resta la stessa">{relinkBusy === r.id ? "…" : "Ricollega…"}</button>{/if}
                     </li>
                   {/each}
                 </ul>
@@ -7364,8 +7515,11 @@
               <tr><td><kbd>X</kbd> / <kbd>F</kbd></td><td>Seleziona / preferito</td></tr>
               <tr><td><kbd>Invio</kbd> / <kbd>Esc</kbd></td><td>Apri il lettore / chiudi</td></tr>
               <tr><td>Tasto destro</td><td>Menu radiale (documento, selezione o globale)</td></tr>
+              <tr><td><kbd>Tab</kbd> → <kbd>Invio</kbd></td><td>Raggiungi la barra strumenti e apri il suo menu</td></tr>
+              <tr><td><kbd>↑</kbd> <kbd>↓</kbd> nei menu</td><td>Scorri le voci — <kbd>Esc</kbd> chiude e torna all'icona</td></tr>
             </tbody>
           </table>
+          <p class="dimtext">Tutto è raggiungibile da tastiera: nell'<strong>Archivio</strong> lo schema delle raccolte prende il fuoco con <kbd>Tab</kbd>, poi <kbd>↑</kbd><kbd>↓</kbd> scorrono l'elenco, <kbd>→</kbd><kbd>←</kbd> entrano ed escono dalle sotto-raccolte e <kbd>Invio</kbd> apre la raccolta nella griglia.</p>
         </div>
 
         {:else if helpTab === "libreria"}
@@ -7459,6 +7613,8 @@
           <ul>
             <li><strong>Immersivo</strong>: la barra svanisce mentre leggi (torna col mouse), gli strumenti rari sono sotto <strong>⋯ Altro</strong>, lo zoom è ricordato per documento e si riparte dall'<strong>ultima pagina</strong>. «<strong>Riprendi lettura</strong>» (barra/radiale/palette) riapre l'ultimo PDF al punto in cui eri.</li>
             <li><strong>Annotazioni</strong> (<kbd>A</kbd>): evidenziazioni con colore e commento, o <strong>note puntuali</strong> «a spillo» — ancorate alla pagina. <strong>Nota del documento</strong> (<kbd>E</kbd>): un appunto per l'<em>intero</em> paper. Gli <strong>Appunti .md</strong> sono invece file indipendenti (scheda <em>Scrittura</em>).</li>
+            <li><strong>Ritrovare un'evidenziazione senza ricordare in quale paper era</strong>: la ricerca in alto guarda anche <em>dentro</em> le tue evidenziazioni e i tuoi commenti — i risultati compaiono nel gruppo «<strong>Evidenziazioni</strong>» e un clic apre il PDF alla pagina esatta. Il segno <strong>✎ n</strong> sulla scheda dice quante ne contiene, senza aprirla.</li>
+            <li><strong>Hai spostato o rinominato un PDF fuori da Scriptorium?</strong> Aprendolo trovi «<strong>Ritrova il file…</strong>»: indichi dov'è ora e la scheda resta intatta (evidenziazioni, tag, nota, citekey). Se hai spostato un'<em>intera cartella</em>, dopo il primo ti propone di sistemare in un colpo tutti gli altri, verificando l'impronta di ciascun file. Lo stesso pulsante è in <em>Cura della libreria → File mancanti sul disco</em>.</li>
             <li><strong>Cerca nel documento</strong> (<kbd>Ctrl</kbd>+<kbd>F</kbd>) in una fascia dedicata; <kbd>Invio</kbd>/<kbd>Maiusc</kbd>+<kbd>Invio</kbd> scorrono i risultati. Più indice, zoom/adatta, rotazione, due pagine, modalità notte.</li>
             <li><strong>Lente AI</strong>: seleziona un passaggio → <em>Spiega</em> / <em>Traduci</em> / <em>Chiedi</em> (AI locale attiva); la risposta si può salvare nella Nota del documento.</li>
             <li><strong>Manda agli Appunti</strong>: selezione → radiale o barretta dell'evidenziazione → scegli l'appunto → entra come citazione col riferimento <code>[[@citekey]]</code> in coda. Le <strong>fonti numerate</strong> di «Chiedi alla libreria» aprono il PDF alla pagina giusta.</li>
@@ -8981,6 +9137,8 @@
     border-bottom: 1px solid var(--border-soft); margin-bottom: 6px;
   }
   .medit:hover { background: var(--accent-soft); }
+  /* Le frecce spostano il fuoco fra le voci: senza questo lo spostamento era invisibile. */
+  .medit:focus-visible { background: var(--accent-soft); outline: 2px solid var(--accent); outline-offset: -2px; }
   /* Compact tool bar — global-radial groups surfaced as always-visible icons */
   .toolbar {
     display: flex; align-items: center; gap: 4px;
@@ -9293,6 +9451,14 @@
   .notehit:hover { border-color: var(--accent); background: var(--hover); }
   .nhtitle { font-family: var(--serif); font-size: 14px; color: var(--text); }
   .nhsnip { font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Esito di ricerca su un'evidenziazione: il pallino ne riporta il colore vero. */
+  .notehit.anno .nhtitle { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--dim); }
+  .notehit.anno .annodot {
+    width: 9px; height: 9px; border-radius: 2px; flex: 0 0 auto;
+    background: var(--annodot, var(--accent)); border: 1px solid rgba(0, 0, 0, 0.18);
+  }
+  .notehit.anno .nhsnip { font-family: var(--serif); font-size: 13.5px; color: var(--text); }
+  .notehit.anno .nhnote { font-size: 12px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .refdoibar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; }
   .refdoibar .dimtext { margin: 0; }
   .wikiintro code { background: var(--accent-soft); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
@@ -9415,6 +9581,14 @@
     vertical-align: 1px; cursor: help;
   }
   .aisum.inline { margin-left: 5px; padding: 0 4px; }
+  /* Quante evidenziazioni ha il documento: la sola traccia visibile senza aprirlo. */
+  .annobadge {
+    display: inline-block; margin-left: 6px; padding: 0 6px;
+    font-size: 10px; font-weight: 700; line-height: 15px;
+    color: var(--dim); background: var(--panel);
+    border: 1px solid var(--border-soft); border-radius: var(--r-pill);
+    vertical-align: 1px; cursor: help;
+  }
 
   /* ===== Sintesi sulla selezione + percorso di lettura ===== */
   .aidocmodal { width: 760px; }

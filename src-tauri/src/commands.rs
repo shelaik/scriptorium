@@ -1310,6 +1310,60 @@ mod meta_recover_tests {
     }
 }
 
+#[cfg(test)]
+mod relink_tests {
+    use super::{relink_prefixes, remap_path};
+
+    #[test]
+    fn learns_the_moved_folder() {
+        let (o, n) = relink_prefixes(r"C:\Vecchia\Papers\ml\a.pdf", r"D:\Nuova\Lib\ml\a.pdf").unwrap();
+        assert_eq!(o, r"C:\Vecchia\Papers");
+        assert_eq!(n, r"D:\Nuova\Lib");
+    }
+
+    #[test]
+    fn mixed_separators_and_case_are_the_same_path() {
+        let (o, n) = relink_prefixes("C:/Vecchia/Papers/ML/a.pdf", r"D:\Nuova\ml\a.pdf").unwrap();
+        assert_eq!(o, r"C:\Vecchia\Papers");
+        assert_eq!(n, r"D:\Nuova");
+    }
+
+    #[test]
+    fn a_rename_teaches_nothing_about_the_others() {
+        // Different file name: there is no folder rewrite we can trust, so the
+        // batch offer must not appear at all.
+        assert!(relink_prefixes(r"C:\A\vecchio.pdf", r"C:\A\nuovo.pdf").is_none());
+    }
+
+    #[test]
+    fn refuses_when_one_path_is_a_tail_of_the_other() {
+        // Would yield an empty prefix, i.e. "every document matches".
+        assert!(relink_prefixes(r"ml\a.pdf", r"D:\Nuova\ml\a.pdf").is_none());
+    }
+
+    #[test]
+    fn remaps_only_below_the_prefix() {
+        assert_eq!(
+            remap_path(r"C:\Vecchia\sub\b.pdf", r"C:\Vecchia", r"D:\Nuova").unwrap(),
+            r"D:\Nuova\sub\b.pdf"
+        );
+        // Case-insensitive like the filesystem it describes…
+        assert!(remap_path(r"c:\vecchia\b.pdf", r"C:\Vecchia", r"D:\Nuova").is_some());
+        // …but a sibling folder that merely starts with the same letters is NOT
+        // under the prefix (component-wise, never a raw string prefix).
+        assert!(remap_path(r"C:\VecchiaAltra\b.pdf", r"C:\Vecchia", r"D:\Nuova").is_none());
+        // The prefix itself has nothing to remap.
+        assert!(remap_path(r"C:\Vecchia", r"C:\Vecchia", r"D:\Nuova").is_none());
+    }
+
+    #[test]
+    fn survives_non_ascii_paths() {
+        let (o, n) = relink_prefixes(r"C:\Città\Papers\è.pdf", r"D:\Città\è.pdf").unwrap();
+        assert_eq!(o, r"C:\Città\Papers");
+        assert_eq!(n, r"D:\Città");
+    }
+}
+
 /// Read a document's raw PDF bytes for the in-app viewer (efficient binary IPC).
 #[tauri::command]
 pub fn read_pdf(state: State<'_, AppState>, id: i64) -> Result<tauri::ipc::Response, String> {
@@ -1322,8 +1376,278 @@ pub fn read_pdf(state: State<'_, AppState>, id: i64) -> Result<tauri::ipc::Respo
         .map_err(|e| e.to_string())?
     };
     let path = path.ok_or_else(|| "document not found".to_string())?;
+    if path.starts_with("ref:") {
+        return Err("Questa è una scheda bibliografica senza PDF: usa «Trova PDF» per allegarne uno".into());
+    }
+    // A moved/renamed file is a recoverable situation, not a generic IO failure:
+    // the marker lets the reader offer "ritrova il file" instead of a dead end.
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("{MISSING_FILE_MARKER}{path}"));
+    }
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Prefix of the `read_pdf` error that means "the file is no longer where the
+/// library expects it" (as opposed to unreadable/corrupt). The frontend keys the
+/// relink flow off it.
+pub const MISSING_FILE_MARKER: &str = "FILE_MANCANTE:";
+
+/// Outcome of re-pointing a document at a file the user picked.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RelinkResult {
+    /// The chosen file is byte-identical to the one originally imported.
+    pub hash_match: bool,
+    /// We had a stored hash to compare against (older imports may not).
+    pub had_hash: bool,
+    /// How many OTHER documents are missing from disk and would be found by
+    /// applying the same folder rewrite (0 when no reliable rewrite exists).
+    pub mappable: usize,
+    pub old_prefix: Option<String>,
+    pub new_prefix: Option<String>,
+}
+
+/// Split a path on either separator: stored paths and dialog results can mix
+/// them on Windows, and every comparison here is component-wise anyway.
+fn path_parts(p: &str) -> Vec<&str> {
+    p.split(['\\', '/']).collect()
+}
+
+/// The folder prefixes that map `old` onto `new`, derived from their longest
+/// common trailing components. `None` when the file name itself changed (a
+/// rename tells us nothing about where the *other* files went) or when one path
+/// is entirely a tail of the other.
+fn relink_prefixes(old: &str, new: &str) -> Option<(String, String)> {
+    let (a, b) = (path_parts(old), path_parts(new));
+    let mut common = 0usize;
+    while common < a.len() && common < b.len() {
+        let (x, y) = (a[a.len() - 1 - common], b[b.len() - 1 - common]);
+        if !x.eq_ignore_ascii_case(y) {
+            break;
+        }
+        common += 1;
+    }
+    // common == 0: renamed, so no folder mapping. common == len: one path is a
+    // suffix of the other, which would make the prefix empty.
+    if common == 0 || common >= a.len() || common >= b.len() {
+        return None;
+    }
+    let oldp = a[..a.len() - common].join("\\");
+    let newp = b[..b.len() - common].join("\\");
+    if oldp.trim().is_empty() || newp.trim().is_empty() {
+        return None;
+    }
+    Some((oldp, newp))
+}
+
+/// `path` lies under `prefix` (component-wise, case-insensitive) → the same path
+/// rebased onto `new_prefix`.
+fn remap_path(path: &str, prefix: &str, new_prefix: &str) -> Option<String> {
+    let (p, pre) = (path_parts(path), path_parts(prefix));
+    if pre.is_empty() || p.len() <= pre.len() {
+        return None;
+    }
+    if !pre.iter().zip(p.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b)) {
+        return None;
+    }
+    let mut out = path_parts(new_prefix).join("\\");
+    for c in &p[pre.len()..] {
+        out.push('\\');
+        out.push_str(c);
+    }
+    Some(out)
+}
+
+/// Snapshot of the live library used by the relink scan. Taken under the DB lock
+/// and nothing more: the filesystem probing that follows must NOT hold the mutex
+/// the whole UI serializes on (a few thousand `exists()` on a slow drive would
+/// freeze every other command).
+fn relink_scan_rows(conn: &Connection) -> Vec<(i64, String, Option<String>)> {
+    const SCAN_CAP: i64 = 5000;
+    let mut stmt = match conn.prepare(
+        "SELECT id, path, file_hash FROM documents
+         WHERE deleted_at IS NULL AND path NOT LIKE 'ref:%' ORDER BY id LIMIT ?1",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map(params![SCAN_CAP], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map(|it| it.flatten().collect())
+        .unwrap_or_default()
+}
+
+/// Documents (other than `skip_id`) that are missing from disk, live under
+/// `old_prefix`, and DO exist once rebased onto `new_prefix`. Returns
+/// (id, mapped_path, stored_hash). Pure filesystem work: call it with the lock
+/// released, on a snapshot from [`relink_scan_rows`].
+fn mappable_documents(
+    rows: Vec<(i64, String, Option<String>)>,
+    old_prefix: &str,
+    new_prefix: &str,
+    skip_id: i64,
+) -> Vec<(i64, String, Option<String>)> {
+    rows.into_iter()
+        .filter(|(id, _, _)| *id != skip_id)
+        .filter_map(|(id, path, hash)| {
+            if std::path::Path::new(&path).exists() {
+                return None; // not broken: never touch a document that works
+            }
+            let mapped = remap_path(&path, old_prefix, new_prefix)?;
+            std::path::Path::new(&mapped).is_file().then_some((id, mapped, hash))
+        })
+        .collect()
+}
+
+/// Point a document at a file the user picked, after its PDF was moved or
+/// renamed outside Scriptorium. Keeps every annotation, tag and note: only the
+/// path (and the content hash) changes.
+#[tauri::command]
+pub async fn relink_document(app: AppHandle, id: i64, new_path: String) -> Result<RelinkResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<RelinkResult, String> {
+        let target = new_path.trim().to_string();
+        let p = std::path::Path::new(&target);
+        if !p.is_file() {
+            return Err("Il file scelto non esiste (o è una cartella)".into());
+        }
+        if !p.extension().map(|e| e.eq_ignore_ascii_case("pdf")).unwrap_or(false) {
+            return Err("Serve un file PDF".into());
+        }
+        let state = app.state::<AppState>();
+        let (old_path, old_hash) = {
+            let conn = state.db.lock();
+            // Refuse to create two documents pointing at the same file: `path` is
+            // UNIQUE, so the UPDATE below would fail anyway — this says why.
+            let clash: Option<(i64, Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT id, title, deleted_at FROM documents WHERE path = ?1 AND id <> ?2",
+                    params![target, id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if let Some((other, title, deleted)) = clash {
+                let what = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| format!("#{other}"));
+                // Say WHERE the other document is: a clash with something in the
+                // trash looks inexplicable until you know it's there.
+                let dove = if deleted.is_some() { " (nel cestino)" } else { "" };
+                return Err(format!("Quel file è già collegato a «{what}»{dove}"));
+            }
+            conn.query_row(
+                "SELECT path, file_hash FROM documents WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "documento non trovato".to_string())?
+        };
+        if old_path.starts_with("ref:") {
+            // Una scheda di sola bibliografia non ha perso nulla: attaccarle un
+            // PDF "a mano" la lascerebbe senza testo estratto, miniatura né
+            // indice. «Trova PDF» fa la cosa completa.
+            return Err("Questa è una scheda bibliografica, non un PDF spostato: usa «Trova PDF» dal menu del documento, così il testo viene estratto e indicizzato".into());
+        }
+
+        let bytes = std::fs::read(p).map_err(|e| format!("Non riesco a leggere il file: {e}"))?;
+        let hash = import::sha256_hex(&bytes);
+        let had_hash = old_hash.as_deref().map(|h| !h.trim().is_empty()).unwrap_or(false);
+        let hash_match = old_hash.as_deref().map(|h| h.eq_ignore_ascii_case(&hash)).unwrap_or(false);
+
+        {
+            let conn = state.db.lock();
+            conn.execute(
+                "UPDATE documents SET path = ?1, file_hash = ?2 WHERE id = ?3",
+                params![target, hash, id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        // Learn the folder rewrite from this one confirmation, and see how many
+        // other broken documents it would fix in one go.
+        let (mut mappable, mut oldp, mut newp) = (0usize, None, None);
+        if let Some((o, n)) = relink_prefixes(&old_path, &target) {
+            let rows = {
+                let conn = state.db.lock();
+                relink_scan_rows(&conn)
+            };
+            mappable = mappable_documents(rows, &o, &n, id).len();
+            oldp = Some(o);
+            newp = Some(n);
+        }
+
+        pulse::blip(&app, "db", &format!("Ricollegato il file del documento #{id}"));
+        crate::mirror::request_sync(&app);
+        Ok(RelinkResult { hash_match, had_hash, mappable, old_prefix: oldp, new_prefix: newp })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Apply a folder rewrite learned from one manual relink to every other document
+/// whose file is missing. Precision-first: a candidate is accepted only if the
+/// rebased file exists AND its content hash matches the one stored at import
+/// (documents imported before hashes existed are accepted on the path alone).
+#[tauri::command]
+pub async fn relink_apply_mapping(
+    app: AppHandle,
+    old_prefix: String,
+    new_prefix: String,
+) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        const BATCH_CAP: usize = 500;
+        let state = app.state::<AppState>();
+        let rows = {
+            let conn = state.db.lock();
+            relink_scan_rows(&conn)
+        };
+        let candidates = mappable_documents(rows, &old_prefix, &new_prefix, -1);
+        pulse::start(&app, "db", &format!("Ricollego {} file spostati", candidates.len()));
+        let mut fixed = 0usize;
+        // Hash OUTSIDE the DB lock: a few hundred PDFs is seconds of IO we must
+        // not spend holding the mutex the whole UI serializes on.
+        let mut accepted: Vec<(i64, String, String)> = Vec::new();
+        let work: Vec<_> = candidates.into_iter().take(BATCH_CAP).collect();
+        let total = work.len() as u64;
+        for (n, (id, mapped, stored)) in work.into_iter().enumerate() {
+            // Centinaia di file da leggere e hashare: senza avanzamento la
+            // Plancia mostrerebbe un nodo acceso e fermo per decine di secondi.
+            pulse::progress(&app, "db", "Verifico i file ritrovati", n as u64, total);
+            match std::fs::read(&mapped) {
+                Ok(bytes) => {
+                    let h = import::sha256_hex(&bytes);
+                    let ok = match stored.as_deref().filter(|s| !s.trim().is_empty()) {
+                        Some(s) => s.eq_ignore_ascii_case(&h),
+                        None => true,
+                    };
+                    if ok {
+                        accepted.push((id, mapped, h));
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        {
+            let conn = state.db.lock();
+            for (id, mapped, h) in &accepted {
+                // A path collision (the file is already another document's) must
+                // skip that one row, not abort the whole batch.
+                if conn
+                    .execute(
+                        "UPDATE documents SET path = ?1, file_hash = ?2 WHERE id = ?3",
+                        params![mapped, h, id],
+                    )
+                    .is_ok()
+                {
+                    fixed += 1;
+                }
+            }
+        }
+        pulse::ok(&app, "db", "Ricollego i file spostati", &format!("{fixed} ricollegati"));
+        crate::mirror::request_sync(&app);
+        Ok(fixed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// List a document's annotations, ordered by page.
@@ -1351,6 +1675,83 @@ pub fn list_annotations(state: State<'_, AppState>, document_id: i64) -> Result<
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
+/// An annotation that matched a full-text search, with the document it lives in.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AnnotationHit {
+    pub id: i64,
+    pub document_id: i64,
+    pub doc_title: Option<String>,
+    pub page: i64,
+    pub kind: String,
+    pub color: Option<String>,
+    pub quote: Option<String>,
+    pub note: Option<String>,
+    /// Highlighted excerpt around the match (quote first, else the comment).
+    pub snippet: String,
+}
+
+/// Full-text search across every annotation in the library (highlighted text and
+/// personal comments), so a note taken months ago is findable without first
+/// remembering which paper it was in.
+#[tauri::command]
+pub fn search_annotations(state: State<'_, AppState>, query: String) -> Result<Vec<AnnotationHit>, String> {
+    let expr = fts_query(&query);
+    if expr.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.id, a.document_id, d.title, a.page, a.kind, a.color, a.quote, a.note,
+                    snippet(annotations_fts, -1, '', '', '…', 14)
+             FROM annotations_fts
+             JOIN annotations a ON a.id = annotations_fts.rowid
+             JOIN documents   d ON d.id = a.document_id
+             WHERE annotations_fts MATCH ?1 AND d.deleted_at IS NULL
+             ORDER BY rank LIMIT 60",
+        )
+        .map_err(|e| e.to_string())?;
+    let hits: Vec<AnnotationHit> = stmt
+        .query_map(params![expr], |r| {
+            Ok(AnnotationHit {
+                id: r.get(0)?,
+                document_id: r.get(1)?,
+                doc_title: r.get(2)?,
+                page: r.get(3)?,
+                kind: r.get(4)?,
+                color: r.get(5)?,
+                quote: r.get(6)?,
+                note: r.get(7)?,
+                snippet: r.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    Ok(hits)
+}
+
+/// How many annotations each live document has, for the card badge. One query
+/// instead of one-per-card: the grid asks once and keeps the map.
+#[tauri::command]
+pub fn annotation_counts(state: State<'_, AppState>) -> Result<Vec<(i64, i64)>, String> {
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.document_id, count(*)
+             FROM annotations a JOIN documents d ON d.id = a.document_id
+             WHERE d.deleted_at IS NULL
+             GROUP BY a.document_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    Ok(rows)
 }
 
 /// The annotation kinds the reader can produce (anything else falls back to a highlight).
@@ -1503,7 +1904,14 @@ pub async fn library_health(app: AppHandle) -> Result<LibraryHealth, String> {
 
         for r in &rows {
             let row = || HealthRow { id: r.id, title: r.title.clone(), path: r.path.clone() };
-            if !std::path::Path::new(&r.path).exists() && missing_file.len() < CAP {
+            // Le schede di sola bibliografia hanno un percorso fittizio `ref:…`:
+            // non sono file "mancanti", non hanno MAI avuto un PDF (per loro c'è
+            // «Trova PDF»). Prima affollavano l'elenco e ora inviterebbero anche
+            // a ricollegarle a un file qualsiasi.
+            if !r.path.starts_with("ref:")
+                && !std::path::Path::new(&r.path).exists()
+                && missing_file.len() < CAP
+            {
                 missing_file.push(row());
             }
             if r.tlen == 0 && no_text.len() < CAP {

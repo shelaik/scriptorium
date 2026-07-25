@@ -120,6 +120,30 @@ CREATE TABLE IF NOT EXISTS annotations (
 );
 CREATE INDEX IF NOT EXISTS idx_annotations_doc ON annotations(document_id, page);
 
+-- Full-text index over the highlighted text and the user's comment, so
+-- annotations are findable across the whole library and not only inside the
+-- document that holds them. External-content (the `annotations` table stays the
+-- source of truth); rebuilt from Rust whenever the two fall out of step.
+CREATE VIRTUAL TABLE IF NOT EXISTS annotations_fts USING fts5(
+  quote, note,
+  content='annotations', content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS annotations_ai AFTER INSERT ON annotations BEGIN
+  INSERT INTO annotations_fts(rowid, quote, note) VALUES (new.id, new.quote, new.note);
+END;
+CREATE TRIGGER IF NOT EXISTS annotations_ad AFTER DELETE ON annotations BEGIN
+  INSERT INTO annotations_fts(annotations_fts, rowid, quote, note) VALUES ('delete', old.id, old.quote, old.note);
+END;
+-- WHEN guard (mirrors documents_au/notes_au): moving a highlight or toggling its
+-- colour must not re-tokenize unchanged text.
+CREATE TRIGGER IF NOT EXISTS annotations_au AFTER UPDATE ON annotations
+WHEN old.quote IS NOT new.quote OR old.note IS NOT new.note
+BEGIN
+  INSERT INTO annotations_fts(annotations_fts, rowid, quote, note) VALUES ('delete', old.id, old.quote, old.note);
+  INSERT INTO annotations_fts(rowid, quote, note) VALUES (new.id, new.quote, new.note);
+END;
+
 -- ===== Settings / API cache =====
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
@@ -338,9 +362,30 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          );",
     )
     .context("creating graph_positions_scoped")?;
+    reindex_annotations_if_stale(conn)?;
     backfill_github_urls(conn)?;
     // Assign citekeys to any documents that don't have one yet (cheap no-op once full).
     super::citekey::backfill(conn)?;
+    Ok(())
+}
+
+/// Fill `annotations_fts` when it doesn't match the annotations table — which is
+/// the case exactly once, on the first launch after the index was introduced
+/// (triggers only cover rows written from then on). Comparing two counts costs
+/// nothing on later launches, and self-heals an index dropped by a restore.
+fn reindex_annotations_if_stale(conn: &Connection) -> Result<()> {
+    let rows: i64 = conn.query_row("SELECT count(*) FROM annotations", [], |r| r.get(0))?;
+    // Count via the fts5 shadow table: a full scan of an external-content fts5
+    // table would go back to `annotations` for the column values, which is
+    // exactly what we cannot trust here. -1 on error forces the (idempotent)
+    // rebuild rather than silently leaving the index empty.
+    let indexed: i64 = conn
+        .query_row("SELECT count(*) FROM annotations_fts_docsize", [], |r| r.get(0))
+        .unwrap_or(-1);
+    if rows != indexed {
+        conn.execute_batch("INSERT INTO annotations_fts(annotations_fts) VALUES('rebuild');")
+            .context("rebuilding the annotations index")?;
+    }
     Ok(())
 }
 

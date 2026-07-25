@@ -744,6 +744,24 @@ export const metadataCandidates = (id: number) =>
 export const applyMetaCandidate = (id: number, candidate: MetaCandidate) =>
   invoke<void>("apply_meta_candidate", { id, candidate });
 
+/** Prefix of the read error meaning "the PDF is no longer at the saved path". */
+export const MISSING_FILE_MARKER = "FILE_MANCANTE:";
+
+/** Outcome of pointing a document at a file the user picked. */
+export interface RelinkResult {
+  hash_match: boolean;
+  had_hash: boolean;
+  mappable: number;
+  old_prefix: string | null;
+  new_prefix: string | null;
+}
+/** Re-point a document at a moved/renamed PDF, keeping notes and highlights. */
+export const relinkDocument = (id: number, newPath: string) =>
+  invoke<RelinkResult>("relink_document", { id, newPath });
+/** Apply the folder rewrite learned from one relink to the other broken files. */
+export const relinkApplyMapping = (oldPrefix: string, newPrefix: string) =>
+  invoke<number>("relink_apply_mapping", { oldPrefix, newPrefix });
+
 export type SearchMode = "fulltext" | "semantic" | "hybrid";
 
 /** Search the library by full-text, semantic similarity, or both (RRF). */
@@ -918,6 +936,26 @@ export interface Annotation {
 /** List a document's annotations. */
 export const listAnnotations = (documentId: number) =>
   invoke<Annotation[]>("list_annotations", { documentId });
+
+/** An annotation that matched a search, with the document it belongs to. */
+export interface AnnotationHit {
+  id: number;
+  document_id: number;
+  doc_title: string | null;
+  page: number;
+  kind: AnnotationKind;
+  color: string | null;
+  quote: string | null;
+  note: string | null;
+  snippet: string;
+}
+/** Full-text search across the highlights and comments of the whole library. */
+export const searchAnnotations = (query: string) =>
+  invoke<AnnotationHit[]>("search_annotations", { query });
+
+/** How many annotations each document has, as [documentId, count] pairs. */
+export const annotationCounts = () =>
+  invoke<[number, number][]>("annotation_counts");
 
 /** Add an annotation (highlight by default); returns the new annotation id. */
 export const addAnnotation = (a: {

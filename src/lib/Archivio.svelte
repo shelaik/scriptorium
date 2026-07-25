@@ -162,6 +162,53 @@
     };
   });
 
+  // ---- tastiera sull'albero ---------------------------------------------------
+  // Lo schema è un SVG: senza questo non era raggiungibile in nessun modo da
+  // tastiera. `layout.nodes` è già in ordine di visita (dall'alto in basso), quindi
+  // su/giù è ±1 nell'elenco; destra/sinistra seguono la gerarchia vera.
+  let treeEl = $state<SVGSVGElement | undefined>();
+
+  function focusNode(n: LNode | undefined) {
+    if (!n) return;
+    sel = n.key;
+    // Tieni il nodo scelto dentro la finestra visibile del riquadro.
+    treeEl?.parentElement?.querySelector(`[data-cid="${CSS.escape(String(n.key))}"]`)
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  function treeKey(e: KeyboardEvent) {
+    const ns = layout.nodes;
+    if (!ns.length) return;
+    const at = ns.findIndex((n) => n.key === sel);
+    const cur = at >= 0 ? ns[at] : undefined;
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        focusNode(ns[at < 0 ? 0 : Math.min(at + 1, ns.length - 1)]);
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        focusNode(ns[at <= 0 ? 0 : at - 1]);
+        break;
+      case "ArrowRight":
+        e.preventDefault();
+        if (cur?.id != null) focusNode(ns.find((n) => n.parent === cur.id));
+        break;
+      case "ArrowLeft":
+        e.preventDefault();
+        if (cur?.parent != null) focusNode(ns.find((n) => n.id === cur.parent));
+        break;
+      case "Home": e.preventDefault(); focusNode(ns[0]); break;
+      case "End": e.preventDefault(); focusNode(ns[ns.length - 1]); break;
+      case "Enter":
+        if (cur && cur.key !== "unfiled" && cur.id != null) {
+          e.preventDefault();
+          onOpenGrid(cur.id, cur.name);
+        }
+        break;
+    }
+  }
+
   function edgePath(e: { from: LNode; to: LNode }): string {
     const ax = e.from.x + W, ay = e.from.y + H / 2;
     const bx = e.to.x, by = e.to.y + H / 2;
@@ -613,7 +660,18 @@
 
   <div class="body">
     <div class="treewrap">
-      <svg class="archsvg" width={layout.w} height={layout.h}>
+      <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+      <svg
+        class="archsvg"
+        bind:this={treeEl}
+        width={layout.w}
+        height={layout.h}
+        role="tree"
+        tabindex="0"
+        aria-label="Raccolte — frecce per spostarti, Invio per aprire nella griglia"
+        aria-activedescendant={sel != null ? "arcn-" + sel : undefined}
+        onkeydown={treeKey}
+      >
         <text class="zone" x={PADX} y="34">GERARCHIA</text>
         {#each layout.edges as e (e.from.key + ">" + e.to.key)}
           <path class="trace" d={edgePath(e)} />
@@ -630,6 +688,12 @@
             class:unfiled={n.key === "unfiled"}
             class:drophover={isTarget}
             data-cid={n.key}
+            id={"arcn-" + n.key}
+            role="treeitem"
+            tabindex={-1}
+            aria-level={n.depth + 1}
+            aria-selected={sel === n.key}
+            aria-label="{n.name} — {n.count} paper"
             onpointerdown={(e) => nodePointerDown(e, n)}
           >
             <rect x={n.x} y={n.y} width={W} height={H} rx="6" />
@@ -884,6 +948,10 @@
   .body { flex: 1; display: flex; min-height: 0; }
   .treewrap { flex: 1; overflow: auto; min-width: 0; }
   .archsvg { display: block; }
+  .archsvg:focus { outline: none; }
+  /* Con la tastiera il nodo scelto deve saltare all'occhio: il solo stile .sel
+     nasce per il clic (dove sai già dove hai cliccato). */
+  .archsvg:focus-visible .node.sel rect:first-of-type { stroke: var(--accent); stroke-width: 2.5; }
   .zone { font-size: 10px; letter-spacing: 0.4em; fill: var(--border); }
   .trace { fill: none; stroke: var(--border); stroke-width: 1.5; }
 

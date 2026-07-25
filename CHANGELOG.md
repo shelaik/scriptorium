@@ -2,6 +2,14 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.47 — Il PDF spostato non è più un vicolo cieco, e le evidenziazioni si cercano
+- **«Ritrova il file…»**: se sposti o rinomini un PDF fuori da Scriptorium, aprendolo ora ti chiedo dov'è finito invece di darti un errore senza uscita. La scheda resta **intatta** — evidenziazioni, tag, nota, citekey, citazioni. Lo stesso pulsante è in *Cura della libreria → File mancanti sul disco*.
+- **Hai spostato un'intera cartella?** Dal primo file imparo lo spostamento e ti propongo di **ricollegare tutti gli altri in un colpo**, verificando l'impronta (SHA-256) di ciascuno: chi non corrisponde resta com'è, mai un abbinamento tirato a indovinare.
+- *Correzione collegata*: le schede di sola bibliografia (quelle senza PDF) affollavano l'elenco «file mancanti sul disco». Non sono file persi — non ne hanno mai avuto uno — e ora sono escluse.
+- **Le evidenziazioni si cercano in tutta la libreria**: la ricerca in alto guarda anche dentro il testo che hai evidenziato e i tuoi commenti, con un nuovo gruppo di risultati «Evidenziazioni»; un clic apre il PDF **alla pagina esatta**. Indice full-text dedicato, accenti normalizzati («cio» trova «ciò»), che si allinea da solo al primo avvio.
+- **Segno ✎ n sulla scheda**: quante evidenziazioni contiene un paper, senza doverlo aprire.
+- **Tutto raggiungibile da tastiera**: i menu della barra si aprono con Invio e si scorrono con le frecce (Esc chiude e riporta il fuoco sull'icona, Tab prosegue da lì); nell'**Archivio** lo schema delle raccolte si naviga con le frecce — → e ← entrano ed escono dalle sotto-raccolte, Invio apre nella griglia.
+
 ## 0.9.46 — Revisione dell'interfaccia, terza parte
 - **L'import dei PDF mostra a che punto è**: barra di avanzamento col nome del file in lavorazione, e **l'elenco dei file non importati resta consultabile** sopra la griglia invece di ridursi a un numero che sparisce.
 - **I messaggi d'errore si possono leggere davvero**: restano 25 secondi invece di 7, si **copiano** con un clic e si chiudono a mano.

@@ -9,8 +9,20 @@ import { PDFDocument } from "pdf-lib";
 
 /** Fetch a document's raw PDF bytes from the backend. Throws for ref-only items (no file). */
 async function fetchPdf(id: number): Promise<Uint8Array> {
-  const buf = (await invoke("read_pdf", { id })) as ArrayBuffer;
-  return new Uint8Array(buf);
+  try {
+    const buf = (await invoke("read_pdf", { id })) as ArrayBuffer;
+    return new Uint8Array(buf);
+  } catch (e) {
+    // The backend flags a moved file with a marker so the reader can offer to
+    // re-point it; here there is no such flow, so translate it into words.
+    const s = String(e);
+    if (s.includes("FILE_MANCANTE:")) {
+      throw new Error(
+        "il PDF non è più al percorso salvato — aprilo dalla libreria e usa «Ritrova il file…»",
+      );
+    }
+    throw e;
+  }
 }
 
 /** Print already-in-memory PDF bytes via a hidden iframe. Resolves once the dialog has been triggered. */

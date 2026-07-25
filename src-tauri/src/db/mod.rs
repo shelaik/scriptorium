@@ -413,6 +413,87 @@ mod tests {
         Ok(())
     }
 
+    /// Highlights must be findable library-wide: triggers index new annotations,
+    /// edits and deletions keep the index honest, and the startup reconciliation
+    /// picks up rows written before the index existed.
+    #[test]
+    fn annotations_are_full_text_searchable() -> Result<()> {
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory()?;
+        migrations::migrate(&conn)?;
+        conn.execute("INSERT INTO documents (title, path) VALUES ('Paper', '/p.pdf')", [])?;
+        let doc = conn.last_insert_rowid();
+        let hits = |q: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM annotations_fts WHERE annotations_fts MATCH ?1",
+                params![q],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1)
+        };
+
+        conn.execute(
+            "INSERT INTO annotations (document_id, page, rects_json, quote, note)
+             VALUES (?1, 3, '[]', 'attenzione è tutto ciò che serve', 'da rileggere')",
+            params![doc],
+        )?;
+        let anno = conn.last_insert_rowid();
+        assert_eq!(hits("attenzione"), 1, "il trigger non ha indicizzato l'evidenziazione");
+        assert_eq!(hits("rileggere"), 1, "il commento personale non è cercabile");
+        // Diacritics folded, like every other index in the app: «ciò» si trova
+        // digitando «cio» (chi cerca non mette gli accenti).
+        assert_eq!(hits("cio"), 1, "gli accenti non sono normalizzati");
+        // Il conteggio d'avvio deve leggere la tabella-ombra giusta: se il nome
+        // fosse sbagliato la riconciliazione ricostruirebbe l'indice a OGNI avvio.
+        let sized: i64 =
+            conn.query_row("SELECT count(*) FROM annotations_fts_docsize", [], |r| r.get(0))?;
+        assert_eq!(sized, 1, "tabella-ombra docsize assente o disallineata");
+
+        conn.execute("UPDATE annotations SET note = 'archiviato' WHERE id = ?1", params![anno])?;
+        assert_eq!(hits("rileggere"), 0, "il commento vecchio resta cercabile dopo la modifica");
+        assert_eq!(hits("archiviato"), 1);
+
+        conn.execute("DELETE FROM annotations WHERE id = ?1", params![anno])?;
+        assert_eq!(hits("attenzione"), 0, "l'evidenziazione cancellata resta nell'indice");
+
+        // Righe scritte PRIMA che l'indice esistesse: simulate spegnendo i
+        // trigger, poi la riconciliazione d'avvio deve recuperarle.
+        conn.execute_batch(
+            "DROP TRIGGER annotations_ai;
+             INSERT INTO annotations (document_id, page, rects_json, quote)
+             VALUES (1, 1, '[]', 'evidenziazione storica');",
+        )?;
+        assert_eq!(hits("storica"), 0, "premessa del test: la riga non è indicizzata");
+        migrations::migrate(&conn)?; // rilancia la riconciliazione
+        assert_eq!(hits("storica"), 1, "l'avvio non ha ricostruito l'indice");
+        Ok(())
+    }
+
+    /// Diagnostica sulla libreria VERA di questa macchina: l'indice delle
+    /// evidenziazioni deve essere allineato alla tabella. Ignorato di default
+    /// (dipende dai dati locali); si lancia con
+    /// `cargo test --lib live_annotation_index -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_annotation_index_is_in_sync() -> Result<()> {
+        let Ok(appdata) = std::env::var("APPDATA") else {
+            eprintln!("APPDATA assente: salto");
+            return Ok(());
+        };
+        let db = std::path::Path::new(&appdata).join("com.pdfmanage.app").join("pdfmanage.db");
+        if !db.exists() {
+            eprintln!("nessuna libreria in {}: salto", db.display());
+            return Ok(());
+        }
+        let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let rows: i64 = conn.query_row("SELECT count(*) FROM annotations", [], |r| r.get(0))?;
+        let indexed: i64 =
+            conn.query_row("SELECT count(*) FROM annotations_fts_docsize", [], |r| r.get(0))?;
+        println!("annotazioni: {rows} — indicizzate: {indexed}");
+        assert_eq!(rows, indexed, "indice delle evidenziazioni disallineato");
+        Ok(())
+    }
+
     /// Version bump → one backup; same version again → no new backup.
     #[test]
     fn backup_runs_once_per_version() -> Result<()> {
