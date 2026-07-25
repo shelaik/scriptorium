@@ -640,7 +640,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.44";
+  const APP_VERSION = "0.9.45";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -917,8 +917,20 @@
     return undefined;
   }
 
+  let docsError = $state("");
   async function loadDocs() {
     selected = [];
+    docsError = "";
+    try {
+      await loadDocsInner();
+    } catch (e) {
+      // Prima l'eccezione risaliva silenziosamente: la griglia restava con la
+      // lista VECCHIA (o vuota) e l'utente leggeva «Nessun documento».
+      docsError = String(e);
+      docs = [];
+    }
+  }
+  async function loadDocsInner() {
     if (filter.kind === "trash") {
       docs = await listTrash();
     } else if (filter.kind === "duplicates" || filter.kind === "terminal") {
@@ -1323,71 +1335,46 @@
 
   /** La catena di import di una bibliografia/progetto, dato il percorso: usata
    *  sia dalla voce di menu sia dal trascinamento nella finestra. */
-  async function importDroppedBibliography(file: string) {
-    // Uno .zip (progetto Overleaf/LaTeX): la bibliografia si legge da dentro.
-    // Va detto che di quell'archivio si prende SOLO la bibliografia: per i PDF
-    // e il grafo delle citazioni del proprio lavoro c'è «Progetto LaTeX (.zip)».
-    const isZip = file.toLowerCase().endsWith(".zip");
-    if (
-      isZip &&
-      !(await confirmAsk(
-        "Dello .zip verrà letta solo la BIBLIOGRAFIA (i file .bib): ogni voce citata diventa una scheda in libreria.\n\nI PDF contenuti nell'archivio e il grafo delle citazioni del tuo lavoro si importano invece con «Importa → Progetto LaTeX (.zip)…».",
-        "Va bene, procedi",
-        false,
-      ))
-    ) {
-      return;
-    }
-    // Optionally point at the export's PDF folder (Zotero "Export Files", etc.) so
-    // attachments get pulled in. Skippable — if the file itself carries PDF paths,
-    // those are used automatically.
-    let pdfDir: string | undefined;
-    if (
-      !isZip &&
-      (await confirmAsk(
-        "Indicare una cartella con i PDF esportati?\n\nServe solo se la tua esportazione tiene i PDF in una cartella a parte (es. Zotero «Esporta file»). Se i percorsi dei PDF sono già dentro il file, puoi saltare.",
-        "Scegli cartella…",
-        false,
-      ))
-    ) {
-      const dir = await open({ directory: true });
-      if (typeof dir === "string") pdfDir = dir;
-    }
-    // Catena opzionale 1: scarica i PDF open-access delle voci senza file.
-    const findPdfs = await confirmAsk(
-      "Cercare online i PDF open-access delle voci senza file?\n\nDopo l'import, per ogni voce priva di PDF vengono provati arXiv, Unpaywall, OpenAlex e Semantic Scholar, scaricando la copia liberamente accessibile quando esiste. Serve la ricerca online attiva; su bibliografie lunghe può richiedere qualche minuto.",
-      "Sì, cerca i PDF",
-      false,
-    );
-    // Catena opzionale 2: raccogli tutto in una raccolta col nome del file
-    // (un nome vuoto — es. file «.bib» — ricadrebbe in un no-op silenzioso).
-    const base =
-      (file.split(/[\\/]/).pop() ?? "").replace(/\.[^.]+$/, "").trim() || "Bibliografia importata";
-    const collection = (await confirmAsk(
-      `Mettere le voci importate in una raccolta «${base}»?\n\nUtile per ritrovarle insieme nell'Archivio (e per i suggerimenti semantici). Potrai rinominarla lì.`,
-      "Sì, raccogli",
-      false,
-    ))
-      ? base
-      : undefined;
-    // Catena opzionale 3 (solo .zip): ricostruisci qui dentro il progetto LaTeX
-    // completo — sorgenti, immagini, classi — pronto da compilare.
-    let latexProject: string | undefined;
-    if (
-      isZip &&
-      (await confirmAsk(
-        `Importare anche il progetto LaTeX completo come «${base}»?
+  // Un SOLO pannello di opzioni invece di 3-4 conferme in fila, dove «Annulla»
+  // significava a volte «no grazie» e a volte «abbandona tutto».
+  let bibOpts = $state<{
+    file: string;
+    isZip: boolean;
+    base: string;
+    pdfDir: string | null;
+    findPdfs: boolean;
+    collection: boolean;
+    latexProject: boolean;
+  } | null>(null);
 
-Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un progetto compilabile qui dentro, con Progetti (LaTeX).`,
-        "Sì, importa il progetto",
-        false,
-      ))
-    ) {
-      latexProject = base;
-    }
-    status = findPdfs ? "Importo la bibliografia e cerco i PDF…" : "Importo la bibliografia…";
+  async function importDroppedBibliography(file: string) {
+    const isZip = file.toLowerCase().endsWith(".zip");
+    const base =
+      (file.split(/[\/]/).pop() ?? "").replace(/\.[^.]+$/, "").trim() || "Bibliografia importata";
+    bibOpts = {
+      file,
+      isZip,
+      base,
+      pdfDir: null,
+      findPdfs: true,
+      collection: true,
+      latexProject: isZip,
+    };
+  }
+
+  async function runBibImport() {
+    const o = bibOpts;
+    if (!o) return;
+    bibOpts = null;
+    status = o.findPdfs ? "Importo la bibliografia e cerco i PDF…" : "Importo la bibliografia…";
     try {
-      const res = await importReferenceManager(file, pdfDir, findPdfs, collection, latexProject);
+      const res = await importReferenceManager(
+        o.file,
+        o.pdfDir ?? undefined,
+        o.findPdfs,
+        o.collection ? o.base : undefined,
+        o.isZip && o.latexProject ? o.base : undefined,
+      );
       const parts = [`${res.added} aggiunti`];
       if (res.pdfs_attached) parts.push(`${res.pdfs_attached} con PDF`);
       if (res.pdfs_downloaded) parts.push(`${res.pdfs_downloaded} PDF scaricati`);
@@ -1400,6 +1387,12 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
       status = `${res.format}: ` + (res.entries ? parts.join(" · ") : "nessuna voce trovata nel file");
       await loadDocs();
       await loadSidebar();
+      // Passo successivo: portalo DOVE sono finite le voci, invece di lasciarlo
+      // in «Tutti» a chiedersi cosa sia appena successo.
+      if (res.collection) {
+        const c = collections.find((x) => x.name === res.collection);
+        if (c) setFilter({ kind: "collection", id: c.id, label: c.name });
+      }
     } catch (e) {
       status = "Errore import bibliografia: " + e;
     }
@@ -6257,6 +6250,13 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
               <p class="big">Nessun documento con questi tag</p><p>Prova a togliere un tag{tagFilter.length > 1 ? " o passa a «qualsiasi»" : ""}, oppure premi «Azzera».</p>
             {:else if filter.kind !== "all"}
               <p class="big">Vuoto</p><p>Nessun documento in «{filter.label}».</p>
+            {:else if docsError}
+              <p class="big">Non riesco a caricare l'elenco</p>
+              <p class="loaderr">{docsError}</p>
+              <div class="emptyacts">
+                <button class="primary" onclick={() => loadDocs()}>Riprova</button>
+                <button class="ghost" onclick={() => setFilter({ kind: "all" })}>Torna a tutta la libreria</button>
+              </div>
             {:else}
               <p class="big">La libreria è vuota</p>
               <p>Trascina qui dei PDF, oppure comincia da una di queste porte:</p>
@@ -6290,7 +6290,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
                   {#if d.year || d.venue}<p class="venue">{[d.venue, d.year].filter(Boolean).join(" · ")}</p>{/if}
                   {#if d.citekey && !isBare(d)}<button type="button" class="ckey" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}
                   {#if d.has_summary}<span class="aisum" title="Riassunto AI già presente — lo trovi in «Modifica metadati» (il batch AI salta questo documento)">✦ AI</span>{/if}
-                  {#if isBare(d)}<p class="metamiss" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ metadati non recuperati</p>{/if}
+                  {#if isBare(d)}<button class="metamiss" title="Cerca online la scheda giusta per QUESTO documento e scegli tu quale applicare" onclick={(e) => { e.stopPropagation(); metaFindId = d.id; }}>ⓘ recupera i metadati…</button>{/if}
                   {#if d.pub_status}<div class="badgerow">{@render pubBadge(d.pub_status, d.paper_url)}</div>{/if}
                   {#if d.github_url}
                     <button class="ghchip" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()} codice</button>
@@ -6339,7 +6339,7 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
                   <tr onclick={() => focusCard(d)} ondblclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selectedSet.has(d.id)} class:kfocus={focusId === d.id}>
                     <td class="sel"><input type="checkbox" checked={selectedSet.has(d.id)} onclick={(e) => e.stopPropagation()} onchange={() => toggleSelect(d.id)} title="Seleziona" /></td>
-                    <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if d.citekey && !isBare(d)}<button type="button" class="ckey-inline" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}{#if d.has_summary}<span class="aisum inline" title="Riassunto AI già presente (il batch AI salta questo documento)">✦</span>{/if}{#if isBare(d)}<span class="metamiss-inline" title="Autori, anno e rivista non ancora recuperati. Premi «Metadati» (in alto) per recuperarli da Crossref.">ⓘ</span>{/if}</td>
+                    <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if d.citekey && !isBare(d)}<button type="button" class="ckey-inline" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}{#if d.has_summary}<span class="aisum inline" title="Riassunto AI già presente (il batch AI salta questo documento)">✦</span>{/if}{#if isBare(d)}<button class="metamiss-inline" title="Recupera i metadati di questo documento (scegli tu la scheda giusta)" onclick={(e) => { e.stopPropagation(); metaFindId = d.id; }}>ⓘ</button>{/if}</td>
                     <td class="dim" title={authorLine(d)}>{#if authorLine(d)}<button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button>{:else}—{/if}</td>
                     <td class="num dim">{d.year ?? "—"}</td>
                     <td class="dim" title={d.venue ?? ""}>{d.venue || "—"}{#if d.pub_status}<span class="badgeinline">{@render pubBadge(d.pub_status, d.paper_url)}</span>{/if}</td>
@@ -6829,6 +6829,53 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
         <p class="aboutmeta">Costruito con Tauri · Rust · SvelteKit · SQLite.</p>
         <p class="aboutcopy">© {APP_YEAR} Scriptorium</p>
         <div class="modactions"><button class="primary" onclick={() => (aboutModal = false)}>Chiudi</button></div>
+      </div>
+    </div>
+  {/if}
+
+  {#if bibOpts}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modalback confirmback" onmousedown={(e) => { if (e.target === e.currentTarget) bibOpts = null; }} role="presentation">
+      <div class="confirmbox bibbox" role="dialog" tabindex="-1">
+        <h3 class="bibtitle">Importa «{bibOpts.base}»</h3>
+        <p class="bibsub">
+          {#if bibOpts.isZip}
+            Dall'archivio verrà letta la <b>bibliografia</b> (i file <code>.bib</code>): ogni voce citata diventa una scheda in libreria.
+          {:else}
+            Ogni voce del file diventa una scheda in libreria, con autori, anno, DOI e parole chiave come tag.
+          {/if}
+        </p>
+        <label class="bibrow">
+          <input type="checkbox" bind:checked={bibOpts.findPdfs} />
+          <span><b>Cerca i PDF open-access</b> delle voci senza file<br /><span class="bibhint">arXiv, Unpaywall, OpenAlex, Semantic Scholar. Richiede la ricerca online attiva; su bibliografie lunghe richiede qualche minuto.</span></span>
+        </label>
+        <label class="bibrow">
+          <input type="checkbox" bind:checked={bibOpts.collection} />
+          <span><b>Raccogli tutto in «{bibOpts.base}»</b><br /><span class="bibhint">Una raccolta dedicata, così le ritrovi insieme nell'Archivio. Alla fine ti ci porto.</span></span>
+        </label>
+        {#if bibOpts.isZip}
+          <label class="bibrow">
+            <input type="checkbox" bind:checked={bibOpts.latexProject} />
+            <span><b>Importa anche il progetto LaTeX completo</b><br /><span class="bibhint">Estrae tutto l'archivio (.tex, immagini, classi) in un progetto compilabile in Progetti (LaTeX).</span></span>
+          </label>
+        {:else}
+          <div class="bibrow">
+            <span style="width:16px"></span>
+            <span>
+              <b>Cartella dei PDF esportati</b>
+              {#if bibOpts.pdfDir}<br /><span class="bibhint">{bibOpts.pdfDir}</span>{:else}<br /><span class="bibhint">Serve solo se l'esportazione tiene i PDF a parte (es. Zotero «Esporta file»).</span>{/if}
+              <br />
+              <button class="linklike" onclick={async () => { const d = await open({ directory: true }); if (typeof d === "string" && bibOpts) bibOpts.pdfDir = d; }}>
+                {bibOpts.pdfDir ? "Cambia cartella…" : "Scegli una cartella…"}
+              </button>
+              {#if bibOpts.pdfDir}<button class="linklike" onclick={() => { if (bibOpts) bibOpts.pdfDir = null; }}>rimuovi</button>{/if}
+            </span>
+          </div>
+        {/if}
+        <div class="modactions">
+          <button class="ghost" onclick={() => (bibOpts = null)}>Annulla</button>
+          <button class="primary" onclick={runBibImport}>Importa</button>
+        </div>
       </div>
     </div>
   {/if}
@@ -8294,8 +8341,16 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
   }
   .authors { font-size: 12px; color: var(--dim); margin: 0 0 2px; }
   /* Shown on bare cards/rows that have no author/year/venue until "Metadati" runs. */
-  .metamiss { font-size: 11px; color: var(--faint); margin: 2px 0 0; font-style: italic; cursor: help; }
-  .metamiss-inline { color: var(--faint); margin-left: 6px; cursor: help; font-size: 11px; }
+  .metamiss {
+    font-size: 11px; color: var(--dim); margin: 2px 0 0; cursor: pointer;
+    background: none; border: none; padding: 0; text-align: left; font-style: italic;
+  }
+  .metamiss:hover { color: var(--accent); text-decoration: underline; }
+  .metamiss-inline {
+    color: var(--dim); margin-left: 6px; cursor: pointer; font-size: 11px;
+    background: none; border: none; padding: 0;
+  }
+  .metamiss-inline:hover { color: var(--accent); }
   /* Persistent citekey: monospace chip on cards, inline badge in the list. Click to copy. */
   .ckey {
     display: inline-block; margin: 2px 0 0; padding: 1px 7px; border-radius: 9px; max-width: 100%;
@@ -8900,6 +8955,19 @@ Estrae TUTTO l'archivio (file .tex, immagini, classi e sottocartelle) in un prog
     font-size: 11px; padding: 0; text-transform: none; letter-spacing: 0;
   }
   .seclink:hover { color: var(--accent-strong); text-decoration: underline; }
+  .loaderr {
+    font-size: 12px; color: var(--dim); max-width: 60ch; margin: 6px auto 0;
+    overflow-wrap: anywhere;
+  }
+  .bibbox { max-width: 560px; text-align: left; }
+  .bibtitle { margin: 0 0 4px; font-size: 16px; }
+  .bibsub { margin: 0 0 12px; color: var(--dim); font-size: 13px; line-height: 1.5; }
+  .bibrow {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 8px 0; border-top: 1px solid var(--border-soft); font-size: 13px; line-height: 1.45;
+  }
+  .bibrow input { margin-top: 3px; }
+  .bibhint { color: var(--dim); font-size: 12px; }
   .emptyacts {
     display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px;
   }

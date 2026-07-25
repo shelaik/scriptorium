@@ -2,6 +2,12 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.45 — Revisione dell'interfaccia, seconda parte
+- **Import di una bibliografia: un solo pannello di opzioni** al posto di tre o quattro conferme in fila (dove «Annulla» significava a volta «no grazie» e a volta «abbandona tutto»). Ora vedi tutte le scelte insieme — cerca i PDF, raccogli in una raccolta, importa il progetto LaTeX, cartella dei PDF esportati — le regoli e premi **Importa** una volta sola.
+- **Al termine dell'import ti porto dove sono finite le voci** (la raccolta appena creata), invece di lasciarti in «Tutti» a chiederti cosa sia successo.
+- **Il segnale «metadati non recuperati» è diventato un pulsante**: da una scheda incompleta si arriva al recupero *di quel documento* con un clic. Prima era testo inerte che rimandava a un pulsante generico.
+- **Gli errori non si travestono più da schermata vuota**: se l'elenco non si carica, l'app dice *cosa* è andato storto e offre «Riprova». Prima leggevi «Nessun documento» e non capivi perché.
+
 ## 0.9.44 — Revisione dell'interfaccia: le funzioni ora si trovano
 Da un audit completo dell'esperienza d'uso (80 rilievi) è emersa una causa comune ai «c'era ma non l'ho trovato»: **la barra strumenti erano 23 icone mute**. Questa versione affronta il problema alla radice.
 - **Barra con le etichette scritte** sulle porte principali — *Importa · Archivio · Appunti · Progetti · Cura della libreria* — separatori tra i gruppi, e **scorrimento** invece del taglio a finestra stretta (prima, sotto i 950 px, sparivano Aspetto e Sistema→Impostazioni).
