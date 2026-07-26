@@ -748,7 +748,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.48";
+  const APP_VERSION = "0.9.49";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -3157,6 +3157,7 @@
   let dragP: Promise<() => void> | undefined;
   let embP: Promise<() => void> | undefined;
   let watchP: Promise<() => void> | undefined;
+  let watchedP: Promise<() => void> | undefined;
   let ragP: Promise<() => void> | undefined;
   let refdoiP: Promise<() => void> | undefined;
   let askP: Promise<() => void> | undefined;
@@ -3243,6 +3244,14 @@
       graphError = false;
       if (view === "map") loadGraph(true);
     });
+    // La cartella sorvegliata importa da sola: dillo, o il paper compare in
+    // griglia senza che si capisca da dove arriva.
+    watchedP = listen<string>("watched-imported", (e) => {
+      const name = (e.payload ?? "").trim();
+      status = name
+        ? `Importato dalla cartella sorvegliata: ${name} ✓`
+        : "Importato un PDF dalla cartella sorvegliata ✓";
+    });
     // A PDF grabbed from the browser via the bookmarklet connector.
     connP = listen<string>("connector-added", (e) => {
       const s = e.payload;
@@ -3290,6 +3299,7 @@
       dragP?.then((f) => f());
       embP?.then((f) => f());
       watchP?.then((f) => f());
+      watchedP?.then((f) => f());
       ragP?.then((f) => f());
       refdoiP?.then((f) => f());
       askP?.then((f) => f());

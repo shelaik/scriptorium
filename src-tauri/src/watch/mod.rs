@@ -64,6 +64,10 @@ fn import_watched(app: &AppHandle, path: PathBuf) {
             let _ = app.emit("library-changed", ());
             let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             crate::pulse::blip(&app, "cartella", &format!("Nuovo PDF dalla cartella sorvegliata: {name}"));
+            // Anche la finestra principale deve dirlo: finora un import dalla
+            // cartella sorvegliata compariva in griglia senza una parola, e chi
+            // non teneva aperta la Plancia non sapeva da dove fosse spuntato.
+            let _ = app.emit("watched-imported", name);
             crate::mirror::request_sync(&app);
         }
     } else {

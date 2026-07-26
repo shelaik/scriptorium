@@ -295,7 +295,13 @@
     }
   }
 
+  /** La sincronizzazione RISCRIVE refs.bib da zero: un clic distratto cancellava
+   *  le voci aggiunte a mano, senza chiedere niente e senza modo di tornare
+   *  indietro. Ora il pulsante chiede conferma sul posto. */
+  let syncAsk = $state(false);
+
   async function doSyncBib() {
+    syncAsk = false;
     if (!current) return;
     try {
       const n = await syncProjectBib(current);
@@ -527,9 +533,18 @@
             </div>
           {/if}
         </div>
-        <button class="tbtn" onclick={doSyncBib} title="Riscrive refs.bib con tutta la libreria">
-          Sincronizza bibliografia
-        </button>
+        {#if syncAsk}
+          <span class="syncask">
+            Sovrascrivo <code>refs.bib</code> con tutta la libreria: quello che c'è ora, comprese le
+            voci scritte a mano, va perso.
+            <button class="tbtn small" onclick={() => (syncAsk = false)}>Annulla</button>
+            <button class="tbtn small primary" onclick={doSyncBib}>Sovrascrivi</button>
+          </span>
+        {:else}
+          <button class="tbtn" onclick={() => (syncAsk = true)} title="Riscrive refs.bib con tutta la libreria (chiede conferma)">
+            Sincronizza bibliografia
+          </button>
+        {/if}
         <button class="tbtn primary" onclick={doCompile} disabled={compiling}>
           {compiling ? "Compilo…" : "Compila"}
         </button>
@@ -824,6 +839,30 @@
   }
   .tbtn.ghost {
     align-self: stretch;
+  }
+  .tbtn.small {
+    padding: 3px 10px;
+    font-size: 0.76rem;
+  }
+  /* Conferma in linea della sincronizzazione: sostituisce il pulsante, così la
+     domanda sta dove stava l'azione e non serve un modale. */
+  .syncask {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 0.78rem;
+    color: var(--dim);
+    background: var(--panel);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r-sm);
+    padding: 4px 10px;
+  }
+  .syncask code {
+    font-size: 0.76rem;
+    background: var(--field);
+    border-radius: 3px;
+    padding: 0 4px;
   }
   .citewrap {
     position: relative;

@@ -2,6 +2,11 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.49 — Due avvisi che mancavano
+- **La cartella sorvegliata ora lo dice**: quando importa un PDF da sola, compare il nome del file. Prima il paper appariva in griglia senza una parola, e capire da dove fosse spuntato richiedeva di tenere aperta la Plancia.
+- **«Sincronizza bibliografia» chiede conferma**: riscrive `refs.bib` da zero, quindi le voci aggiunte a mano al file sparivano con un clic distratto e senza modo di tornare indietro. Ora la domanda compare al posto del pulsante, e dice cosa si perde.
+- Prima versione installata **dall'app stessa**, se hai la 0.9.48: *Sistema → Controlla aggiornamenti*.
+
 ## 0.9.48 — Aggiornarsi da dentro l'app, con il tuo permesso
 - **«Controlla aggiornamenti» ora fa il lavoro intero**: se c'è una versione nuova ti mostro **cosa cambia**, e se dici di sì la scarico con la barra di avanzamento, la installo e ti chiedo se riavviare. Prima ti mandava soltanto su GitHub a scaricare a mano.
 - **Niente parte senza il tuo ok**, e l'app **non contatta GitHub da sola**: l'unica verifica è quella che chiedi tu dal menu *Sistema*. (Prima c'era un controllo silenzioso una volta al giorno: è stato tolto.)
