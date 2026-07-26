@@ -1,6 +1,6 @@
 [package]
 name = "pdfmanage"
-version = "0.9.47"
+version = "0.9.48"
 description = "Lean, fast, local-first PDF & reference manager"
 authors = ["you"]
 edition = "2021"
@@ -115,6 +115,13 @@ portable-pty = "0.8"
 # --- Browser connector: a tiny loopback HTTP server for the "grab a PDF from
 #     the browser" bookmarklet (blocking, no async runtime, few deps) ---
 tiny_http = "0.12"
+
+# --- Aggiornamento in-app (scarica + installa, firmato con minisign) ---
+# `default-features = false` + native-tls: come per reqwest, evita di tirarsi
+# dentro rustls (cmake/NASM) quando il resto dell'app usa già SChannel.
+# `process` serve solo per il riavvio dopo l'installazione.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls"] }
+tauri-plugin-process = "2"
 
 # --- OCR fallback for scanned PDFs: the built-in Windows.Media.Ocr engine
 #     (no bundled engine/models; uses the OS OCR language packs). ---

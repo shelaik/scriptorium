@@ -1262,6 +1262,20 @@ export interface UpdateInfo {
 }
 export const checkUpdate = () => invoke<UpdateInfo>("check_update");
 
+/** Una sezione del CHANGELOG incluso nell'installer. */
+export interface ReleaseNote {
+  version: string;
+  title: string;
+  body: string;
+}
+/** Le novità pubblicate dopo `since` e fino alla versione in esecuzione. */
+export const releaseNotesSince = (since: string) =>
+  invoke<ReleaseNote[]>("release_notes_since", { since });
+/** L'ultima versione che l'utente ha visto girare ("" alla prima installazione). */
+export const lastSeenVersion = () => invoke<string>("last_seen_version");
+/** Segna la versione corrente come vista: le novità non si ripresentano. */
+export const markVersionSeen = () => invoke<void>("mark_version_seen");
+
 // ===== Plancia (monitor dei processi interni, finestra separata) =====
 export const openPlancia = () => invoke<void>("open_plancia");
 

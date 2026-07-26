@@ -2,6 +2,13 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.48 — Aggiornarsi da dentro l'app, con il tuo permesso
+- **«Controlla aggiornamenti» ora fa il lavoro intero**: se c'è una versione nuova ti mostro **cosa cambia**, e se dici di sì la scarico con la barra di avanzamento, la installo e ti chiedo se riavviare. Prima ti mandava soltanto su GitHub a scaricare a mano.
+- **Niente parte senza il tuo ok**, e l'app **non contatta GitHub da sola**: l'unica verifica è quella che chiedi tu dal menu *Sistema*. (Prima c'era un controllo silenzioso una volta al giorno: è stato tolto.)
+- **Ogni aggiornamento è firmato.** L'app verifica la firma crittografica del pacchetto e rifiuta qualunque cosa non sia firmata con la chiave di Scriptorium — nessuno può farti installare un finto aggiornamento, nemmeno se GitHub venisse compromesso.
+- **Al riavvio, le novità**: un riquadro racconta cosa è cambiato, una volta sola. Se salti più versioni le vedi tutte; alla prima installazione non compare. Il testo viene dal changelog incluso nel programma, quindi funziona anche offline.
+- La tua libreria non viene toccata: sta in `%APPDATA%`, separata dal programma, e prima di ogni cambio di versione il database viene comunque salvato in `backups/`.
+
 ## 0.9.47 — Il PDF spostato non è più un vicolo cieco, e le evidenziazioni si cercano
 - **«Ritrova il file…»**: se sposti o rinomini un PDF fuori da Scriptorium, aprendolo ora ti chiedo dov'è finito invece di darti un errore senza uscita. La scheda resta **intatta** — evidenziazioni, tag, nota, citekey, citazioni. Lo stesso pulsante è in *Cura della libreria → File mancanti sul disco*.
 - **Hai spostato un'intera cartella?** Dal primo file imparo lo spostamento e ti propongo di **ricollegare tutti gli altri in un colpo**, verificando l'impronta (SHA-256) di ciascuno: chi non corrisponde resta com'è, mai un abbinamento tirato a indovinare.

@@ -2988,6 +2988,90 @@ pub async fn check_update() -> Result<UpdateInfo, String> {
     Ok(UpdateInfo { current, latest, newer, url: REPO.into() })
 }
 
+// ===== «Novità della versione»: il changelog mostrato una volta dopo un aggiornamento =====
+
+/// Una sezione del CHANGELOG: il titolo della versione e il suo corpo Markdown.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReleaseNote {
+    pub version: String,
+    pub title: String,
+    pub body: String,
+}
+
+/// Spezza il CHANGELOG nelle sue sezioni `## <versione> — <titolo>`, dalla più
+/// recente. Puro (niente IO): testato.
+fn parse_changelog(md: &str) -> Vec<ReleaseNote> {
+    let mut out: Vec<ReleaseNote> = Vec::new();
+    for line in md.lines() {
+        if let Some(head) = line.strip_prefix("## ") {
+            let head = head.trim();
+            // «0.9.47 — Titolo» oppure «0.9.47 - Titolo» oppure solo «0.9.47».
+            let (ver, title) = match head.find([
+                '—', '–', '-', ':',
+            ]) {
+                Some(i) => (head[..i].trim(), head[i..].trim_start_matches(['—', '–', '-', ':']).trim()),
+                None => (head, ""),
+            };
+            let ver = ver.trim().trim_start_matches('v').trim();
+            // Un titolo che non comincia con un numero non è una versione
+            // («## Note», «## Non rilasciato»): tienilo fuori.
+            if ver.is_empty() || !ver.starts_with(|c: char| c.is_ascii_digit()) {
+                continue;
+            }
+            out.push(ReleaseNote { version: ver.to_string(), title: title.to_string(), body: String::new() });
+        } else if let Some(last) = out.last_mut() {
+            last.body.push_str(line);
+            last.body.push('\n');
+        }
+    }
+    for n in &mut out {
+        n.body = n.body.trim().to_string();
+    }
+    out
+}
+
+/// Le sezioni del changelog più recenti di `since` (esclusa) e non più recenti
+/// della versione in esecuzione. Con `since` vuoto (prima installazione, o
+/// libreria appena ripristinata) non restituisce nulla: le «novità» hanno senso
+/// solo rispetto a una versione che l'utente ha davvero usato.
+#[tauri::command]
+pub fn release_notes_since(app: AppHandle, since: String) -> Result<Vec<ReleaseNote>, String> {
+    if since.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let current = env!("CARGO_PKG_VERSION");
+    let path = app
+        .path()
+        .resolve("CHANGELOG.md", tauri::path::BaseDirectory::Resource)
+        .map_err(|e| e.to_string())?;
+    let md = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    Ok(parse_changelog(&md)
+        .into_iter()
+        .filter(|n| version_newer(&n.version, &since) && !version_newer(&n.version, current))
+        .take(10)
+        .collect())
+}
+
+/// L'ultima versione che l'utente ha visto girare (per «Novità»); vuota alla
+/// prima installazione.
+#[tauri::command]
+pub fn last_seen_version(state: State<'_, AppState>) -> Result<String, String> {
+    let conn = state.db.lock();
+    Ok(setting(&conn, "last_seen_version").unwrap_or_default())
+}
+
+/// Segna la versione in esecuzione come «vista»: le novità non si ripresentano.
+#[tauri::command]
+pub fn mark_version_seen(state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.db.lock();
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_seen_version', ?1)",
+        params![env!("CARGO_PKG_VERSION")],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// true se `a` è più nuova di `b` (componenti numeriche, tollerante a "v" e suffissi).
 fn version_newer(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Vec<u64> {
@@ -3028,6 +3112,54 @@ mod version_tests {
         assert!(version_newer("v1.0.1", "1.0.0")); // prefisso v tollerato
         assert!(version_newer("1.0.0.1", "1.0.0")); // componente extra
         assert!(!version_newer("garbage", "0.1.0")); // non numerico → 0
+    }
+}
+
+#[cfg(test)]
+mod changelog_tests {
+    use super::parse_changelog;
+
+    const MD: &str = "# Changelog\n\nPreambolo che non appartiene a nessuna versione.\n\n\
+## 0.9.47 — Titolo nuovo\n- riga A\n- riga B\n\n\
+## 0.9.46 — Titolo vecchio\n- riga C\n\n\
+## Note per chi sviluppa\n- non è una versione\n";
+
+    #[test]
+    fn splits_by_version_heading() {
+        let n = parse_changelog(MD);
+        assert_eq!(n.len(), 2, "solo le sezioni che iniziano con un numero");
+        assert_eq!(n[0].version, "0.9.47");
+        assert_eq!(n[0].title, "Titolo nuovo");
+        assert!(n[0].body.contains("riga A") && n[0].body.contains("riga B"));
+        // Il corpo di una sezione non deve sconfinare in quella dopo.
+        assert!(!n[0].body.contains("riga C"));
+        assert_eq!(n[1].version, "0.9.46");
+        // Il preambolo prima della prima intestazione non finisce da nessuna parte.
+        assert!(!n.iter().any(|x| x.body.contains("Preambolo")));
+    }
+
+    /// Il CHANGELOG VERO deve essere leggibile dal parser: è il testo che
+    /// l'utente vede nel pannello «Novità» dopo un aggiornamento, e una
+    /// intestazione scritta in un modo che il parser non riconosce lo
+    /// lascerebbe vuoto senza che nessuno se ne accorga.
+    #[test]
+    fn the_real_changelog_parses() {
+        let md = include_str!("../../CHANGELOG.md");
+        let n = parse_changelog(md);
+        assert!(n.len() > 5, "poche sezioni riconosciute: {}", n.len());
+        assert_eq!(n[0].version, env!("CARGO_PKG_VERSION"), "la prima voce dev'essere la versione in uscita");
+        assert!(!n[0].title.is_empty(), "la voce in cima ha un titolo");
+        assert!(!n[0].body.is_empty(), "la voce in cima ha un corpo");
+        assert!(n.iter().all(|x| x.version.starts_with(|c: char| c.is_ascii_digit())));
+    }
+
+    #[test]
+    fn tolerates_other_dashes_and_missing_title() {
+        let n = parse_changelog("## 1.2.3 - Con trattino\ntesto\n\n## 2.0.0\nsenza titolo\n");
+        assert_eq!(n[0].version, "1.2.3");
+        assert_eq!(n[0].title, "Con trattino");
+        assert_eq!(n[1].version, "2.0.0");
+        assert_eq!(n[1].title, "");
     }
 }
 

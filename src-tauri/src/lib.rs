@@ -68,6 +68,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Aggiornamento in-app: il plugin scarica e installa SOLO quando il
+        // frontend glielo chiede (nessun controllo automatico, per scelta
+        // dell'utente); `process` serve unicamente al riavvio dopo l'installazione.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -331,6 +336,9 @@ pub fn run() {
             commands::compile_project,
             commands::reveal_project_dir,
             commands::check_update,
+            commands::release_notes_since,
+            commands::last_seen_version,
+            commands::mark_version_seen,
             commands::term_open,
             commands::term_write,
             commands::term_resize,

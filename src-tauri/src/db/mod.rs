@@ -353,7 +353,7 @@ pub fn open(path: &Path) -> Result<Connection> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::params;
+    use rusqlite::{params, OptionalExtension};
     use zerocopy::IntoBytes;
 
     /// End-to-end smoke test: registration -> migrations -> relational insert
@@ -491,6 +491,12 @@ mod tests {
             conn.query_row("SELECT count(*) FROM annotations_fts_docsize", [], |r| r.get(0))?;
         println!("annotazioni: {rows} — indicizzate: {indexed}");
         assert_eq!(rows, indexed, "indice delle evidenziazioni disallineato");
+        // L'app segna la versione vista al primo avvio: se la riga manca, il
+        // riquadro «Novità» non comparirebbe mai dopo un aggiornamento.
+        let seen: Option<String> = conn
+            .query_row("SELECT value FROM settings WHERE key = 'last_seen_version'", [], |r| r.get(0))
+            .optional()?;
+        println!("ultima versione vista: {}", seen.as_deref().unwrap_or("(mai)"));
         Ok(())
     }
 

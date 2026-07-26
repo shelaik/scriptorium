@@ -3,6 +3,8 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { listen } from "@tauri-apps/api/event";
   import { open, save } from "@tauri-apps/plugin-dialog";
+  import { check, type Update } from "@tauri-apps/plugin-updater";
+  import { relaunch } from "@tauri-apps/plugin-process";
   import {
     importFiles,
     listDocuments,
@@ -18,6 +20,10 @@
     searchAnnotations,
     annotationCounts,
     type AnnotationHit,
+    releaseNotesSince,
+    lastSeenVersion,
+    markVersionSeen,
+    type ReleaseNote,
     relinkDocument,
     relinkApplyMapping,
     relatedDocuments,
@@ -565,21 +571,115 @@
   /** Confronta la versione con GitHub. `manual` = lanciato dall'utente (parla
    *  sempre); all'avvio è silenzioso, gira solo con la scoperta online attiva
    *  e al più una volta al giorno. */
+  /** L'aggiornamento trovato: tenuto qui finché l'utente non decide. */
+  let pendingUpdate = $state<Update | null>(null);
+  let updateModal = $state(false);
+  let updateNotes = $state("");
+  /** "idle" → in attesa del tuo ok · "down" → sto scaricando · "ready" → installato, manca il riavvio */
+  let updatePhase = $state<"idle" | "down" | "ready">("idle");
+  let updateGot = $state(0); // byte scaricati
+  let updateTot = $state(0); // byte totali (0 = il server non li dichiara)
+  let updateErr = $state("");
+
+  /** Controlla se c'è una versione nuova. Parte SOLO da un'azione dell'utente:
+   *  l'app non contatta la rete da sola per gli aggiornamenti. */
   async function checkUpdatesNow(manual: boolean) {
     if (manual) status = "Controllo aggiornamenti…";
+    updateErr = "";
     try {
+      // Il canale firmato può non rispondere (manifesto assente sulla release
+      // più recente, rete a singhiozzo): il suo errore NON deve impedire il
+      // confronto di versione qui sotto, che è la risposta di riserva.
+      let up: Update | null = null;
+      try {
+        up = await check();
+      } catch {
+        /* si prosegue col confronto di versione */
+      }
+      if (up) {
+        pendingUpdate = up;
+        updateLatest = up.version;
+        updateNotes = (up.body ?? "").trim();
+        updatePhase = "idle";
+        updateModal = true;
+        status = "";
+        return;
+      }
+      // Nessun aggiornamento dal canale firmato: ricadi sul confronto di
+      // versione (dice comunque la verità se il manifesto manca o è vecchio).
       const u = await checkUpdate();
       updateUrl = u.url;
       if (u.newer && u.latest) {
         updateLatest = u.latest;
-        status = `È disponibile Scriptorium ${u.latest} (hai la ${u.current}) — clic sul segnalino in alto per aprire GitHub`;
+        status = `È disponibile Scriptorium ${u.latest} (hai la ${u.current}) — scaricala da GitHub col segnalino in alto`;
       } else if (manual) {
         status = u.latest
           ? `Sei aggiornato: ${u.current} è l'ultima versione`
-          : "Controllo non riuscito: repository non raggiungibile (privato oppure offline)";
+          : "Controllo non riuscito: GitHub non raggiungibile (sei offline?)";
       }
     } catch (e) {
       if (manual) status = "Controllo aggiornamenti: " + e;
+    }
+  }
+
+  /** Scarica e installa, con avanzamento. Solo dopo il clic su «Scarica e installa».
+   *  ATTENZIONE: su Windows il plugin lancia l'installer e chiude SUBITO l'app
+   *  (`std::process::exit(0)` dentro tauri-plugin-updater) — quindi il codice
+   *  dopo `downloadAndInstall` di norma non gira, e qualunque lavoro non
+   *  salvato andrebbe perso. Per questo si salva prima. Il ramo "ready" resta
+   *  come rete di sicurezza se un giorno l'uscita non fosse immediata. */
+  async function runUpdate() {
+    const up = pendingUpdate;
+    if (!up || updatePhase !== "idle") return;
+    updatePhase = "down";
+    updateGot = 0;
+    updateTot = 0;
+    updateErr = "";
+    try {
+      await flushNote(); // l'appunto aperto ha un salvataggio ritardato
+    } catch {
+      /* se non riesce a salvare, meglio non aggiornare adesso */
+      updatePhase = "idle";
+      updateErr = "Non riesco a salvare l'appunto aperto: salvalo a mano, poi riprova.";
+      return;
+    }
+    try {
+      await up.downloadAndInstall((ev) => {
+        if (ev.event === "Started") updateTot = ev.data.contentLength ?? 0;
+        else if (ev.event === "Progress") updateGot += ev.data.chunkLength;
+        else if (ev.event === "Finished") updateGot = updateTot || updateGot;
+      });
+      updatePhase = "ready";
+    } catch (e) {
+      updatePhase = "idle";
+      updateErr = String(e);
+    }
+  }
+
+  async function restartNow() {
+    try {
+      await relaunch();
+    } catch (e) {
+      updateErr = "Non riesco a riavviare: " + e + " — chiudi e riapri Scriptorium a mano.";
+    }
+  }
+
+  // ----- «Novità della versione»: il changelog, una volta sola dopo un aggiornamento -----
+  let whatsNew = $state<ReleaseNote[]>([]);
+  let whatsNewModal = $state(false);
+  async function showWhatsNewIfUpdated() {
+    try {
+      const seen = await lastSeenVersion();
+      if (seen === APP_VERSION) return;
+      // Alla PRIMA installazione non c'è nulla da raccontare: registra e taci.
+      const notes = seen ? await releaseNotesSince(seen) : [];
+      await markVersionSeen();
+      if (notes.length) {
+        whatsNew = notes;
+        whatsNewModal = true;
+      }
+    } catch {
+      /* il changelog è un di più: non deve mai disturbare l'avvio */
     }
   }
 
@@ -648,7 +748,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.47";
+  const APP_VERSION = "0.9.48";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -3071,20 +3171,12 @@
     loadSidebar();
     loadConnector();
     checkClipboard(); // magari l'app è stata aperta subito dopo aver copiato un link
-    // Avviso-versione all'avvio: silenzioso, opt-in (solo con la scoperta online
-    // attiva) e al più una volta al giorno.
-    void (async () => {
-      try {
-        const last = Number(localStorage.getItem("scriptorium-update-check") || 0);
-        if (Date.now() - last < 24 * 3600 * 1000) return;
-        const s = await getDiscoverySettings();
-        if (!s.enabled) return;
-        localStorage.setItem("scriptorium-update-check", String(Date.now()));
-        await checkUpdatesNow(false);
-      } catch {
-        /* offline o impostazioni non leggibili: nessun avviso */
-      }
-    })();
+    // Nessun controllo aggiornamenti all'avvio: per scelta esplicita l'app non
+    // contatta GitHub se non premi «Controlla aggiornamenti». (Prima c'era una
+    // verifica silenziosa una volta al giorno.)
+    // Novità della versione: locale, nessuna rete. Compare una volta sola dopo
+    // un aggiornamento, mai alla prima installazione.
+    void showWhatsNewIfUpdated();
     getWatchedFolder()
       .then((w) => (watchedFolder = w))
       .catch(() => {});
@@ -3758,7 +3850,7 @@
         icon: I.gear,
         children: [
           { id: "gy-set", label: "Impostazioni", icon: I.gear, action: () => openSettings() },
-          { id: "gy-upd", label: "Controlla aggiornamenti", hint: "Confronta la tua versione con GitHub — solo un avviso, niente installazioni automatiche", action: () => void checkUpdatesNow(true) },
+          { id: "gy-upd", label: "Controlla aggiornamenti", hint: "L'unico momento in cui l'app cerca aggiornamenti: se ce n'è uno ti mostro le novità e decidi tu se installarlo", action: () => void checkUpdatesNow(true) },
           { id: "gy-coach", label: "Rivedi il benvenuto", hint: "Ripropone il messaggio di primo avvio (tasto destro, palette, guida)", action: () => { try { localStorage.removeItem("scriptorium-coach-seen"); } catch { /* ignore */ } showCoach = true; } },
           { id: "gy-about", label: "Informazioni", action: () => (aboutModal = true) },
         ],
@@ -5320,9 +5412,11 @@
       {#if updateLatest}
         <button
           class="aichip active"
-          title={`È disponibile Scriptorium ${updateLatest} — apri GitHub`}
+          title={pendingUpdate
+            ? `È disponibile Scriptorium ${updateLatest} — clic per vedere le novità e installare`
+            : `È disponibile Scriptorium ${updateLatest} — apri GitHub`}
           aria-label={`Nuova versione ${updateLatest} disponibile`}
-          onclick={() => openInBrowser(updateUrl)}
+          onclick={() => (pendingUpdate ? (updateModal = true) : openInBrowser(updateUrl))}
         >
           <span class="aidot"></span>↑ {updateLatest}
         </button>
@@ -7081,6 +7175,72 @@
     </div>
   {/if}
 
+  {#if updateModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget && updatePhase !== "down") updateModal = false; }} role="presentation">
+      <div class="idmodal updmodal" role="dialog" tabindex="-1" aria-label="Aggiornamento disponibile">
+        <h2>Scriptorium {updateLatest} è disponibile</h2>
+        <p class="dimtext">Hai la {APP_VERSION}. La tua libreria, gli appunti e le impostazioni non vengono toccati.</p>
+
+        {#if updateNotes}
+          <div class="updnotes">{updateNotes}</div>
+        {/if}
+
+        {#if updatePhase === "idle"}
+          <p class="updwarn">
+            Finito lo scaricamento, <strong>Scriptorium si chiude</strong> per farsi sostituire e si
+            riapre da solo. Chiudi prima quello che stai facendo altrove.
+          </p>
+        {:else if updatePhase === "down"}
+          <div class="updprog">
+            <div class="updbar"><div class="updfill" style="width:{updateTot ? Math.min(100, (updateGot / updateTot) * 100) : 12}%"></div></div>
+            <span class="dimtext">
+              {updateTot
+                ? `Scarico… ${(updateGot / 1048576).toFixed(1)} di ${(updateTot / 1048576).toFixed(1)} MB`
+                : `Scarico… ${(updateGot / 1048576).toFixed(1)} MB`}
+            </span>
+          </div>
+          <p class="dimtext">Poi parte l'installazione: una finestrella di avanzamento, nessuna domanda — e l'app si chiude da sola.</p>
+        {:else if updatePhase === "ready"}
+          <p class="updok">Installato ✓ — riavvia per usare la versione nuova.</p>
+        {/if}
+
+        {#if updateErr}<p class="upderr">{updateErr}</p>{/if}
+
+        <div class="modactions">
+          {#if updatePhase === "idle"}
+            <button class="ghost" onclick={() => (updateModal = false)}>Più tardi</button>
+            <button class="primary" onclick={runUpdate}>Scarica e installa</button>
+          {:else if updatePhase === "down"}
+            <button class="ghost" disabled>In corso…</button>
+          {:else}
+            <button class="ghost" onclick={() => (updateModal = false)}>Riavvio io</button>
+            <button class="primary" onclick={restartNow}>Riavvia ora</button>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if whatsNewModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) whatsNewModal = false; }} role="presentation">
+      <div class="idmodal updmodal" role="dialog" tabindex="-1" aria-label="Novità di questa versione">
+        <h2>{whatsNew.length === 1 ? `Novità della ${whatsNew[0].version}` : "Novità dalle ultime versioni"}</h2>
+        <div class="newsbody">
+          {#each whatsNew as n (n.version)}
+            <h3 class="newsh">{n.version}{n.title ? ` — ${n.title}` : ""}</h3>
+            <div class="updnotes">{n.body}</div>
+          {/each}
+        </div>
+        <div class="modactions">
+          <button class="ghost" onclick={() => { whatsNewModal = false; openHelp(); }}>Apri la guida</button>
+          <button class="primary" onclick={() => (whatsNewModal = false)}>Ho capito</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if citModal}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) citModal = false; }} role="presentation">
@@ -7709,6 +7869,7 @@
           <ul>
             <li>Cartella dell'app: <code>%APPDATA%\com.pdfmanage.app</code> — <code>pdfmanage.db</code> (il catalogo), <code>papers/</code> (i PDF scaricati; quelli importati dal disco <em>restano dove sono</em>), <code>notes/</code> (gli appunti .md + <code>assets/</code>), <code>projects/</code> (i progetti LaTeX), <code>thumbnails/</code> e i modelli locali (<code>mathocr</code>, <code>tablestruct</code>, <code>fastembed_cache</code>).</li>
             <li>Appunti e progetti sono <strong>file veri</strong>: modificarli da fuori è previsto. <strong>Backup libreria</strong> (barra) fa una copia completa; <strong>Esporta</strong> produce citazioni (BibTeX/RIS/CSL) o note per <strong>Obsidian</strong>.</li>
+            <li><strong>Aggiornamenti — solo quando li chiedi tu.</strong> L'app non contatta GitHub da sola: l'unica verifica parte da <em>Sistema → Controlla aggiornamenti</em>. Se ce n'è uno ti mostro <strong>cosa cambia</strong> e decidi: «Scarica e installa» mostra l'avanzamento, installa (una finestrella, nessuna domanda) e ti chiede se riavviare. Ogni aggiornamento è <strong>firmato</strong>: uno non firmato con la chiave di Scriptorium viene rifiutato. La tua libreria non viene toccata — sta in <code>%APPDATA%</code>, separata dal programma — e prima di ogni cambio di versione il database viene comunque salvato in <code>backups/</code>. Dopo il riavvio compare una volta il riquadro con le <strong>novità</strong>.</li>
             <li><strong>Terminale</strong> integrato (&gt;_, es. per <code>claude code</code>); la CLI <code>scriptorium-cli</code> interroga da fuori, in sola lettura, libreria <em>e</em> Appunti <em>e</em> progetti LaTeX (<code>query</code>, <code>bib</code>, <code>notes</code>, <code>note</code>, <code>search-notes</code>, <code>projects</code>, <code>stats</code>…). Il <strong>server MCP</strong> <code>scriptorium-mcp</code> porta gli stessi dati (9 strumenti, sola lettura) dentro <strong>Claude Desktop / Claude Code</strong> e qualsiasi client MCP: config pronta da copiare in <strong>Impostazioni → CLI e MCP</strong>. Il <strong>connettore browser</strong> per «Aggancia» è un servizio solo-locale, spegnibile in Impostazioni. <strong>11 temi</strong> in Aspetto.</li>
           </ul>
 
@@ -9581,6 +9742,33 @@
     vertical-align: 1px; cursor: help;
   }
   .aisum.inline { margin-left: 5px; padding: 0 4px; }
+
+  /* ===== Aggiornamento e «Novità della versione» ===== */
+  .updmodal { width: 560px; max-width: 92vw; }
+  /* Il changelog arriva in Markdown: lo mostro com'è (niente HTML da testo
+     remoto), ma con gli a-capo rispettati e in un riquadro scorrevole. */
+  .updnotes {
+    white-space: pre-wrap;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r-sm);
+    padding: 10px 13px;
+    margin: 10px 0 4px;
+    max-height: 34vh;
+    overflow: auto;
+  }
+  .newsbody { max-height: 52vh; overflow: auto; padding-right: 4px; }
+  .newsh { margin: 14px 0 0; font-size: 13.5px; color: var(--dim); font-weight: 600; }
+  .newsh:first-child { margin-top: 2px; }
+  .updprog { margin: 14px 0 6px; display: flex; flex-direction: column; gap: 6px; }
+  .updbar { height: 8px; background: var(--field); border-radius: var(--r-pill); overflow: hidden; }
+  .updfill { height: 100%; background: var(--accent); transition: width 0.25s ease; }
+  .updok { color: var(--accent); font-size: 13.5px; margin: 12px 0 0; }
+  .updwarn { font-size: 12.5px; color: var(--dim); margin: 12px 0 0; line-height: 1.5; }
+  .upderr { color: var(--danger); font-size: 13px; margin: 10px 0 0; }
   /* Quante evidenziazioni ha il documento: la sola traccia visibile senza aprirlo. */
   .annobadge {
     display: inline-block; margin-left: 6px; padding: 0 6px;
