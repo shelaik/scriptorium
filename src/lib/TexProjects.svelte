@@ -9,6 +9,7 @@
   import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { openInBrowser } from "$lib/share";
+  import { fmtDayMonth } from "$lib/format";
   import {
     listProjects,
     createProject,
@@ -409,8 +410,7 @@
   }
 
   function fmtWhen(ms: number | null): string {
-    if (!ms) return "";
-    return new Date(ms).toLocaleDateString("it-IT", { day: "numeric", month: "short" });
+    return ms ? fmtDayMonth(ms) : "";
   }
 </script>
 

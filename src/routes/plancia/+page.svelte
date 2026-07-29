@@ -14,6 +14,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { save } from "@tauri-apps/plugin-dialog";
+  import { fmtClock, fmtNum } from "$lib/format";
 
   // ---- modello dati -----------------------------------------------------------
   interface PulseEvent {
@@ -336,7 +337,7 @@
 
   function fmtTime(ts: number): string {
     // ts è nell'orologio del backend; locale = backend − offset (offset = backend − locale).
-    return new Date(ts - clockOffset).toLocaleTimeString("it-IT", { hour12: false });
+    return fmtClock(ts - clockOffset);
   }
   function fmtDur(ms: number): string {
     if (ms < 1000) return "<1s";
@@ -367,7 +368,7 @@
     return s;
   });
 
-  const fmtN = (n: number) => n.toLocaleString("it-IT");
+  const fmtN = (n: number) => fmtNum(n);
   /** Il readout VERO del nodo in quiete (stile «CURRENT TEMP — 19°C», ma onesto). */
   function readout(n: NodeDef): string {
     if (!stats) return n.sub;

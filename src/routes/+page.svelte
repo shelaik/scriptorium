@@ -3,6 +3,7 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { listen } from "@tauri-apps/api/event";
   import { open, save } from "@tauri-apps/plugin-dialog";
+  import { fmtDateShort, fmtDateTime } from "$lib/format";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import {
@@ -748,7 +749,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.49";
+  const APP_VERSION = "0.9.50";
   const APP_YEAR = "2026";
   let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -4383,9 +4384,9 @@
       /* ignore */
     }
   });
-  // Compact Italian date for the notes list ("10 lug 2026"); null-safe.
-  const noteDateFmt = new Intl.DateTimeFormat("it-IT", { day: "numeric", month: "short", year: "numeric" });
-  const fmtNoteDateShort = (ms: number | null) => (ms ? noteDateFmt.format(new Date(ms)) : "—");
+  // Data compatta per l'elenco degli appunti ("10 lug 2026"); il formato vive in
+  // $lib/format, unico punto che conosce la lingua.
+  const fmtNoteDateShort = (ms: number | null) => fmtDateShort(ms);
   // The rendered order. Derived (not a mutation of notesList) so any refresh —
   // list reload, autosave prepend, append — re-sorts consistently.
   const notesSorted = $derived.by(() => {
@@ -4926,12 +4927,7 @@
   }
   /** Format a note's epoch-ms timestamp for the info line. */
   function fmtNoteDate(ms: number | null): string {
-    if (!ms) return "—";
-    try {
-      return new Date(ms).toLocaleString("it-IT", { dateStyle: "medium", timeStyle: "short" });
-    } catch {
-      return "—";
-    }
+    return fmtDateTime(ms);
   }
   async function removeNote(slug: string) {
     if (noteView && noteView.slug !== slug) await flushNote(); // persist a different open note first
@@ -5307,7 +5303,17 @@
     clearTimeout(statusTimer);
     // Gli errori sono proprio i messaggi che vale la pena leggere: 25s invece
     // di 7, e comunque copiabili e chiudibili a mano.
-    const looksErr = /errore|impossibile|non riesco|fallit|disattivat|non trovat/i.test(status);
+    //
+    // ATTENZIONE: la gravità è dedotta dal TESTO, quindi è legata alla lingua.
+    // Con l'interfaccia in inglese la sola lista italiana smetterebbe di
+    // riconoscere gli errori — in silenzio, senza che nulla appaia rotto: i
+    // messaggi tornerebbero a sparire in 7 secondi e a perdere lo stile
+    // d'errore. Finché le stringhe non sono estratte in un dizionario (dove la
+    // gravità si dichiarerà accanto al messaggio, che è il posto giusto), la
+    // lista copre entrambe le lingue.
+    const looksErr =
+      /errore|impossibile|non riesco|fallit|disattivat|non trovat/i.test(status) ||
+      /\berror|\bcannot\b|can't|couldn't|\bfailed\b|failure|unable to|not found|\bdisabled\b|\binvalid\b/i.test(status);
     statusIsError = looksErr;
     statusTimer = setTimeout(() => (status = ""), looksErr ? 25000 : 7000);
   });
@@ -8906,7 +8912,9 @@
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden;
     box-shadow: var(--shadow-sm);
   }
-  col.c-year { width: 64px; }
+  /* 64px lasciavano ~40px utili: «ANNO» più la freccia di ordinamento e, con
+     l'ordinamento combinato, il numero di rango ci stavano al pelo. */
+  col.c-year { width: 76px; }
   col.c-date { width: 96px; }
   col.c-auth { width: 18%; }
   col.c-venue { width: 16%; }
@@ -8916,6 +8924,10 @@
     position: sticky; top: 0; z-index: 1; background: var(--panel); text-align: left;
     color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px;
     padding: 11px 12px; border-bottom: 1px solid var(--border); white-space: nowrap;
+    /* Le celle (.list td) tagliano coi puntini, le intestazioni no: con
+       `table-layout: fixed` un'intestazione più larga della sua colonna non la
+       allarga, si SOVRAPPONE a quella accanto. Stessa regola delle celle. */
+    overflow: hidden; text-overflow: ellipsis;
   }
   .list th.num, .list td.num { text-align: right; }
   .list th .ar { margin-left: 4px; color: var(--accent); font-size: 9px; }

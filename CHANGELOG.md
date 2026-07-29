@@ -2,6 +2,13 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.50 — Preparativi per l'inglese (e quattro difetti che ne sono usciti)
+Nessun cambiamento visibile nell'uso quotidiano: è la base su cui poggerà il cambio di lingua. Misurando quanto testo contiene il programma sono emersi dei difetti che valeva la pena correggere subito, a prescindere.
+- **Le intestazioni della vista elenco non si sovrappongono più**: le celle troncavano coi puntini, le intestazioni no — e con la tabella a colonne fisse un'intestazione troppo larga finiva *sopra* la colonna accanto. La colonna «Anno» era al limite: allargata.
+- **Date e ore da un punto solo**: erano formattate in cinque posti diversi con la lingua scritta a mano ogni volta. Ora c'è un unico posto da cambiare quando l'interfaccia parlerà due lingue.
+- **Gli errori resteranno riconoscibili anche in inglese**: la durata lunga e lo stile d'errore dei messaggi dipendevano da un elenco di parole italiane. Tradotta l'interfaccia, gli errori sarebbero tornati a sparire in 7 secondi senza che nulla sembrasse rotto.
+- **La finestra si chiama «Scriptorium»**: si intitolava ancora «Tauri + SvelteKit + Typescript App», il nome dell'impalcatura di partenza, e la pagina si dichiarava in inglese.
+
 ## 0.9.49 — Due avvisi che mancavano
 - **La cartella sorvegliata ora lo dice**: quando importa un PDF da sola, compare il nome del file. Prima il paper appariva in griglia senza una parola, e capire da dove fosse spuntato richiedeva di tenere aperta la Plancia.
 - **«Sincronizza bibliografia» chiede conferma**: riscrive `refs.bib` da zero, quindi le voci aggiunte a mano al file sparivano con un clic distratto e senza modo di tornare indietro. Ora la domanda compare al posto del pulsante, e dice cosa si perde.
