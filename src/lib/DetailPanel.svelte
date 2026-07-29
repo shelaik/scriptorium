@@ -9,6 +9,7 @@
     type CitationLinks,
     type Tag,
   } from "$lib/api";
+  import { t, tp } from "$lib/i18n/index.svelte";
 
   // Pannello di dettaglio del documento: un click sulla card lo apre, il
   // doppio click (o Invio, o «Apri») lancia il lettore. Si auto-carica
@@ -84,9 +85,11 @@
 
   const refsInLib = $derived(cit?.references.filter((r) => r.in_library != null).length ?? 0);
 
-  async function toggleTag(t: Tag) {
-    const has = doc.tags.some((x) => x.id === t.id);
-    const ids = has ? doc.tags.filter((x) => x.id !== t.id).map((x) => x.id) : [...doc.tags.map((x) => x.id), t.id];
+  // NB: le variabili locali non possono chiamarsi `t`: ombreggerebbero la
+  // funzione di traduzione importata qui sopra.
+  async function toggleTag(tg: Tag) {
+    const has = doc.tags.some((x) => x.id === tg.id);
+    const ids = has ? doc.tags.filter((x) => x.id !== tg.id).map((x) => x.id) : [...doc.tags.map((x) => x.id), tg.id];
     try {
       await setDocumentTags(doc.id, ids);
       onChanged();
@@ -98,10 +101,10 @@
     const name = newTag.trim();
     if (!name) return;
     try {
-      const existing = tags.find((t) => t.name.toLowerCase() === name.toLowerCase());
-      const t = existing ?? (await createTag(name, tagColors[tags.length % tagColors.length]));
-      if (!doc.tags.some((x) => x.id === t.id)) {
-        await setDocumentTags(doc.id, [...doc.tags.map((x) => x.id), t.id]);
+      const existing = tags.find((x) => x.name.toLowerCase() === name.toLowerCase());
+      const tg = existing ?? (await createTag(name, tagColors[tags.length % tagColors.length]));
+      if (!doc.tags.some((x) => x.id === tg.id)) {
+        await setDocumentTags(doc.id, [...doc.tags.map((x) => x.id), tg.id]);
       }
       newTag = "";
       onChanged();
@@ -131,107 +134,113 @@
   );
 </script>
 
-<aside class="panel" aria-label="Dettaglio documento">
+<aside class="panel" aria-label={t("Dettaglio documento")}>
   <div class="phead">
-    <button class="pico" onclick={(e) => { e.stopPropagation(); onRadial(e); }} title="Tutte le azioni (come il tasto destro)" aria-label="Azioni">⋯</button>
-    <span class="phint">doppio click o Invio per leggere</span>
-    <button class="pico" onclick={onClose} title="Chiudi il pannello (Esc)" aria-label="Chiudi">✕</button>
+    <button class="pico" onclick={(e) => { e.stopPropagation(); onRadial(e); }} title={t("Tutte le azioni (come il tasto destro)")} aria-label={t("Azioni")}>⋯</button>
+    <span class="phint">{t("doppio click o Invio per leggere")}</span>
+    <button class="pico" onclick={onClose} title={t("Chiudi il pannello (Esc)")} aria-label={t("Chiudi")}>✕</button>
   </div>
 
   <div class="pcover" class:noimg={!thumb}>
     {#if thumb}
       <img src={thumb} alt="" />
     {:else}
-      <div class="pph">{doc.has_file ? "PDF" : "Riferimento — senza PDF"}</div>
+      <!-- i18n-exempt: «PDF» e' una sigla identica in inglese -->
+      <div class="pph">{doc.has_file ? "PDF" : t("Riferimento — senza PDF")}</div>
     {/if}
     {#if pct !== null}
-      <div class="pprog" title={doc.is_read ? "Letto" : `Letto al ${pct}%`}><div class="pfill" style="width:{pct}%"></div></div>
+      <div class="pprog" title={doc.is_read ? t("Letto") : t("Letto al {pct}%", { pct })}><div class="pfill" style="width:{pct}%"></div></div>
     {/if}
   </div>
 
-  <h2 class="ptitle">{doc.title ?? "Senza titolo"}</h2>
+  <h2 class="ptitle">{doc.title ?? t("Senza titolo")}</h2>
   {#if doc.authors.length}
     <p class="pauthors">
       {#each authorLine as a, i (i)}
-        {#if a.startsWith("+")}<span class="pmore">{a}</span>{:else}<button class="plink" onclick={() => onAuthor(a)} title={`Tutti i lavori di ${a}`}>{a}</button>{/if}{#if i < authorLine.length - 1}<span class="psep">·</span>{/if}
+        {#if a.startsWith("+")}<span class="pmore">{a}</span>{:else}<button class="plink" onclick={() => onAuthor(a)} title={t("Tutti i lavori di {autore}", { autore: a })}>{a}</button>{/if}{#if i < authorLine.length - 1}<span class="psep">·</span>{/if}
       {/each}
     </p>
   {/if}
+  <!-- i18n-exempt: unisce dati dell'utente (sede, anno) con un separatore neutro -->
   {#if doc.venue || doc.year}<p class="pvenue">{[doc.venue, doc.year].filter(Boolean).join(" · ")}</p>{/if}
   {#if doc.citekey}
-    <button class="pcitekey" onclick={copyCitekey} title="Copia la citekey">{copied ? "copiata ✓" : doc.citekey}</button>
+    <button class="pcitekey" onclick={copyCitekey} title={t("Copia la citekey")}>{copied ? t("copiata ✓") : doc.citekey}</button>
   {/if}
 
   <div class="pactions">
-    <button class="primary popen" onclick={onOpen} disabled={!doc.has_file} title={doc.has_file ? "Apri nel lettore" : "Nessun PDF allegato"}>Apri</button>
-    <button class="pico big" class:on={doc.favorite} onclick={onFavorite} title={doc.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito">{doc.favorite ? "★" : "☆"}</button>
-    <button class="pico big" class:on={doc.is_read} onclick={onRead} title={doc.is_read ? "Segna come da leggere" : "Segna come letto"} aria-label="Letto">✓</button>
+    <button class="primary popen" onclick={onOpen} disabled={!doc.has_file} title={doc.has_file ? t("Apri nel lettore") : t("Nessun PDF allegato")}>{t("Apri")}</button>
+    <button class="pico big" class:on={doc.favorite} onclick={onFavorite} title={doc.favorite ? t("Togli dai preferiti") : t("Aggiungi ai preferiti")} aria-label={t("Preferito")}>{doc.favorite ? "★" : "☆"}</button>
+    <button class="pico big" class:on={doc.is_read} onclick={onRead} title={doc.is_read ? t("Segna come da leggere") : t("Segna come letto")} aria-label={t("Letto")}>✓</button>
   </div>
 
   {#if !doc.has_file}
-    <button class="pattach" onclick={onAttach}>Allega PDF…</button>
+    <button class="pattach" onclick={onAttach}>{t("Allega PDF…")}</button>
   {/if}
 
   <div class="psec">
-    <h3>Tag</h3>
+    <h3>{t("Tag")}</h3>
     <div class="ptags">
-      {#each doc.tags as t (t.id)}
-        <span class="ptag" style="background:{(t.color ?? '#888')}2b; border-color:{t.color ?? '#888'}">
-          {t.name}<button class="ptagx" onclick={() => toggleTag(t)} title="Togli questo tag" aria-label={`Togli ${t.name}`}>×</button>
+      {#each doc.tags as tg (tg.id)}
+        <span class="ptag" style="background:{(tg.color ?? '#888')}2b; border-color:{tg.color ?? '#888'}">
+          {tg.name}<button class="ptagx" onclick={() => toggleTag(tg)} title={t("Togli questo tag")} aria-label={t("Togli il tag {nome}", { nome: tg.name })}>×</button>
         </span>
       {/each}
     </div>
     <div class="ptagadd">
-      <input list="paneltags" placeholder="aggiungi tag…" bind:value={newTag} onkeydown={(e) => e.key === "Enter" && addTag()} />
+      <input list="paneltags" placeholder={t("aggiungi tag…")} bind:value={newTag} onkeydown={(e) => e.key === "Enter" && addTag()} />
       <datalist id="paneltags">
-        {#each tags.filter((t) => !doc.tags.some((x) => x.id === t.id)) as t (t.id)}<option value={t.name}></option>{/each}
+        {#each tags.filter((x) => !doc.tags.some((y) => y.id === x.id)) as tg (tg.id)}<option value={tg.name}></option>{/each}
       </datalist>
-      <button class="pico" onclick={addTag} disabled={!newTag.trim()} title="Aggiungi il tag" aria-label="Aggiungi tag">+</button>
+      <button class="pico" onclick={addTag} disabled={!newTag.trim()} title={t("Aggiungi il tag")} aria-label={t("Aggiungi tag")}>+</button>
     </div>
   </div>
 
   {#if meta?.summary}
     <div class="psec">
       <div class="psechead">
-        <h3>Riassunto AI</h3>
-        {#if onSendToNote}<button class="tonote" title="Manda il riassunto agli Appunti (con citazione a questo paper)" onclick={(e) => onSendToNote?.({ content: meta?.summary ?? "", label: "Riassunto AI di", collapse: false }, e)}>→ Appunti</button>{/if}
+        <h3>{t("Riassunto AI")}</h3>
+        {#if onSendToNote}<button class="tonote" title={t("Manda il riassunto agli Appunti (con citazione a questo paper)")} onclick={(e) => onSendToNote?.({ content: meta?.summary ?? "", label: /* i18n-exempt: etichetta di attribuzione incastonata negli appunti dell'utente */ "Riassunto AI di", collapse: false }, e)}>{t("→ Appunti")}</button>{/if}
       </div>
       <p class="pbody">{meta.summary}</p>
     </div>
   {:else if aiEnabled}
     <div class="psec">
-      <h3>Riassunto AI</h3>
-      <button class="pghost" onclick={onSummarize} disabled={aiBusy}>{aiBusy ? "genero…" : "Genera riassunto"}</button>
+      <h3>{t("Riassunto AI")}</h3>
+      <button class="pghost" onclick={onSummarize} disabled={aiBusy}>{aiBusy ? t("genero…") : t("Genera riassunto")}</button>
     </div>
   {/if}
 
   {#if meta?.abstract_text}
     <div class="psec">
       <div class="psechead">
+        <!-- i18n-exempt: «Abstract» e' identico in inglese -->
         <h3>Abstract</h3>
-        {#if onSendToNote}<button class="tonote" title="Manda l'abstract agli Appunti (con citazione a questo paper)" onclick={(e) => onSendToNote?.({ content: meta?.abstract_text ?? "", label: "Abstract di", collapse: true }, e)}>→ Appunti</button>{/if}
+        {#if onSendToNote}<button class="tonote" title={t("Manda l'abstract agli Appunti (con citazione a questo paper)")} onclick={(e) => onSendToNote?.({ content: meta?.abstract_text ?? "", label: /* i18n-exempt: etichetta di attribuzione incastonata negli appunti dell'utente */ "Abstract di", collapse: true }, e)}>{t("→ Appunti")}</button>{/if}
       </div>
       <p class="pbody" class:clamp={!abstractOpen}>{meta.abstract_text}</p>
       {#if meta.abstract_text.length > 260}
-        <button class="pmore plink" onclick={() => (abstractOpen = !abstractOpen)}>{abstractOpen ? "meno" : "tutto"}</button>
+        <button class="pmore plink" onclick={() => (abstractOpen = !abstractOpen)}>{abstractOpen ? t("meno") : t("tutto")}</button>
       {/if}
     </div>
   {/if}
 
   {#if meta?.notes}
     <div class="psec">
-      <h3>Nota del documento</h3>
+      <h3>{t("Nota del documento")}</h3>
       <p class="pbody pnotes">{meta.notes.length > 220 ? meta.notes.slice(0, 220) + "…" : meta.notes}</p>
     </div>
   {/if}
 
   <div class="psec">
-    <h3>Citazioni</h3>
+    <h3>{t("Citazioni")}</h3>
     {#if cit}
+      {@const rif = refsInLib
+        ? t("{n} riferimenti ({inLib} in libreria)", { n: cit.references.length, inLib: refsInLib })
+        : tp(cit.references.length, "1 riferimento", "{n} riferimenti")}
       <p class="pbody">
-        {cit.references.length} riferimenti{refsInLib ? ` (${refsInLib} in libreria)` : ""} · citato da {cit.cited_by.length} tuoi documenti
+        {t("{riferimenti} · citato da {citanti} tuoi documenti", { riferimenti: rif, citanti: cit.cited_by.length })}
       </p>
-      <button class="pghost" onclick={onCitations}>Riferimenti e citazioni…</button>
+      <button class="pghost" onclick={onCitations}>{t("Riferimenti e citazioni…")}</button>
     {:else}
       <p class="pbody dim">…</p>
     {/if}

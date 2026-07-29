@@ -497,6 +497,14 @@ mod tests {
             .query_row("SELECT value FROM settings WHERE key = 'last_seen_version'", [], |r| r.get(0))
             .optional()?;
         println!("ultima versione vista: {}", seen.as_deref().unwrap_or("(mai)"));
+        // `ui_lang` lo scrive il frontend a ogni avvio: se manca, l'interfaccia
+        // non e' partita — oppure la manopola «lingua AI = come l'interfaccia»
+        // non saprebbe cosa seguire e ricadrebbe sull'italiano.
+        let ui: Option<String> = conn
+            .query_row("SELECT value FROM settings WHERE key = 'ui_lang'", [], |r| r.get(0))
+            .optional()?;
+        println!("lingua dell'interfaccia vista dal backend: {}", ui.as_deref().unwrap_or("(assente)"));
+        assert!(ui.is_some(), "il frontend non ha rispecchiato la lingua: la manopola AI «auto» non funzionerebbe");
         Ok(())
     }
 

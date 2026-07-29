@@ -1,10 +1,11 @@
 <script lang="ts">
   import type { PaletteEntry } from "$lib/palette";
+  import { t } from "$lib/i18n/index.svelte";
 
   let {
     entries,
     onclose,
-    placeholder = "Cerca comandi, documenti, filtri…",
+    placeholder = t("Cerca comandi, documenti, filtri…"),
   }: { entries: PaletteEntry[]; onclose: () => void; placeholder?: string } = $props();
 
   const RECENTS_KEY = "scriptorium-recents";
@@ -137,7 +138,7 @@
         const e = byId.get(id);
         if (!e || seen.has(id)) continue;
         seen.add(id);
-        push("Recenti", e, plain(e));
+        push(t("Recenti"), e, plain(e));
       }
       const order: string[] = [];
       const bySec = new Map<string, PaletteEntry[]>();
@@ -303,7 +304,7 @@
   onpointerdown={stop}
   onmouseup={stop}
 >
-  <div class="card" role="dialog" aria-modal="true" aria-label="Palette comandi">
+  <div class="card" role="dialog" aria-modal="true" aria-label={t("Palette comandi")}>
     <div class="head">
       <span class="icon" aria-hidden="true">
         <svg
@@ -326,7 +327,7 @@
         oninput={() => (selected = 0)}
         type="text"
         {placeholder}
-        aria-label="Cerca comandi"
+        aria-label={t("Cerca comandi")}
         aria-controls="pal-list"
         aria-activedescendant={view.flat.length > 0 ? "pal-opt-" + selected : undefined}
         autocomplete="off"
@@ -335,7 +336,7 @@
       />
     </div>
 
-    <div class="list" id="pal-list" role="listbox" aria-label="Risultati">
+    <div class="list" id="pal-list" role="listbox" aria-label={t("Risultati")}>
       {#each view.groups as group (group.section)}
         <div class="sec" role="presentation">{group.section}</div>
         {#each group.rows as row (row.index)}
@@ -372,16 +373,17 @@
       {/each}
       {#if view.flat.length === 0}
         <div class="empty">
-          <p>Nessun comando trovato per «{query}».</p>
+          <p>{t("Nessun comando trovato per «{q}».", { q: query })}</p>
           <p class="emptyhint">
-            Le azioni su un documento compaiono qui quando ne hai uno a fuoco (clic su una scheda).
-            Prova anche il <b>tasto destro</b> su una scheda, o apri la <b>Guida</b> dalla barra.
+            {t("Le azioni su un documento compaiono qui quando ne hai uno a fuoco (clic su una scheda).")}
+            {t("Prova anche il")} <b>{t("tasto destro")}</b> {t("su una scheda, o apri la")}
+            <b>{t("Guida")}</b> {t("dalla barra.")}
           </p>
         </div>
       {/if}
     </div>
 
-    <div class="foot">↑↓ naviga · Invio esegue · Esc chiude</div>
+    <div class="foot">{t("↑↓ naviga · Invio esegue · Esc chiude")}</div>
   </div>
 </div>
 

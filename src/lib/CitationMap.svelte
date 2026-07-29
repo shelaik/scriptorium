@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { SearchResult } from "$lib/api";
+  import { t, tp } from "$lib/i18n/index.svelte";
 
   // Mappa "a due ali" delle citazioni: a sinistra i riferimenti (il passato su
   // cui il paper si fonda), a destra chi lo cita (il futuro), ordinati per anno
@@ -26,6 +27,7 @@
   const X_REF = 330;
   const X_CIT = 670;
   const X_CENTER = 500;
+  const SEP = " · "; /* i18n-exempt: separatore neutro fra sintagmi, non testo */
 
   function wing(list: SearchResult[]): SearchResult[] {
     return [...list]
@@ -41,8 +43,9 @@
   const yAt = (i: number) => PAD_TOP + i * ROW_H + ROW_H / 2;
   /** Raggio del nodo: cresce (dolcemente) con le citazioni globali del paper. */
   const radius = (r: SearchResult) => 4 + Math.min(8, Math.log2((r.citations ?? 0) + 1) * 1.5);
-  const short = (t: string | null, n = 40) => {
-    const s = t ?? "Senza titolo";
+  // Il parametro NON puo' chiamarsi `t`: ombreggerebbe la funzione di traduzione.
+  const short = (txt: string | null, n = 40) => {
+    const s = txt ?? t("Senza titolo");
     return s.length > n ? s.slice(0, n - 1) + "…" : s;
   };
   /** Arco morbido dal centro al nodo dell'ala. */
@@ -51,15 +54,15 @@
     return `M ${X_CENTER} ${cy} C ${mx} ${cy}, ${mx} ${y}, ${x} ${y}`;
   }
   function tip(r: SearchResult): string {
-    const meta = [r.authors?.[0], r.year, r.venue].filter(Boolean).join(" · ");
-    const cit = r.citations ? ` · ${r.citations} citazioni` : "";
-    const lib = r.in_library ? "\n✓ già in libreria" : "\n○ non in libreria — clicca per aggiungerla";
-    return `${r.title ?? "Senza titolo"}\n${meta}${cit}${lib}`;
+    const pezzi = [r.authors?.[0], r.year, r.venue].filter(Boolean);
+    if (r.citations) pezzi.push(tp(r.citations, "1 citazione", "{n} citazioni"));
+    const lib = r.in_library ? t("✓ già in libreria") : t("○ non in libreria — clicca per aggiungerla");
+    return [r.title ?? t("Senza titolo"), pezzi.join(SEP), lib].filter(Boolean).join("\n");
   }
 </script>
 
 <div class="mapscroll">
-  <svg viewBox="0 0 {W} {H}" style="min-height: {Math.min(H, 560)}px" role="img" aria-label="Mappa delle citazioni di {title}">
+  <svg viewBox="0 0 {W} {H}" style="min-height: {Math.min(H, 560)}px" role="img" aria-label={t("Mappa delle citazioni di {titolo}", { titolo: title })}>
     <!-- ali -->
     {#each [{ items: left, x: X_REF, side: "l" }, { items: right, x: X_CIT, side: "r" }] as w (w.side)}
       {#each w.items as r, i (r.external_id)}
@@ -94,12 +97,16 @@
     </g>
 
     <!-- intestazioni delle ali -->
-    <text class="wingh" x={X_REF} y="16" text-anchor="end">← si fonda su</text>
-    <text class="wingh" x={X_CIT} y="16" text-anchor="start">è citato da →</text>
+    <text class="wingh" x={X_REF} y="16" text-anchor="end">{t("← si fonda su")}</text>
+    <text class="wingh" x={X_CIT} y="16" text-anchor="start">{t("è citato da →")}</text>
   </svg>
   {#if refs.length > MAX_PER_WING || cits.length > MAX_PER_WING}
     <p class="mapnote">
-      Mostro i primi {MAX_PER_WING} per lato ({refs.length} riferimenti, {cits.length} citazioni in tutto — la Lista li ha tutti).
+      {t("Mostro i primi {max} per lato ({rif} riferimenti, {cit} citazioni in tutto — la Lista li ha tutti).", {
+        max: MAX_PER_WING,
+        rif: refs.length,
+        cit: cits.length,
+      })}
     </p>
   {/if}
 </div>

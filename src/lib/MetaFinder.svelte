@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { metadataCandidates, applyMetaCandidate, type MetaProbe, type MetaCandidate } from "$lib/api";
+  import { t, te } from "$lib/i18n/index.svelte";
 
   let {
     id,
@@ -19,7 +20,7 @@
     try {
       probe = await metadataCandidates(id);
     } catch (e) {
-      error = "Errore ricerca: " + e;
+      error = t("Errore ricerca: {err}", { err: String(e) });
     } finally {
       loading = false;
     }
@@ -37,13 +38,16 @@
     }
   }
 
-  /** Parse the manual input into a DOI or arXiv candidate (null if neither). */
+  /** Parse the manual input into a DOI or arXiv candidate (null if neither).
+   *  `raw` (non `t`) perche' `t` e' la funzione di traduzione importata sopra. */
   function manualCandidate(): MetaCandidate | null {
-    const t = manualId.trim();
-    if (!t) return null;
+    const raw = manualId.trim();
+    if (!raw) return null;
     const base: MetaCandidate = {
-      source: "crossref",
-      origin: "identificativo inserito",
+      source: "crossref" /* i18n-exempt: valore di protocollo verso il Rust, non etichetta */,
+      // `origin` viene mostrato dal markup con `t(c.origin)` (le altre origini
+      // arrivano in italiano dal Rust): tradotto qui, li' la seconda t() e' identita'.
+      origin: t("identificativo inserito"),
       doi: null,
       arxiv_id: null,
       title: null,
@@ -55,10 +59,10 @@
       signals: [],
       duplicate_of: null,
     };
-    const doi = t.match(/10\.\d{4,9}\/\S+/)?.[0] ?? null;
+    const doi = raw.match(/10\.\d{4,9}\/\S+/)?.[0] ?? null;
     if (doi) return { ...base, doi };
-    const arx = t.replace(/^arxiv[:\s/]*/i, "").match(/\d{4}\.\d{4,5}(v\d+)?/)?.[0] ?? null;
-    if (arx) return { ...base, source: "arxiv", arxiv_id: arx };
+    const arx = raw.replace(/^arxiv[:\s/]*/i, "").match(/\d{4}\.\d{4,5}(v\d+)?/)?.[0] ?? null;
+    if (arx) return { ...base, source: "arxiv" /* i18n-exempt: valore di protocollo verso il Rust */, arxiv_id: arx };
     return null;
   }
 
@@ -70,7 +74,7 @@
   function authorsLine(c: MetaCandidate): string {
     if (!c.authors.length) return "";
     if (c.authors.length <= 4) return c.authors.join(", ");
-    return c.authors.slice(0, 4).join(", ") + " et al.";
+    return t("{autori} et al.", { autori: c.authors.slice(0, 4).join(", ") });
   }
 
   function onKey(e: KeyboardEvent) {
@@ -83,16 +87,16 @@
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 <div class="back" onmousedown={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-  <div class="modal" role="dialog" tabindex="-1" aria-label="Recupera metadati" onclick={(e) => e.stopPropagation()}>
-    <h2>Recupera metadati</h2>
+  <div class="modal" role="dialog" tabindex="-1" aria-label={t("Recupera metadati")} onclick={(e) => e.stopPropagation()}>
+    <h2>{t("Recupera metadati")}</h2>
     {#if loading}
-      <p class="dim">Cerco su Crossref, arXiv e OpenAlex — identificativi stampati nel PDF, nome del file, titolo…</p>
+      <p class="dim">{t("Cerco su Crossref, arXiv e OpenAlex — identificativi stampati nel PDF, nome del file, titolo…")}</p>
     {:else}
       {#if probe?.pdf_title}
-        <p class="ctx">Titolo rilevato nel PDF: <strong>{probe.pdf_title}</strong></p>
+        <p class="ctx">{t("Titolo rilevato nel PDF:")} <strong>{probe.pdf_title}</strong></p>
       {/if}
       {#if probe?.filename}
-        <p class="dimfile" title={probe.filename}>File: {probe.filename}</p>
+        <p class="dimfile" title={probe.filename}>{t("File: {nome}", { nome: probe.filename })}</p>
       {/if}
 
       {#if probe && probe.candidates.length}
@@ -100,22 +104,23 @@
           {#each probe.candidates as c, i (i)}
             <li class="cand" class:sure={c.sure}>
               <div class="candbody">
-                <p class="candtitle">{c.title ?? "Senza titolo"}</p>
+                <p class="candtitle">{c.title ?? t("Senza titolo")}</p>
                 {#if authorsLine(c)}<p class="candauth">{authorsLine(c)}</p>{/if}
                 <p class="candmeta">
-                  {[c.year, c.venue].filter(Boolean).join(" · ")}
-                  {#if c.doi}<span class="idchip" title="DOI">{c.doi}</span>{/if}
-                  {#if c.arxiv_id}<span class="idchip" title="arXiv">arXiv:{c.arxiv_id}</span>{/if}
+                  {[c.year, c.venue].filter(Boolean).join(" · ")}<!-- i18n-exempt: dati (anno, rivista) uniti da un separatore neutro -->
+                  {#if c.doi}<span class="idchip" title="DOI">{c.doi}</span>{/if}<!-- i18n-exempt: «DOI» e' una sigla identica in inglese -->
+                  {#if c.arxiv_id}<span class="idchip" title="arXiv">arXiv:{c.arxiv_id}</span>{/if}<!-- i18n-exempt: «arXiv» e' un nome proprio -->
                 </p>
-                <p class="candorigin">{c.origin}</p>
+                <!-- origin e signals arrivano in italiano dal Rust: si traducono qui, al consumatore -->
+                <p class="candorigin">{te(c.origin)}</p>
                 {#if c.sure || c.signals.length}
                   <p class="chips">
-                    {#if c.sure}<span class="chip surechip">corrispondenza sicura</span>{/if}
-                    {#each c.signals as s (s)}<span class="chip">{s}</span>{/each}
+                    {#if c.sure}<span class="chip surechip">{t("corrispondenza sicura")}</span>{/if}
+                    {#each c.signals as s (s)}<span class="chip">{te(s)}</span>{/each}
                   </p>
                 {/if}
                 {#if c.duplicate_of}
-                  <p class="dup">Già in libreria come «{c.duplicate_of}» — probabilmente è un duplicato: meglio unirli (Cura della libreria → Duplicati).</p>
+                  <p class="dup">{t("Già in libreria come «{titolo}» — probabilmente è un duplicato: meglio unirli (Cura della libreria → Duplicati).", { titolo: c.duplicate_of })}</p>
                 {/if}
               </div>
               <div class="candact">
@@ -123,26 +128,26 @@
                   class={c.sure || i === 0 ? "primary small" : "ghost small"}
                   disabled={applying || !!c.duplicate_of}
                   onclick={() => apply(c)}
-                  title="Applica titolo, autori, anno, rivista (e riferimenti se c'è il DOI) a questo documento"
-                >{applying ? "…" : "Usa questi"}</button>
+                  title={t("Applica titolo, autori, anno, rivista (e riferimenti se c'è il DOI) a questo documento")}
+                >{applying ? "…" : t("Usa questi")}</button>
               </div>
             </li>
           {/each}
         </ul>
       {:else}
-        <p class="dim">Nessun candidato trovato online (documento non indicizzato, o prima pagina illeggibile). Prova con un identificativo qui sotto, o correggi a mano.</p>
+        <p class="dim">{t("Nessun candidato trovato online (documento non indicizzato, o prima pagina illeggibile). Prova con un identificativo qui sotto, o correggi a mano.")}</p>
       {/if}
 
       <div class="manual">
-        <label for="mfid">Ho il DOI / ID arXiv:</label>
-        <input id="mfid" bind:value={manualId} placeholder="10.1038/nature14539 oppure 2301.12345" onkeydown={(e) => e.key === "Enter" && applyManual()} />
-        <button class="ghost small" disabled={applying || !manualCandidate()} onclick={applyManual} title="Scarico il record completo e lo applico">Applica</button>
+        <label for="mfid">{t("Ho il DOI / ID arXiv:")}</label>
+        <input id="mfid" bind:value={manualId} placeholder={t("10.1038/nature14539 oppure 2301.12345")} onkeydown={(e) => e.key === "Enter" && applyManual()} />
+        <button class="ghost small" disabled={applying || !manualCandidate()} onclick={applyManual} title={t("Scarico il record completo e lo applico")}>{t("Applica")}</button>
       </div>
 
       {#if error}<p class="err">{error}</p>{/if}
       <div class="actions">
-        {#if onEditManual}<button class="ghost" onclick={onEditManual}>Modifica a mano…</button>{/if}
-        <button class="ghost" onclick={onClose}>Chiudi</button>
+        {#if onEditManual}<button class="ghost" onclick={onEditManual}>{t("Modifica a mano…")}</button>{/if}
+        <button class="ghost" onclick={onClose}>{t("Chiudi")}</button>
       </div>
     {/if}
   </div>

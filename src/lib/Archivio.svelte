@@ -39,6 +39,11 @@
     type MirrorStatus,
   } from "$lib/api";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
+  import { t, tp } from "$lib/i18n/index.svelte";
+
+  /** Frammenti autonomi cuciti da un segno, non da una parola: il separatore
+   *  resta identico in ogni lingua. */
+  const SEP = " · "; /* i18n-exempt: separatore, non testo d'interfaccia */
 
   let {
     onOpenGrid,
@@ -52,7 +57,7 @@
     onChanged?: () => void;
   } = $props();
 
-  type SelKey = number | "unfiled";
+  type SelKey = number | "unfiled"; /* i18n-exempt: "unfiled" è un valore interno, non un'etichetta */
 
   let tree = $state<ArchiveTree | null>(null);
   let sel = $state<SelKey>("unfiled");
@@ -81,6 +86,7 @@
   let suggWeight = $state(50);
   try {
     const m = localStorage.getItem("scriptorium-suggmode");
+    /* i18n-exempt: "name"/"content"/"both" sono valori persistiti e protocollo col Rust, non etichette */
     if (m === "name" || m === "content" || m === "both") suggMode = m;
     const w = Number(localStorage.getItem("scriptorium-suggweight"));
     if (Number.isFinite(w) && w >= 0 && w <= 100) suggWeight = w;
@@ -121,15 +127,17 @@
 
   const layout = $derived.by(() => {
     const nodes: LNode[] = [];
-    const t = tree;
-    if (!t) return { nodes, edges: [] as { from: LNode; to: LNode }[], w: 900, h: 400 };
+    // NB: la variabile dell'albero si chiama `tr`, non `t`: `t` è la funzione di
+    // traduzione importata e ombreggiarla farebbe fallire la traduzione qui dentro.
+    const tr = tree;
+    if (!tr) return { nodes, edges: [] as { from: LNode; to: LNode }[], w: 900, h: 400 };
     let row = 0;
     nodes.push({
-      key: "unfiled", id: null, name: "SENZA RACCOLTA", count: t.unfiled,
+      key: "unfiled", id: null, name: t("SENZA RACCOLTA"), count: tr.unfiled,
       smart: false, watch: false, depth: 0, x: PADX, y: PADY + row++ * ROWH, parent: null,
     });
-    const byParent = new Map<number | null, typeof t.collections>();
-    for (const c of t.collections) {
+    const byParent = new Map<number | null, typeof tr.collections>();
+    for (const c of tr.collections) {
       const k = c.parent_id ?? null;
       if (!byParent.has(k)) byParent.set(k, []);
       byParent.get(k)!.push(c);
@@ -270,7 +278,7 @@
       tree = await archiveTree();
       if (sel !== "unfiled" && !tree.collections.some((c) => c.id === sel)) sel = "unfiled";
     } catch (e) {
-      msg = "Errore albero: " + e;
+      msg = t("Errore albero: {err}", { err: String(e) });
     }
   }
   async function loadDocs() {
@@ -281,7 +289,7 @@
       if (epoch === docsEpoch) docs = out;
     } catch (e) {
       if (epoch === docsEpoch) {
-        msg = "Errore documenti: " + e;
+        msg = t("Errore documenti: {err}", { err: String(e) });
         docs = [];
       }
     } finally {
@@ -308,16 +316,16 @@
     try {
       if (mirror?.enabled) {
         mirror = await setMirror(false, null);
-        msg = "Specchio spento (la cartella resta com'è; i tuoi file veri non sono mai stati toccati)";
+        msg = t("Specchio spento (la cartella resta com'è; i tuoi file veri non sono mai stati toccati)");
       } else {
         const dir = await openDialog({
           directory: true,
-          title: "Scegli la cartella dello specchio (vuota o dedicata)",
+          title: t("Scegli la cartella dello specchio (vuota o dedicata)"),
           defaultPath: mirror?.dir || undefined,
         });
         if (typeof dir !== "string" || !dir) return;
         mirror = await setMirror(true, dir);
-        msg = "Specchio attivo: genero l'albero in " + dir;
+        msg = t("Specchio attivo: genero l'albero in {cartella}", { cartella: dir });
       }
     } catch (e) {
       msg = "" + e;
@@ -330,7 +338,13 @@
     mirrorBusy = true;
     try {
       const s = await mirrorRegenerate();
-      msg = `Specchio rigenerato: ${s.linked} hardlink, ${s.copied} copie, ${s.folders} cartelle${s.missing ? `, ${s.missing} mancanti` : ""}`;
+      const parti = [
+        tp(s.linked, "1 hardlink", "{n} hardlink"),
+        tp(s.copied, "1 copia", "{n} copie"),
+        tp(s.folders, "1 cartella", "{n} cartelle"),
+      ];
+      if (s.missing) parti.push(tp(s.missing, "1 mancante", "{n} mancanti"));
+      msg = t("Specchio rigenerato: {dettaglio}", { dettaglio: parti.join(", ") });
     } catch (e) {
       msg = "" + e;
     } finally {
@@ -363,7 +377,10 @@
       const out = await suggestForCollection(target, suggUnfiled, suggMode, suggWeight / 100);
       if (epoch !== suggEpoch || sel !== target) return; // superata: scarta
       sugg = out;
-      if (out.length === 0) msg = suggUnfiled ? "Nessun candidato (prova a togliere «solo senza raccolta»)" : "Nessun candidato con un vettore semantico";
+      if (out.length === 0)
+        msg = suggUnfiled
+          ? t("Nessun candidato (prova a togliere «solo senza raccolta»)")
+          : t("Nessun candidato con un vettore semantico");
     } catch (e) {
       if (epoch === suggEpoch && sel === target) {
         msg = "" + e;
@@ -395,7 +412,7 @@
       const ids = suggVisible.map((s) => s.id);
       await addDocumentsToCollection(target, ids);
       if (sel === target && sugg != null) sugg = sugg.filter((x) => !ids.includes(x.id));
-      msg = `${ids.length} paper aggiunti a «${targetName}»`;
+      msg = tp(ids.length, "1 paper aggiunto a «{raccolta}»", "{n} paper aggiunti a «{raccolta}»", { raccolta: targetName });
       await refresh();
       notifyChanged();
     } catch (e) {
@@ -405,9 +422,9 @@
     }
   }
   function fmtSugg(s: CollectionSuggestion): string {
-    const a = s.lead_author ? s.lead_author + " " : "";
-    const y = s.year ? `${s.year} — ` : "";
-    return a + y + (s.title ?? "Senza titolo");
+    const testa = [s.lead_author, s.year].filter(Boolean).join(" ");
+    const titolo = s.title ?? t("Senza titolo");
+    return testa ? t("{testa} — {titolo}", { testa, titolo }) : titolo;
   }
 
   function notifyChanged() {
@@ -429,7 +446,7 @@
       createVal = "";
       await loadTree();
       notifyChanged();
-      msg = `Raccolta «${name}» creata`;
+      msg = t("Raccolta «{nome}» creata", { nome: name });
     } catch (e) {
       msg = "" + e;
     }
@@ -455,7 +472,7 @@
       sel = "unfiled";
       await refresh();
       notifyChanged();
-      msg = "Raccolta eliminata (sotto-raccolte risalite, nessun paper perso)";
+      msg = t("Raccolta eliminata (sotto-raccolte risalite, nessun paper perso)");
     } catch (e) {
       msg = "" + e;
     }
@@ -482,13 +499,14 @@
 
   // -- trascinamento NODI (ri-annidamento) --
   let pdown: { id: number; name: string; x: number; y: number } | null = null;
-  function nodeTargetValid(dragId: number, t: SelKey | "root" | null): boolean {
-    if (t === "root") return true;
-    if (t == null || t === "unfiled") return false;
-    if (t === dragId) return false;
-    const n = layout.nodes.find((x) => x.key === t);
+  // `tgt` e non `t`: `t` è la funzione di traduzione importata.
+  function nodeTargetValid(dragId: number, tgt: SelKey | "root" | null): boolean {
+    if (tgt === "root") return true;
+    if (tgt == null || tgt === "unfiled") return false;
+    if (tgt === dragId) return false;
+    const n = layout.nodes.find((x) => x.key === tgt);
     if (!n || n.smart) return false;
-    return !isDescendantOf(t, dragId);
+    return !isDescendantOf(tgt, dragId);
   }
   function nodePointerDown(e: PointerEvent, n: LNode) {
     if (e.button !== 0 || n.id == null) {
@@ -507,11 +525,11 @@
       nodeDrag = { id: pdown.id, name: pdown.name, x: e.clientX, y: e.clientY, target: null, valid: false };
     }
     const n = hitNode(e);
-    const t: SelKey | "root" | null = n ? n.key : hitBackground(e) ? "root" : null;
+    const tgt: SelKey | "root" | null = n ? n.key : hitBackground(e) ? "root" : null;
     nodeDrag.x = e.clientX;
     nodeDrag.y = e.clientY;
-    nodeDrag.target = t;
-    nodeDrag.valid = nodeTargetValid(nodeDrag.id, t);
+    nodeDrag.target = tgt;
+    nodeDrag.valid = nodeTargetValid(nodeDrag.id, tgt);
   }
   function nodePointerCancel() {
     cleanupWindowListeners(nodePointerMove, nodePointerUp, nodePointerCancel);
@@ -530,15 +548,15 @@
       return;
     }
     const n = hitNode(e);
-    const t: SelKey | "root" | null = n ? n.key : hitBackground(e) ? "root" : null;
-    if (!nodeTargetValid(start.id, t)) return;
+    const tgt: SelKey | "root" | null = n ? n.key : hitBackground(e) ? "root" : null;
+    if (!nodeTargetValid(start.id, tgt)) return;
     try {
-      if (t === "root") {
+      if (tgt === "root") {
         await moveCollection(start.id, null);
-        msg = `«${start.name}» portata alla radice`;
+        msg = t("«{nome}» portata alla radice", { nome: start.name });
       } else {
-        await moveCollection(start.id, t as number);
-        msg = `«${start.name}» annidata`;
+        await moveCollection(start.id, tgt as number);
+        msg = t("«{nome}» annidata", { nome: start.name });
       }
       await loadTree();
       notifyChanged();
@@ -549,14 +567,14 @@
 
   // -- trascinamento PAPER (assegnazione) --
   let ddown: { id: number; label: string; x: number; y: number } | null = null;
-  function docTargetValid(from: number | null, t: SelKey | "root" | null): boolean {
-    if (t == null) return false;
+  function docTargetValid(from: number | null, tgt: SelKey | "root" | null): boolean {
+    if (tgt == null) return false;
     // Sfondo vuoto o nodo «SENZA RACCOLTA»: stesso gesto — togli il paper
     // dalla raccolta di provenienza (torna fra i senza-raccolta se non è altrove).
-    if (t === "unfiled" || t === "root") return from != null;
-    const n = layout.nodes.find((x) => x.key === t);
+    if (tgt === "unfiled" || tgt === "root") return from != null;
+    const n = layout.nodes.find((x) => x.key === tgt);
     if (!n || n.smart) return false;
-    return t !== from;
+    return tgt !== from;
   }
   function docPointerDown(e: PointerEvent, d: DocumentItem) {
     if (e.button !== 0) return;
@@ -592,18 +610,18 @@
     docDrag = null;
     if (!drag) return; // click semplice sulla riga: nessuna azione
     const n = hitNode(e);
-    const t: SelKey | "root" | null = n ? n.key : hitBackground(e) ? "root" : null;
-    if (!docTargetValid(drag.from, t)) return;
+    const tgt: SelKey | "root" | null = n ? n.key : hitBackground(e) ? "root" : null;
+    if (!docTargetValid(drag.from, tgt)) return;
     try {
-      if (t === "unfiled" || t === "root") {
+      if (tgt === "unfiled" || tgt === "root") {
         await removeDocumentsFromCollection(drag.from as number, drag.ids);
-        msg = "Tolto dalla raccolta";
+        msg = t("Tolto dalla raccolta");
       } else if (drag.from == null || e.ctrlKey) {
-        await addDocumentsToCollection(t as number, drag.ids);
-        msg = e.ctrlKey && drag.from != null ? "Aggiunto anche qui (appartenenza multipla)" : "Aggiunto alla raccolta";
+        await addDocumentsToCollection(tgt as number, drag.ids);
+        msg = e.ctrlKey && drag.from != null ? t("Aggiunto anche qui (appartenenza multipla)") : t("Aggiunto alla raccolta");
       } else {
-        await moveDocumentsToCollection(drag.from, t as number, drag.ids);
-        msg = "Spostato";
+        await moveDocumentsToCollection(drag.from, tgt as number, drag.ids);
+        msg = t("Spostato");
       }
       await refresh();
       notifyChanged();
@@ -613,49 +631,63 @@
   }
 
   function fmtDoc(d: DocumentItem): string {
-    const a = d.authors?.[0] ? d.authors[0] + (d.authors.length > 1 ? " et al." : "") : "";
-    const y = d.year ? ` · ${d.year}` : "";
-    return (a ? a + y + " — " : "") + (d.title ?? "Senza titolo");
+    const primo = d.authors?.[0];
+    const testa = primo
+      ? [d.authors.length > 1 ? t("{autori} et al.", { autori: primo }) : primo, d.year].filter(Boolean).join(SEP)
+      : "";
+    const titolo = d.title ?? t("Senza titolo");
+    return testa ? t("{testa} — {titolo}", { testa, titolo }) : titolo;
   }
 </script>
 
 <div class="arch">
   <header>
-    <div class="brand"><span class="t1">ARCHIVIO</span><span class="t2">// RACCOLTE</span></div>
+    <div class="brand"><span class="t1">{t("ARCHIVIO")}</span><span class="t2">{t("// RACCOLTE")}</span></div>
     <div class="chips">
       {#if tree}
-        <span class="chip">{tree.total} PAPER</span>
-        <span class="chip">{tree.collections.length} RACCOLTE</span>
-        <span class="chip">{tree.unfiled} SENZA RACCOLTA</span>
+        <span class="chip">{t("{n} PAPER", { n: tree.total })}</span>
+        <span class="chip">{t("{n} RACCOLTE", { n: tree.collections.length })}</span>
+        <span class="chip">{t("{n} SENZA RACCOLTA", { n: tree.unfiled })}</span>
       {/if}
       {#if creating === "root"}
         <input
           class="mkinput"
-          placeholder="nome della raccolta…"
+          placeholder={t("nome della raccolta…")}
           bind:value={createVal}
           onkeydown={(e) => { if (e.key === "Enter") void doCreate(); if (e.key === "Escape") creating = null; }}
         />
-        <button class="chip act" onclick={doCreate}>CREA</button>
-        <button class="chip" onclick={() => (creating = null)}>ANNULLA</button>
+        <button class="chip act" onclick={doCreate}>{t("CREA")}</button>
+        <button class="chip" onclick={() => (creating = null)}>{t("ANNULLA")}</button>
       {:else}
-        <button class="chip act" onclick={() => { creating = "root"; createVal = ""; }}>+ NUOVA RACCOLTA</button>
+        <button class="chip act" onclick={() => { creating = "root"; createVal = ""; }}>{t("+ NUOVA RACCOLTA")}</button>
       {/if}
       <button
         class="chip"
         class:act={mirror?.enabled}
         onclick={toggleMirror}
         disabled={mirrorBusy}
-        title={mirror?.enabled ? `Specchio attivo in ${mirror.dir} — clic per spegnerlo` : "Proietta le raccolte in una cartella leggibile (hardlink: zero spazio extra, i file veri non si toccano)"}
+        title={mirror?.enabled
+          ? t("Specchio attivo in {cartella} — clic per spegnerlo", { cartella: mirror.dir })
+          : t("Proietta le raccolte in una cartella leggibile (hardlink: zero spazio extra, i file veri non si toccano)")}
       >
-        SPECCHIO {mirror?.enabled ? "●" : "○"}
+        {t("SPECCHIO")} {mirror?.enabled ? "●" : "○"}
       </button>
       {#if mirror?.enabled}
-        <button class="chip" onclick={regenMirror} disabled={mirrorBusy} title="Ricostruisci ora l'albero su disco">{mirrorBusy ? "…" : "RIGENERA"}</button>
-        <button class="chip" onclick={() => void mirrorReveal()} title="Apri la cartella dello specchio">APRI</button>
+        <button class="chip" onclick={regenMirror} disabled={mirrorBusy} title={t("Ricostruisci ora l'albero su disco")}>{mirrorBusy ? "…" : t("RIGENERA")}</button>
+        <button class="chip" onclick={() => void mirrorReveal()} title={t("Apri la cartella dello specchio")}>{t("APRI")}</button>
       {/if}
     </div>
   </header>
-  <div class="hint">Trascina un <b>paper</b> (dall'elenco a destra) su una raccolta per spostarlo — <b>Ctrl</b> = aggiungi anche lì, l'appartenenza è multipla; <b>sullo sfondo vuoto</b> = toglilo dalla raccolta · trascina una <b>raccolta</b> su un'altra per annidarla, sullo sfondo per riportarla alla radice</div>
+  <!-- I <b> spezzano la frase in più nodi di testo: ogni tratto è una chiave a sé,
+       tagliata dove anche l'inglese può reggere il pezzo da solo.
+       i18n-exempt: «Ctrl» è il nome di un tasto, non una parola. -->
+  <div class="hint">
+    {t("Trascina un")} <b>{t("paper|trascinamento")}</b>
+    {t("(dall'elenco a destra) su una raccolta per spostarlo —")} <b>Ctrl</b>
+    {t("= aggiungi anche lì, l'appartenenza è multipla;")} <b>{t("sullo sfondo vuoto")}</b>
+    {t("= toglilo dalla raccolta · trascina una")} <b>{t("raccolta|trascinamento")}</b>
+    {t("su un'altra per annidarla, sullo sfondo per riportarla alla radice")}
+  </div>
   {#if msg}<div class="msg">{msg}</div>{/if}
 
   <div class="body">
@@ -668,43 +700,47 @@
         height={layout.h}
         role="tree"
         tabindex="0"
-        aria-label="Raccolte — frecce per spostarti, Invio per aprire nella griglia"
+        aria-label={t("Raccolte — frecce per spostarti, Invio per aprire nella griglia")}
         aria-activedescendant={sel != null ? "arcn-" + sel : undefined}
         onkeydown={treeKey}
       >
-        <text class="zone" x={PADX} y="34">GERARCHIA</text>
+        <text class="zone" x={PADX} y="34">{t("GERARCHIA")}</text>
         {#each layout.edges as e (e.from.key + ">" + e.to.key)}
           <path class="trace" d={edgePath(e)} />
         {/each}
-        {#each layout.nodes as n (n.key)}
+        <!-- Il nodo del ciclo si chiama `nd`, non `n`: il segnaposto iniettato da
+             `tp` si chiama proprio n, e la collisione sarebbe silenziosa. -->
+        {#each layout.nodes as nd (nd.key)}
           {@const isTarget =
-            (docDrag != null && docDrag.target === n.key && docDrag.valid) ||
-            (nodeDrag != null && nodeDrag.target === n.key && nodeDrag.valid)}
+            (docDrag != null && docDrag.target === nd.key && docDrag.valid) ||
+            (nodeDrag != null && nodeDrag.target === nd.key && nodeDrag.valid)}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
           <g
             class="node"
-            class:sel={sel === n.key}
-            class:smart={n.smart}
-            class:unfiled={n.key === "unfiled"}
+            class:sel={sel === nd.key}
+            class:smart={nd.smart}
+            class:unfiled={nd.key === "unfiled"}
             class:drophover={isTarget}
-            data-cid={n.key}
-            id={"arcn-" + n.key}
+            data-cid={nd.key}
+            id={"arcn-" + nd.key}
             role="treeitem"
             tabindex={-1}
-            aria-level={n.depth + 1}
-            aria-selected={sel === n.key}
-            aria-label="{n.name} — {n.count} paper"
-            onpointerdown={(e) => nodePointerDown(e, n)}
+            aria-level={nd.depth + 1}
+            aria-selected={sel === nd.key}
+            aria-label={tp(nd.count, "{nome} — 1 paper", "{nome} — {n} paper", { nome: nd.name })}
+            onpointerdown={(e) => nodePointerDown(e, nd)}
           >
-            <rect x={n.x} y={n.y} width={W} height={H} rx="6" />
-            <rect class="pin" x={n.x - 4} y={n.y + H / 2 - 7} width="4" height="14" rx="1" />
-            <text class="nlabel" x={n.x + 12} y={n.y + 20}>{n.name.length > 22 ? n.name.slice(0, 21) + "…" : n.name}</text>
-            <text class="nsub" x={n.x + 12} y={n.y + 36}>
-              {n.count} paper{n.smart ? " · SMART (si popola da sola)" : ""}
+            <rect x={nd.x} y={nd.y} width={W} height={H} rx="6" />
+            <rect class="pin" x={nd.x - 4} y={nd.y + H / 2 - 7} width="4" height="14" rx="1" />
+            <text class="nlabel" x={nd.x + 12} y={nd.y + 20}>{nd.name.length > 22 ? nd.name.slice(0, 21) + "…" : nd.name}</text>
+            <text class="nsub" x={nd.x + 12} y={nd.y + 36}>
+              {nd.smart
+                ? tp(nd.count, "1 paper · SMART (si popola da sola)", "{n} paper · SMART (si popola da sola)")
+                : tp(nd.count, "1 paper", "{n} paper")}
             </text>
-            <text class="ncount" x={n.x + W - 12} y={n.y + 20}>{n.count}</text>
-            {#if n.watch}
-              <text class="nbell" x={n.x + W - 12} y={n.y + 38}>◉</text>
+            <text class="ncount" x={nd.x + W - 12} y={nd.y + 20}>{nd.count}</text>
+            {#if nd.watch}
+              <text class="nbell" x={nd.x + W - 12} y={nd.y + 38}>◉</text>
             {/if}
           </g>
         {/each}
@@ -714,22 +750,23 @@
     <aside class="panel">
       {#if selNode}
         <div class="phead">
-          <span class="ptitle">{selNode.key === "unfiled" ? "SENZA RACCOLTA" : selNode.name}</span>
+          <span class="ptitle">{selNode.key === "unfiled" ? t("SENZA RACCOLTA") : selNode.name}</span>
         </div>
         {#if breadcrumb.length > 1}
+          <!-- i18n-exempt: nomi di raccolte dell'utente uniti da un separatore neutro -->
           <div class="crumb">{breadcrumb.join(" / ")}</div>
         {/if}
         <div class="pstats">
-          <span>diretti <b>{selNode.count}</b></span>
-          {#if selNode.key !== "unfiled" && selTotal !== selNode.count}<span>appartenenze nel ramo <b>{selTotal}</b></span>{/if}
-          {#if selNode.smart}<span class="smartbadge">SMART — si popola da sola</span>{/if}
+          <span>{t("diretti {n}", { n: selNode.count })}</span>
+          {#if selNode.key !== "unfiled" && selTotal !== selNode.count}<span>{t("appartenenze nel ramo {n}", { n: selTotal })}</span>{/if}
+          {#if selNode.smart}<span class="smartbadge">{t("SMART — si popola da sola")}</span>{/if}
         </div>
 
         {#if selNode.key !== "unfiled"}
           <div class="pacts">
-            <button class="pbtn" onclick={() => onOpenGrid(selNode.id as number, selNode.name)}>APRI NELLA GRIGLIA</button>
+            <button class="pbtn" onclick={() => onOpenGrid(selNode.id as number, selNode.name)}>{t("APRI NELLA GRIGLIA")}</button>
             {#if onOpenGraph}
-              <button class="pbtn" onclick={() => onOpenGraph?.(selNode.id as number, selNode.name)} title="La Costellazione ristretta a questa raccolta (vicinanze ricalcolate al suo interno)">COSTELLAZIONE</button>
+              <button class="pbtn" onclick={() => onOpenGraph?.(selNode.id as number, selNode.name)} title={t("La Costellazione ristretta a questa raccolta (vicinanze ricalcolate al suo interno)")}>{t("COSTELLAZIONE")}</button>
             {/if}
             {#if renaming}
               <input
@@ -737,33 +774,33 @@
                 bind:value={renameVal}
                 onkeydown={(e) => { if (e.key === "Enter") void doRename(); if (e.key === "Escape") renaming = false; }}
               />
-              <button class="pbtn" onclick={doRename}>SALVA</button>
+              <button class="pbtn" onclick={doRename}>{t("SALVA")}</button>
             {:else}
-              <button class="pbtn" onclick={() => { renaming = true; renameVal = selNode.name; }}>RINOMINA</button>
+              <button class="pbtn" onclick={() => { renaming = true; renameVal = selNode.name; }}>{t("RINOMINA")}</button>
             {/if}
             {#if creating === "child"}
               <input
                 class="mkinput"
-                placeholder="nome sotto-raccolta…"
+                placeholder={t("nome sotto-raccolta…")}
                 bind:value={createVal}
                 onkeydown={(e) => { if (e.key === "Enter") void doCreate(); if (e.key === "Escape") creating = null; }}
               />
-              <button class="pbtn" onclick={doCreate}>CREA</button>
+              <button class="pbtn" onclick={doCreate}>{t("CREA")}</button>
             {:else if !selNode.smart}
-              <button class="pbtn" onclick={() => { creating = "child"; createVal = ""; }}>+ SOTTO-RACCOLTA</button>
+              <button class="pbtn" onclick={() => { creating = "child"; createVal = ""; }}>{t("+ SOTTO-RACCOLTA")}</button>
             {/if}
             {#if confirmDel}
-              <button class="pbtn danger" onclick={doDelete}>CONFERMI L'ELIMINAZIONE?</button>
-              <button class="pbtn" onclick={() => (confirmDel = false)}>NO</button>
+              <button class="pbtn danger" onclick={doDelete}>{t("CONFERMI L'ELIMINAZIONE?")}</button>
+              <button class="pbtn" onclick={() => (confirmDel = false)}>{t("NO")}</button>
             {:else}
-              <button class="pbtn danger" onclick={() => (confirmDel = true)}>ELIMINA</button>
+              <button class="pbtn danger" onclick={() => (confirmDel = true)}>{t("ELIMINA")}</button>
             {/if}
           </div>
-          <div class="pnote">Eliminare una raccolta non tocca i paper: le sotto-raccolte risalgono di un livello.</div>
+          <div class="pnote">{t("Eliminare una raccolta non tocca i paper: le sotto-raccolte risalgono di un livello.")}</div>
 
           {#if !selNode.smart}
             <div class="watchrow">
-              <span class="wlbl">RICERCA «NOVITÀ»</span>
+              <span class="wlbl">{t("RICERCA «NOVITÀ»")}</span>
               <button
                 class="pbtn"
                 class:won={selNode.watch}
@@ -778,79 +815,92 @@
                   }
                 }}
               >
-                {selNode.watch ? "ATTIVA ●" : "SPENTA ○"}
+                {selNode.watch ? t("ATTIVA ●") : t("SPENTA ○")}
               </button>
             </div>
+            <!-- Anche qui i <b> spezzano la frase: un tratto per ogni pezzo, tagliato
+                 su confini di proposizione. -->
             <div class="pnote">
-              Con la ricerca attiva, a ogni avvio Scriptorium cerca online nuovi paper per questa
-              raccolta (query = il nome; puoi raffinarla fra le ricerche salvate di «Novità»). Le novità
-              accettate dal feed <b>entrano già nella raccolta</b>; con ≥3 paper indicizzati i risultati
-              sono filtrati per somiglianza semantica. Spegnendola, la ricerca (e il suo feed)
-              <b>viene rimossa</b> dalle ricerche salvate.
+              {t("Con la ricerca attiva, a ogni avvio Scriptorium cerca online nuovi paper per questa raccolta (query = il nome; puoi raffinarla fra le ricerche salvate di «Novità»). Le novità accettate dal feed")}
+              <b>{t("entrano già nella raccolta")}</b>{t("; con ≥3 paper indicizzati i risultati sono filtrati per somiglianza semantica. Spegnendola, la ricerca (e il suo feed)")}
+              <b>{t("viene rimossa")}</b>
+              {t("dalle ricerche salvate.")}
             </div>
           {/if}
 
           {#if !selNode.smart}
             <div class="suggbox">
               <div class="sugghead">
-                <span>✦ SUGGERIMENTI {suggLoading ? "· CALCOLO…" : sugg != null ? `(${suggVisible.length} sopra soglia)` : ""}</span>
+                <span>{suggLoading
+                    ? t("✦ SUGGERIMENTI · CALCOLO…")
+                    : sugg != null
+                      ? t("✦ SUGGERIMENTI ({n} sopra soglia)", { n: suggVisible.length })
+                      : t("✦ SUGGERIMENTI")}</span>
                 {#if sugg != null}
                   <button class="pclosemini" onclick={() => (sugg = null)}>✕</button>
                 {/if}
               </div>
               <!-- La SORGENTE si sceglie PRIMA di calcolare: sempre visibile. -->
               <div class="suggctl">
+                <!-- i18n-exempt: "name"/"content"/"both" sono valori persistiti in
+                     localStorage e attesi dal backend; si traducono solo le etichette. -->
                 <span class="modechips">
-                  <button class="lfm" class:active={suggMode === "name"} disabled={suggLoading} onclick={() => setSuggMode("name")} title="Somiglianza col solo NOME della raccolta (utile su raccolte nuove dal titolo parlante)">NOME</button>
-                  <button class="lfm" class:active={suggMode === "content"} disabled={suggLoading || selNode.count === 0} onclick={() => setSuggMode("content")} title={selNode.count === 0 ? "Serve almeno un paper nella raccolta" : "Somiglianza col solo CONTENUTO (centroide dei paper già dentro) — ignora il nome"}>CONTENUTO</button>
-                  <button class="lfm" class:active={suggMode === "both"} disabled={suggLoading || selNode.count === 0} onclick={() => setSuggMode("both")} title={selNode.count === 0 ? "Serve almeno un paper nella raccolta" : "Miscela nome+contenuto, col peso qui sotto"}>ENTRAMBI</button>
+                  <button class="lfm" class:active={suggMode === "name"} disabled={suggLoading} onclick={() => setSuggMode("name")} title={t("Somiglianza col solo NOME della raccolta (utile su raccolte nuove dal titolo parlante)")}>{t("NOME")}</button>
+                  <button class="lfm" class:active={suggMode === "content"} disabled={suggLoading || selNode.count === 0} onclick={() => setSuggMode("content")} title={selNode.count === 0 ? t("Serve almeno un paper nella raccolta") : t("Somiglianza col solo CONTENUTO (centroide dei paper già dentro) — ignora il nome")}>{t("CONTENUTO")}</button>
+                  <button class="lfm" class:active={suggMode === "both"} disabled={suggLoading || selNode.count === 0} onclick={() => setSuggMode("both")} title={selNode.count === 0 ? t("Serve almeno un paper nella raccolta") : t("Miscela nome+contenuto, col peso qui sotto")}>{t("ENTRAMBI")}</button>
                 </span>
                 {#if suggMode === "both" && selNode.count > 0}
-                  <label class="sldlbl" title="Quanto pesa il CONTENUTO nella miscela (il resto è il nome)">
-                    contenuto <b>{suggWeight}%</b> · nome <b>{100 - suggWeight}%</b>
+                  <label class="sldlbl" title={t("Quanto pesa il CONTENUTO nella miscela (il resto è il nome)")}>
+                    {t("contenuto {a}% · nome {b}%", { a: suggWeight, b: 100 - suggWeight })}
                     <input type="range" min="0" max="100" step="5" bind:value={suggWeight} disabled={suggLoading} onchange={saveSuggWeight} />
                   </label>
                 {/if}
                 <label class="chklbl">
                   <input type="checkbox" bind:checked={suggUnfiled} disabled={suggLoading} onchange={() => { if (sugg != null) void loadSuggestions(); }} />
-                  solo senza raccolta
+                  {t("solo senza raccolta")}
                 </label>
               </div>
               {#if sugg == null}
                 <button class="pbtn wide" onclick={loadSuggestions} disabled={suggLoading}>
-                  {suggLoading ? "CALCOLO…" : "CALCOLA I SUGGERIMENTI"}
+                  {suggLoading ? t("CALCOLO…") : t("CALCOLA I SUGGERIMENTI")}
                 </button>
               {:else}
                 <div class="suggctl">
                   <label class="sldlbl">
-                    confidenza ≥ <b>{suggThreshold}%</b>
+                    {t("confidenza ≥ {soglia}%", { soglia: suggThreshold })}
                     <input type="range" min="30" max="90" step="1" bind:value={suggThreshold} />
                   </label>
                   <button class="pbtn" onclick={addAllSuggestions} disabled={suggAdding || suggVisible.length === 0}>
-                    {suggAdding ? "AGGIUNGO…" : `AGGIUNGI TUTTI (${suggVisible.length})`}
+                    {suggAdding ? t("AGGIUNGO…") : t("AGGIUNGI TUTTI ({n})", { n: suggVisible.length })}
                   </button>
                 </div>
                 <div class="sugglist">
                   {#each suggVisible as s (s.id)}
                     <div class="srow" title={fmtSugg(s)}>
-                      <button class="saddbtn" onclick={() => addSuggestion(s)} title="Aggiungi alla raccolta">+</button>
+                      <button class="saddbtn" onclick={() => addSuggestion(s)} title={t("Aggiungi alla raccolta")}>+</button>
                       <span class="sbar"><span class="sfill" style="width:{Math.round(s.score * 100)}%"></span></span>
                       <span class="spct">{Math.round(s.score * 100)}</span>
                       <span class="stxt">{fmtSugg(s)}</span>
                     </div>
                   {:else}
-                    <div class="srow empty">Niente sopra il {suggThreshold}% — abbassa la soglia.</div>
+                    <div class="srow empty">{t("Niente sopra il {soglia}% — abbassa la soglia.", { soglia: suggThreshold })}</div>
                   {/each}
                 </div>
-                <div class="pnote">Punteggio = somiglianza semantica (bge-m3, in locale) con la sorgente scelta sopra: il <b>nome</b> della raccolta, il suo <b>contenuto</b> (i paper già dentro — più ne aggiungi, meglio va; niente rete né Ollama), o la miscela col peso che preferisci. Nulla viene aggiunto senza il tuo clic.</div>
+                <div class="pnote">
+                  {t("Punteggio = somiglianza semantica (bge-m3, in locale) con la sorgente scelta sopra: il")}
+                  <b>{t("nome|sorgente dei suggerimenti")}</b>
+                  {t("della raccolta, il suo")}
+                  <b>{t("contenuto|sorgente dei suggerimenti")}</b>
+                  {t("(i paper già dentro — più ne aggiungi, meglio va; niente rete né Ollama), o la miscela col peso che preferisci. Nulla viene aggiunto senza il tuo clic.")}
+                </div>
               {/if}
             </div>
           {/if}
         {:else}
-          <div class="pnote">I paper non ancora archiviati. Trascinali su una raccolta a sinistra; trascinare qui un paper (da una raccolta) lo toglie da quella raccolta.</div>
+          <div class="pnote">{t("I paper non ancora archiviati. Trascinali su una raccolta a sinistra; trascinare qui un paper (da una raccolta) lo toglie da quella raccolta.")}</div>
         {/if}
 
-        <div class="dochead">PAPER {loadingDocs ? "…" : `(${docs.length})`}</div>
+        <div class="dochead">{loadingDocs ? t("PAPER …") : t("PAPER ({n})", { n: docs.length })}</div>
         <div class="doclist">
           {#each docs as d (d.id)}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -858,13 +908,13 @@
               class="drow"
               class:dragging={docDrag != null && docDrag.ids[0] === d.id}
               onpointerdown={(e) => docPointerDown(e, d)}
-              title={fmtDoc(d) + " — trascinami su una raccolta"}
+              title={t("{documento} — trascinami su una raccolta", { documento: fmtDoc(d) })}
             >
               <span class="grip">⣿</span>
               <span class="dtxt">{fmtDoc(d)}</span>
             </div>
           {:else}
-            <div class="drow empty">{loadingDocs ? "Carico…" : "Nessun paper qui."}</div>
+            <div class="drow empty">{loadingDocs ? t("Carico…") : t("Nessun paper qui.")}</div>
           {/each}
         </div>
       {/if}
@@ -874,13 +924,13 @@
   {#if nodeDrag}
     <div class="ghost" style="left:{nodeDrag.x + 12}px; top:{nodeDrag.y + 10}px;">
       {nodeDrag.name}
-      <span class="gsub">{nodeDrag.valid ? (nodeDrag.target === "root" ? "→ radice" : "→ sotto-raccolta") : "…"}</span>
+      <span class="gsub">{nodeDrag.valid ? (nodeDrag.target === "root" ? t("→ radice") : t("→ sotto-raccolta")) : "…"}</span>
     </div>
   {/if}
   {#if docDrag}
     <div class="ghost" style="left:{docDrag.x + 12}px; top:{docDrag.y + 10}px;">
       {docDrag.label.length > 48 ? docDrag.label.slice(0, 47) + "…" : docDrag.label}
-      <span class="gsub">{docDrag.valid ? (docDrag.target === "unfiled" || docDrag.target === "root" ? "→ togli dalla raccolta" : "→ qui") : "…"}</span>
+      <span class="gsub">{docDrag.valid ? (docDrag.target === "unfiled" || docDrag.target === "root" ? t("→ togli dalla raccolta") : t("→ qui")) : "…"}</span>
     </div>
   {/if}
 </div>
@@ -995,7 +1045,8 @@
     border-bottom: 1px solid var(--border);
     padding: 7px 0; margin: 8px 0;
   }
-  .pstats b { color: var(--text); }
+  /* Il <b> attorno al numero è stato tolto: la frase «diretti {n}» è una chiave
+     sola, perché in inglese il numero precede la parola. */
   .smartbadge { color: #ffd166; }
   .pacts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
   .pbtn {
@@ -1056,7 +1107,7 @@
   .lfm.active { color: var(--accent); border-color: rgba(79, 227, 255, 0.6); }
   .lfm:disabled { opacity: 0.4; cursor: default; }
   .sldlbl { font-size: 9px; letter-spacing: 0.1em; color: var(--dim); display: flex; align-items: center; gap: 6px; }
-  .sldlbl b { color: var(--accent); min-width: 30px; }
+  /* Idem per le percentuali: chiave unica, niente <b> interno. */
   .sldlbl input[type="range"] { width: 110px; accent-color: var(--accent); }
   .chklbl { font-size: 9px; letter-spacing: 0.1em; color: var(--dim); display: flex; align-items: center; gap: 4px; }
   .sugglist { overflow-y: auto; max-height: 220px; min-height: 0; }

@@ -5,6 +5,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { RadialItem } from "$lib/radial";
+  import { t } from "$lib/i18n/index.svelte";
 
   let {
     x,
@@ -67,7 +68,11 @@
         out.push({
           item: it,
           trail,
-          label: [...trail.map((t) => t.label), it.label].join(" · "),
+          // Il parametro NON si chiama `t`: ombreggerebbe la funzione di
+          // traduzione importata. Le etichette arrivano gia' tradotte da chi
+          // costruisce le voci; qui si uniscono soltanto.
+          /* i18n-exempt: separatore neutro fra etichette gia' tradotte */
+          label: [...trail.map((p) => p.label), it.label].join(" · "),
         });
         if (it.children?.length) walk(it.children, [...trail, it]);
       }
@@ -196,6 +201,7 @@
 
   const hintText = $derived(hi >= 0 ? (ring[hi]?.item.hint ?? "") : "");
   const announce = $derived(hi >= 0 ? (ring[hi]?.label ?? "") : "");
+  /* i18n-exempt: "S" e' l'iniziale di «Scriptorium» (nome proprio), non testo */
   const hubLetter = $derived(title.trim().charAt(0).toUpperCase() || "S");
 
   // ----- geometria puntatore → petalo -----
@@ -526,7 +532,7 @@
       style="left:{-HUB}px; top:{-HUB}px; width:{HUB * 2}px; height:{HUB * 2}px"
     >
       {#if stack.length > 0}
-        <div class="back">‹ Indietro</div>
+        <div class="back">‹ {t("Indietro")}</div>
       {/if}
       {#if thumb}
         <img class="cover" src={thumb} alt="" draggable="false" />

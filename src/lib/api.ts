@@ -1,5 +1,25 @@
 // Typed wrappers around the Rust backend commands.
-import { invoke } from "@tauri-apps/api/core";
+//
+// Ogni comando passa da QUESTO `invoke`, non da quello di Tauri: e' l'imbuto in
+// cui i messaggi d'errore del backend — che restano scritti in italiano nel Rust
+// — vengono tradotti nella lingua scelta. Un solo punto invece di ~450
+// call-site, e il registro diagnostico su disco resta in una lingua sola.
+import { invoke as rawInvoke } from "@tauri-apps/api/core";
+import { te } from "$lib/i18n/index.svelte";
+
+/** L'imbuto. Esportato perche' alcuni comandi non sono incapsulati qui — il
+ *  lettore (`read_pdf`), la stampa, la condivisione, il terminale, la Plancia —
+ *  e quei moduli devono importare QUESTO `invoke`, non quello di Tauri: e' cio'
+ *  che rende tradotti anche i loro errori. Regola unica dell'app: `invoke` si
+ *  importa da `$lib/api`.
+ *
+ *  Nota: `te()` lascia intatto `MISSING_FILE_MARKER`, quindi i chiamanti che
+ *  riconoscono quel marcatore continuano a funzionare in entrambe le lingue. */
+export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  return rawInvoke<T>(cmd, args).catch((e: unknown) =>
+    Promise.reject(typeof e === "string" ? te(e) : e),
+  );
+}
 
 export interface Tag {
   id: number;
@@ -593,7 +613,13 @@ export interface AiSettings {
   model: string;
   embed_gpu: boolean;
   embed_batch: number;
+  /** Lingua delle risposte AI come scelta dall'utente. */
+  lang: AiLang;
+  /** La stessa, già risolta quando è "auto" — sola lettura, per l'etichetta. */
+  lang_effective?: "it" | "en";
 }
+/** "auto" segue la lingua dell'interfaccia. */
+export type AiLang = "auto" | "it" | "en";
 export const getAiSettings = () => invoke<AiSettings>("get_ai_settings");
 export const setAiSettings = (s: AiSettings) =>
   invoke<void>("set_ai_settings", {
@@ -604,7 +630,11 @@ export const setAiSettings = (s: AiSettings) =>
     model: s.model,
     embedGpu: s.embed_gpu,
     embedBatch: s.embed_batch,
+    lang: s.lang,
   });
+/** Rispecchia in `settings` la lingua dell'interfaccia (che vive in
+ *  localStorage): è ciò che permette alla lingua dell'AI di restare su «auto». */
+export const setUiLang = (lang: "it" | "en") => invoke<void>("set_ui_lang", { lang });
 /** List the models a provider serves at the given URL (also a reachability check). */
 export const aiListModels = (provider: AiProvider, url: string) =>
   invoke<string[]>("ai_list_models", { provider, url });

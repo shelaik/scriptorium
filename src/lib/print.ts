@@ -4,7 +4,10 @@
 // drive the browser/WebView print dialog from there. This prints the real PDF —
 // not the app UI — and keeps the user inside the app. For multiple documents we
 // merge them into a single PDF (pdf-lib) so it's one print dialog, one job.
-import { invoke } from "@tauri-apps/api/core";
+// `invoke` viene da $lib/api (non da Tauri): e' l'imbuto che traduce i messaggi
+// d'errore del backend nella lingua scelta.
+import { invoke, MISSING_FILE_MARKER } from "$lib/api";
+import { t } from "$lib/i18n/index.svelte";
 import { PDFDocument } from "pdf-lib";
 
 /** Fetch a document's raw PDF bytes from the backend. Throws for ref-only items (no file). */
@@ -15,10 +18,14 @@ async function fetchPdf(id: number): Promise<Uint8Array> {
   } catch (e) {
     // The backend flags a moved file with a marker so the reader can offer to
     // re-point it; here there is no such flow, so translate it into words.
+    // Il marcatore e' un token di protocollo: `te()` non lo tocca, quindi questo
+    // confronto vale identico in italiano e in inglese.
     const s = String(e);
-    if (s.includes("FILE_MANCANTE:")) {
+    if (s.includes(MISSING_FILE_MARKER)) {
+      // Frase nostra, non del backend: l'imbuto `te()` non la vedrebbe mai,
+      // quindi va tradotta qui o resterebbe italiana dentro una cornice inglese.
       throw new Error(
-        "il PDF non è più al percorso salvato — aprilo dalla libreria e usa «Ritrova il file…»",
+        t("il PDF non è più al percorso salvato — aprilo dalla libreria e usa «Ritrova il file…»"),
       );
     }
     throw e;

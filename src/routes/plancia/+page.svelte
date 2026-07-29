@@ -11,10 +11,13 @@
   // coppie start/ok del bus `pulse` muovono il contatore `busy`.
   // ============================================================================
   import { onMount, onDestroy } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  // `invoke` viene da $lib/api (non da Tauri): e' l'imbuto che traduce i
+  // messaggi d'errore del backend nella lingua scelta.
+  import { invoke } from "$lib/api";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { save } from "@tauri-apps/plugin-dialog";
   import { fmtClock, fmtNum } from "$lib/format";
+  import { t, tp, te } from "$lib/i18n/index.svelte";
 
   // ---- modello dati -----------------------------------------------------------
   interface PulseEvent {
@@ -76,60 +79,67 @@
 
   // ---- la mappa formale dei processi interni ---------------------------------
   interface NodeDef { id: string; x: number; y: number; w: number; h: number; label: string; sub: string; gate?: string }
-  const NODES: NodeDef[] = [
-    { id: "import",   x: 60,  y: 130, w: 170, h: 54, label: "IMPORT",      sub: "file · trascina" },
-    { id: "cartella", x: 60,  y: 230, w: 170, h: 54, label: "CARTELLA",    sub: "sorvegliata", gate: "watched" },
-    { id: "browser",  x: 60,  y: 330, w: 170, h: 54, label: "BROWSER",     sub: "connettore", gate: "connector" },
-    { id: "biblio",   x: 60,  y: 430, w: 170, h: 54, label: "BIBLIOTECHE", sub: "Zotero · RIS · CSL" },
-    { id: "latex",    x: 60,  y: 530, w: 170, h: 54, label: "LATEX",       sub: "progetti · compile" },
-    { id: "scoperta", x: 60,  y: 660, w: 170, h: 54, label: "SCOPERTA",    sub: "novità · online", gate: "rete" },
-    { id: "estrazione", x: 400, y: 180, w: 180, h: 54, label: "ESTRAZIONE", sub: "pdfium" },
+  // Gli `id` (e i `gate`) qui sotto sono PROTOCOLLO col backend — `pulse::start(app,
+  // "archivio", …)` in src-tauri — non etichette: restano in italiano in ogni lingua.
+  // `$derived.by` e non `const`: una costante di modulo verrebbe valutata UNA
+  // volta all'apertura della finestra e le etichette resterebbero nella lingua
+  // di allora anche dopo un cambio.
+  /* i18n-exempt: gli id dei nodi e i gate sono valori di protocollo col Rust, non testo */
+  const NODES: NodeDef[] = $derived.by(() => [
+    { id: "import",   x: 60,  y: 130, w: 170, h: 54, label: t("IMPORT"),      sub: t("file · trascina") },
+    { id: "cartella", x: 60,  y: 230, w: 170, h: 54, label: t("CARTELLA"),    sub: t("sorvegliata"), gate: "watched" },
+    { id: "browser",  x: 60,  y: 330, w: 170, h: 54, label: t("BROWSER"),     sub: t("connettore"), gate: "connector" },
+    { id: "biblio",   x: 60,  y: 430, w: 170, h: 54, label: t("BIBLIOTECHE"), sub: t("Zotero · RIS · CSL") },
+    { id: "latex",    x: 60,  y: 530, w: 170, h: 54, label: t("LATEX"),       sub: t("progetti · compile") },
+    { id: "scoperta", x: 60,  y: 660, w: 170, h: 54, label: t("SCOPERTA"),    sub: t("novità · online"), gate: "rete" },
+    { id: "estrazione", x: 400, y: 180, w: 180, h: 54, label: t("ESTRAZIONE"), sub: t("pdfium") },
     // NB: metadati SENZA gate "rete" — l'arricchimento usa il suo client e
     // funziona anche con la Scoperta disattivata (il gate qui mentirebbe).
-    { id: "metadati",   x: 400, y: 330, w: 180, h: 54, label: "METADATI",  sub: "Crossref · OpenAlex" },
-    { id: "miniature",  x: 400, y: 480, w: 180, h: 54, label: "MINIATURE", sub: "copertine" },
-    { id: "ocr",        x: 400, y: 580, w: 180, h: 54, label: "OCR",       sub: "scansioni" },
-    { id: "formule",    x: 400, y: 680, w: 180, h: 54, label: "FORMULE",   sub: "math-OCR", gate: "mathocr" },
-    { id: "tabelle",    x: 400, y: 780, w: 180, h: 54, label: "TABELLE",   sub: "TATR", gate: "tatr" },
-    { id: "db",        x: 760, y: 300, w: 210, h: 84, label: "DATABASE",  sub: "SQLite · FTS5 · vec" },
-    { id: "archivio",  x: 760, y: 470, w: 210, h: 54, label: "ARCHIVIO",  sub: "papers · note · progetti" },
-    { id: "backup",    x: 760, y: 590, w: 210, h: 54, label: "BACKUP",    sub: "copie · ripristino" },
-    { id: "specchio",  x: 760, y: 690, w: 210, h: 54, label: "SPECCHIO",  sub: "raccolte su disco", gate: "mirror" },
-    { id: "terminale", x: 760, y: 780, w: 210, h: 54, label: "TERMINALE", sub: "PowerShell" },
-    { id: "embed",     x: 1160, y: 120, w: 190, h: 54, label: "EMBEDDING", sub: "bge-m3 locale" },
-    { id: "rag",       x: 1160, y: 240, w: 190, h: 54, label: "INDICE RAG", sub: "passaggi per «Chiedi»" },
-    { id: "chiedi",    x: 1160, y: 360, w: 190, h: 54, label: "CHIEDI",    sub: "domande alla libreria", gate: "ai" },
-    { id: "wiki",      x: 1160, y: 480, w: 190, h: 54, label: "WIKI",      sub: "sintesi per concetto", gate: "ai" },
-    { id: "riassunti", x: 1160, y: 600, w: 190, h: 54, label: "RIASSUNTI", sub: "AI locale", gate: "ai" },
-    { id: "refdoi",    x: 1160, y: 720, w: 190, h: 54, label: "DOI RIF.",  sub: "backfill riferimenti", gate: "rete" },
-  ];
+    { id: "metadati",   x: 400, y: 330, w: 180, h: 54, label: t("METADATI"),  sub: t("Crossref · OpenAlex") },
+    { id: "miniature",  x: 400, y: 480, w: 180, h: 54, label: t("MINIATURE"), sub: t("copertine") },
+    { id: "ocr",        x: 400, y: 580, w: 180, h: 54, label: t("OCR"),       sub: t("scansioni") },
+    { id: "formule",    x: 400, y: 680, w: 180, h: 54, label: t("FORMULE"),   sub: t("math-OCR"), gate: "mathocr" },
+    { id: "tabelle",    x: 400, y: 780, w: 180, h: 54, label: t("TABELLE"),   sub: t("TATR"), gate: "tatr" },
+    { id: "db",        x: 760, y: 300, w: 210, h: 84, label: t("DATABASE"),  sub: t("SQLite · FTS5 · vec") },
+    { id: "archivio",  x: 760, y: 470, w: 210, h: 54, label: t("ARCHIVIO"),  sub: t("papers · note · progetti") },
+    { id: "backup",    x: 760, y: 590, w: 210, h: 54, label: t("BACKUP"),    sub: t("copie · ripristino") },
+    { id: "specchio",  x: 760, y: 690, w: 210, h: 54, label: t("SPECCHIO"),  sub: t("raccolte su disco"), gate: "mirror" },
+    { id: "terminale", x: 760, y: 780, w: 210, h: 54, label: t("TERMINALE"), sub: t("PowerShell") },
+    { id: "embed",     x: 1160, y: 120, w: 190, h: 54, label: t("EMBEDDING"), sub: t("bge-m3 locale") },
+    { id: "rag",       x: 1160, y: 240, w: 190, h: 54, label: t("INDICE RAG"), sub: t("passaggi per «Chiedi»") },
+    { id: "chiedi",    x: 1160, y: 360, w: 190, h: 54, label: t("CHIEDI"),    sub: t("domande alla libreria"), gate: "ai" },
+    { id: "wiki",      x: 1160, y: 480, w: 190, h: 54, label: t("WIKI"),      sub: t("sintesi per concetto"), gate: "ai" },
+    { id: "riassunti", x: 1160, y: 600, w: 190, h: 54, label: t("RIASSUNTI"), sub: t("AI locale"), gate: "ai" },
+    { id: "refdoi",    x: 1160, y: 720, w: 190, h: 54, label: t("DOI RIF."),  sub: t("backfill riferimenti"), gate: "rete" },
+  ]);
 
-  // Cosa fa ogni sottosistema (pannello dettaglio).
-  const INFO: Record<string, string> = {
-    import: "Importa PDF scelti a mano o trascinati: lettura, hash anti-doppione, estrazione testo, copertina, commit nel database.",
-    cartella: "Sorveglia la cartella scelta nelle Impostazioni: ogni PDF che vi appare viene importato da solo (senza mai ripescare ciò che hai cestinato).",
-    browser: "Il connettore browser: il bookmarklet manda l'URL del PDF aperto e Scriptorium lo scarica e importa con lo stesso motore (protetto anti-SSRF).",
-    biblio: "Import da gestori bibliografici (Zotero, Mendeley, EndNote, JabRef…): legge .bib/.ris/CSL-JSON, aggancia i PDF, converte le keyword in tag, deduplica per DOI e contenuto.",
-    latex: "I progetti LaTeX: import degli .zip (PDF + bibliografia nel grafo) e compilazione con Tectonic/latexmk.",
-    scoperta: "Il lato online: ricerche su arXiv/OpenAlex/ADS…, lo sweep «Novità» delle ricerche salvate — comprese quelle agganciate alle raccolte dell'Archivio (filtro semantico; le novità accettate entrano da sole nella raccolta; il toggle le crea e le rimuove) — e l'aggiunta di paper trovati.",
-    estrazione: "Il motore pdfium: estrae testo e rende le pagine. Serializzato: un documento alla volta, per stabilità.",
-    metadati: "Identità dei documenti: DOI dal testo, titolo/autori/anno da Crossref e OpenAlex, con i filtri di precisione (mai etichettare col paper sbagliato).",
-    miniature: "Le copertine della griglia, rese da pdfium e salvate in cache.",
-    ocr: "Riconoscimento testo per i PDF scansionati (immagini → testo cercabile).",
-    formule: "Math-OCR locale (pix2tex via ONNX): un ritaglio di formula diventa LaTeX. I modelli si scaricano al primo uso.",
-    tabelle: "Riconoscimento struttura tabelle (TATR): un ritaglio diventa righe e colonne vere.",
-    db: "Il cuore: SQLite con ricerca full-text (FTS5) e vettoriale (sqlite-vec). Ogni luce qui è una modifica alla libreria.",
-    archivio: "L'organizzazione della libreria: raccolte e sotto-raccolte (vista Archivio) coi suggerimenti semantici per riempirle — sorgente a scelta: nome, contenuto o miscela pesata; il nome si àncora ai tuoi paper anche a motori spenti — e i file veri su disco (papers/, note .md, progetti LaTeX, in %APPDATA%).",
-    specchio: "Lo Specchio su disco: proietta le raccolte in una cartella leggibile (Raccolta\\Sottoraccolta\\Autore Anno — Titolo.pdf) con hardlink, sincronizzata da sola a ogni cambio. La libreria vera non viene mai toccata; si attiva dall'Archivio.",
-    backup: "Copie di sicurezza complete e ripristino (validato, atomico, con copia pre-ripristino).",
-    terminale: "La PowerShell integrata, aperta nella cartella dei PDF.",
-    embed: "Vettori semantici bge-m3 (locale, ONNX): alimentano Correlati, ricerca per significato e Costellazione.",
-    rag: "L'indice a passaggi per «Chiedi alla libreria»: spezza i documenti e li vettorizza per il recupero citato.",
-    chiedi: "Domande alla tua libreria: recupero dei passaggi pertinenti + risposta del modello locale con citazioni [n].",
-    wiki: "Genera pagine di sintesi per concetto dai tuoi paper, con fonti.",
-    riassunti: "Riassunti e confronti AI dei singoli documenti (modello locale via Ollama/LM Studio).",
-    refdoi: "Backfill dei DOI dei riferimenti citati: ricerca su Crossref con il filtro di precisione (mai un DOI sbagliato).",
-  };
+  // Cosa fa ogni sottosistema (pannello dettaglio). Anche qui `$derived`: vedi NODES.
+  /* i18n-exempt: le CHIAVI di questa mappa sono gli id di protocollo dei nodi; i valori sono tradotti */
+  const INFO: Record<string, string> = $derived({
+    import: t("Importa PDF scelti a mano o trascinati: lettura, hash anti-doppione, estrazione testo, copertina, commit nel database."),
+    cartella: t("Sorveglia la cartella scelta nelle Impostazioni: ogni PDF che vi appare viene importato da solo (senza mai ripescare ciò che hai cestinato)."),
+    browser: t("Il connettore browser: il bookmarklet manda l'URL del PDF aperto e Scriptorium lo scarica e importa con lo stesso motore (protetto anti-SSRF)."),
+    biblio: t("Import da gestori bibliografici (Zotero, Mendeley, EndNote, JabRef…): legge .bib/.ris/CSL-JSON, aggancia i PDF, converte le keyword in tag, deduplica per DOI e contenuto."),
+    latex: t("I progetti LaTeX: import degli .zip (PDF + bibliografia nel grafo) e compilazione con Tectonic/latexmk."),
+    scoperta: t("Il lato online: ricerche su arXiv/OpenAlex/ADS…, lo sweep «Novità» delle ricerche salvate — comprese quelle agganciate alle raccolte dell'Archivio (filtro semantico; le novità accettate entrano da sole nella raccolta; il toggle le crea e le rimuove) — e l'aggiunta di paper trovati."),
+    estrazione: t("Il motore pdfium: estrae testo e rende le pagine. Serializzato: un documento alla volta, per stabilità."),
+    metadati: t("Identità dei documenti: DOI dal testo, titolo/autori/anno da Crossref e OpenAlex, con i filtri di precisione (mai etichettare col paper sbagliato)."),
+    miniature: t("Le copertine della griglia, rese da pdfium e salvate in cache."),
+    ocr: t("Riconoscimento testo per i PDF scansionati (immagini → testo cercabile)."),
+    formule: t("Math-OCR locale (pix2tex via ONNX): un ritaglio di formula diventa LaTeX. I modelli si scaricano al primo uso."),
+    tabelle: t("Riconoscimento struttura tabelle (TATR): un ritaglio diventa righe e colonne vere."),
+    db: t("Il cuore: SQLite con ricerca full-text (FTS5) e vettoriale (sqlite-vec). Ogni luce qui è una modifica alla libreria."),
+    archivio: t("L'organizzazione della libreria: raccolte e sotto-raccolte (vista Archivio) coi suggerimenti semantici per riempirle — sorgente a scelta: nome, contenuto o miscela pesata; il nome si àncora ai tuoi paper anche a motori spenti — e i file veri su disco (papers/, note .md, progetti LaTeX, in %APPDATA%)."),
+    specchio: t("Lo Specchio su disco: proietta le raccolte in una cartella leggibile (Raccolta\\Sottoraccolta\\Autore Anno — Titolo.pdf) con hardlink, sincronizzata da sola a ogni cambio. La libreria vera non viene mai toccata; si attiva dall'Archivio."),
+    backup: t("Copie di sicurezza complete e ripristino (validato, atomico, con copia pre-ripristino)."),
+    terminale: t("La PowerShell integrata, aperta nella cartella dei PDF."),
+    embed: t("Vettori semantici bge-m3 (locale, ONNX): alimentano Correlati, ricerca per significato e Costellazione."),
+    rag: t("L'indice a passaggi per «Chiedi alla libreria»: spezza i documenti e li vettorizza per il recupero citato."),
+    chiedi: t("Domande alla tua libreria: recupero dei passaggi pertinenti + risposta del modello locale con citazioni [n]."),
+    wiki: t("Genera pagine di sintesi per concetto dai tuoi paper, con fonti."),
+    riassunti: t("Riassunti e confronti AI dei singoli documenti (modello locale via Ollama/LM Studio)."),
+    refdoi: t("Backfill dei DOI dei riferimenti citati: ricerca su Crossref con il filtro di precisione (mai un DOI sbagliato)."),
+  });
 
   type Edge = { from: string; to: string; when: string[] };
   const EDGES: Edge[] = [
@@ -169,7 +179,19 @@
       nStart: 0, nOk: 0, nErr: 0, lastCloseId: -1,
     };
   }
-  let nodes = $state<Record<string, NodeState>>(Object.fromEntries(NODES.map((n) => [n.id, freshNode()])));
+  // Gli id sono protocollo col Rust e non cambiano MAI con la lingua: prenderli
+  // da `NODES` (che ora è reattivo, perché le etichette lo sono) legherebbe lo
+  // stato dei nodi alla lingua senza motivo. Da qui l'elenco separato.
+  /* i18n-exempt: id di protocollo, non testo */
+  const NODE_IDS = [
+    "import", "cartella", "browser", "biblio", "latex", "scoperta",
+    "estrazione", "metadati", "miniature", "ocr", "formule", "tabelle",
+    "db", "archivio", "backup", "specchio", "terminale",
+    "embed", "rag", "chiedi", "wiki", "riassunti", "refdoi",
+  ];
+  let nodes = $state<Record<string, NodeState>>(
+    Object.fromEntries(NODE_IDS.map((id) => [id, freshNode()])),
+  );
   let gates = $state<Gates | null>(null);
   let stats = $state<Stats | null>(null);
   let packets = $state<{ key: string; d: string }[]>([]);
@@ -177,7 +199,7 @@
   let log = $state<PulseEvent[]>([]);
   let alert = $state<{ node: string; label: string; detail: string } | null>(null);
   let selected = $state<string | null>(null);      // nodo aperto nel pannello
-  let logFilter = $state<"tutti" | "errori">("tutti");
+  let logFilter = $state<"tutti" | "errori">("tutti"); /* i18n-exempt: valore del filtro, non etichetta */
   let logToFile = $state(false);
   let exportMsg = $state("");
   let nowTick = $state(Date.now());
@@ -227,7 +249,7 @@
         if (st.busy > 0 && st.busySince) st.lastDur = Math.max(0, ev.ts - st.busySince);
         st.busy = Math.max(0, st.busy - 1);
         if (st.busy === 0) { st.prog = null; st.extUntil = 0; st.busySince = 0; }
-        st.err = ev.detail ?? "errore";
+        st.err = ev.detail ?? t("errore");
         st.errAt = ev.ts;
         st.nErr += 1;
         if (live) alert = { node: ev.node, label: ev.label, detail: ev.detail ?? "" };
@@ -299,13 +321,14 @@
   function gateOff(n: NodeDef): string | null {
     if (!gates || !n.gate) return null;
     switch (n.gate) {
-      case "rete":      return gates.discovery ? null : "online disattivato";
-      case "ai":        return gates.ai_enabled ? null : "AI disattivata";
-      case "mirror":    return gates.mirror_enabled ? null : "spento (si attiva dall'Archivio)";
-      case "watched":   return gates.watched_folder ? null : "nessuna cartella";
-      case "connector": return gates.connector ? null : "connettore spento";
-      case "mathocr":   return gates.mathocr_ready ? null : "modelli da scaricare";
-      case "tatr":      return gates.tatr_ready ? null : "modelli da scaricare";
+      /* i18n-exempt: i `case` sono i valori di `gate`, non testo — le frasi restituite sono tradotte */
+      case "rete":      return gates.discovery ? null : t("online disattivato");
+      case "ai":        return gates.ai_enabled ? null : t("AI disattivata");
+      case "mirror":    return gates.mirror_enabled ? null : t("spento (si attiva dall'Archivio)");
+      case "watched":   return gates.watched_folder ? null : t("nessuna cartella");
+      case "connector": return gates.connector ? null : t("connettore spento");
+      case "mathocr":   return gates.mathocr_ready ? null : t("modelli da scaricare");
+      case "tatr":      return gates.tatr_ready ? null : t("modelli da scaricare");
       default: return null;
     }
   }
@@ -340,17 +363,25 @@
     return fmtClock(ts - clockOffset);
   }
   function fmtDur(ms: number): string {
-    if (ms < 1000) return "<1s";
+    if (ms < 1000) return t("<1s");
     const s = Math.round(ms / 1000);
-    if (s < 60) return `${s}s`;
+    if (s < 60) return t("{s}s", { s });
     const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ${s % 60}s`;
-    return `${Math.floor(m / 60)}h ${m % 60}m`;
+    if (m < 60) return t("{m}m {s}s", { m, s: s % 60 });
+    return t("{h}h {m}m", { h: Math.floor(m / 60), m: m % 60 });
   }
   /** Da quanto è in lavorazione: adesso-in-orologio-backend = nowTick + offset. */
   function elapsed(st: NodeState): string {
     if (!st.busySince) return "";
     return fmtDur(Math.max(0, nowTick + clockOffset - st.busySince));
+  }
+  /** Una riga di registro: etichetta del backend (te), avanzamento, dettaglio.
+   *  Unica per il registro in fondo e per lo storico del nodo nel pannello. */
+  function rigaEvento(ev: PulseEvent): string {
+    let s = te(ev.label);
+    if (ev.state === "progress" && ev.done != null) s += ` ${ev.done}/${ev.total}`;
+    if (ev.detail) s = t("{testo} — {dettaglio}", { testo: s, dettaglio: te(ev.detail) });
+    return s;
   }
 
   const activeCount = $derived(NODES.filter((n) => isActive(n.id)).length);
@@ -372,18 +403,21 @@
   /** Il readout VERO del nodo in quiete (stile «CURRENT TEMP — 19°C», ma onesto). */
   function readout(n: NodeDef): string {
     if (!stats) return n.sub;
+    /* i18n-exempt: i `case` sono gli id di protocollo dei nodi — i testi resi sono tradotti */
     switch (n.id) {
-      case "db":       return `${fmtN(stats.docs)} doc · ${fmtN(stats.trash)} cestino · ${stats.db_mb} MB`;
-      case "embed":    return `${fmtN(stats.embedded)}/${fmtN(stats.docs)} vettorizzati`;
-      case "rag":      return stats.rag_docs > 0 ? `${fmtN(stats.rag_docs)} doc · ${fmtN(stats.rag_chunks)} passaggi` : "indice da costruire";
-      case "archivio": return `${fmtN(stats.collections)} raccolte · ${fmtN(stats.notes)} appunti · ${fmtN(stats.projects)} progetti`;
+      case "db":       return t("{doc} doc · {cest} cestino · {mb} MB", { doc: fmtN(stats.docs), cest: fmtN(stats.trash), mb: stats.db_mb });
+      case "embed":    return t("{fatti}/{totale} vettorizzati", { fatti: fmtN(stats.embedded), totale: fmtN(stats.docs) });
+      case "rag":      return stats.rag_docs > 0 ? t("{doc} doc · {pass} passaggi", { doc: fmtN(stats.rag_docs), pass: fmtN(stats.rag_chunks) }) : t("indice da costruire");
+      case "archivio": return t("{racc} raccolte · {app} appunti · {prog} progetti", { racc: fmtN(stats.collections), app: fmtN(stats.notes), prog: fmtN(stats.projects) });
       case "specchio": {
         const d = gates?.mirror_dir ?? "";
         return d ? (d.split(/[\\/]/).pop() ?? n.sub) : n.sub;
       }
-      case "scoperta": return stats.watches > 0 ? `${fmtN(stats.watches)} ricerche attive` : n.sub;
-      case "backup":   return stats.backup_age_days == null ? "nessun backup" : stats.backup_age_days === 0 ? "ultimo: oggi" : `ultimo: ${stats.backup_age_days} g fa`;
-      case "biblio":   return stats.refs_only > 0 ? `${fmtN(stats.refs_only)} voci solo-riferimento` : n.sub;
+      // `n: fmtN(...)` esplicito: `tp` interpolerebbe il numero grezzo e questo
+      // readout perderebbe il separatore delle migliaia che i nodi accanto hanno.
+      case "scoperta": return stats.watches > 0 ? tp(stats.watches, "1 ricerca attiva", "{n} ricerche attive", { n: fmtN(stats.watches) }) : n.sub;
+      case "backup":   return stats.backup_age_days == null ? t("nessun backup") : stats.backup_age_days === 0 ? t("ultimo: oggi") : t("ultimo: {g} g fa", { g: stats.backup_age_days });
+      case "biblio":   return stats.refs_only > 0 ? tp(stats.refs_only, "1 voce solo-riferimento", "{n} voci solo-riferimento", { n: fmtN(stats.refs_only) }) : n.sub;
       case "cartella": {
         const wf = gates?.watched_folder;
         return wf ? (wf.split(/[\\/]/).pop() ?? n.sub) : n.sub;
@@ -411,7 +445,7 @@
 
   // Titolo del pannello con effetto «decodifica» (200ms, poi testo pieno).
   let ptitle = $state("");
-  const GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#/·";
+  const GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#/·"; /* i18n-exempt: pozzo di glifi dell'animazione, non testo */
   $effect(() => {
     if (!selected) { ptitle = ""; return; }
     const target = nodeDef(selected)?.label ?? selected;
@@ -442,16 +476,16 @@
     exportMsg = "";
     try {
       const path = await save({
-        title: "Salva il registro della Plancia",
-        defaultPath: "plancia-registro.txt",
-        filters: [{ name: "Testo", extensions: ["txt"] }],
+        title: t("Salva il registro della Plancia"),
+        defaultPath: "plancia-registro.txt", /* i18n-exempt: dato su disco (nome del file salvato) */
+        filters: [{ name: t("Testo"), extensions: ["txt"] }],
       });
       if (!path) return;
       const n = await invoke<number>("pulse_export", { path });
-      exportMsg = `salvati ${n} eventi`;
+      exportMsg = tp(n, "salvato 1 evento", "salvati {n} eventi");
       setTimeout(() => (exportMsg = ""), 4000);
     } catch (e) {
-      exportMsg = "errore: " + e;
+      exportMsg = t("errore: {err}", { err: String(e) });
     }
   }
 
@@ -479,6 +513,7 @@
   onMount(async () => {
     // Prima i listener, POI la snapshot: un evento nel mezzo non va perso
     // (il dedupe per id + lastCloseId rendono innocuo l'ordine di arrivo).
+    /* i18n-exempt: nomi di evento e id di nodo — protocollo col backend, mai testo */
     unsubs.push(await listen<PulseEvent>("pulse", (e) => apply(e.payload, true)));
     unsubs.push(await listen<{ done: number; total: number; phase: string }>("embed-progress", (e) =>
       extProgress("embed", e.payload.done, e.payload.total, e.payload.phase)));
@@ -494,7 +529,7 @@
       const target = nodes.wiki.busy > 0 ? "wiki" : nodes.riassunti.busy > 0 ? "riassunti" : null;
       if (target) extProgress(target, e.payload.done, e.payload.total, e.payload.phase);
     }));
-    unsubs.push(await listen("library-changed", () => blipNode("db", "Libreria aggiornata")));
+    unsubs.push(await listen("library-changed", () => blipNode("db", t("Libreria aggiornata"))));
     unsubs.push(await listen<number>("novita-changed", () => blipNode("scoperta")));
     unsubs.push(await listen<string>("connector-added", () => blipNode("browser")));
     unsubs.push(await listen<string>("ask-token", () => blipNode("chiedi")));
@@ -513,7 +548,7 @@
 </script>
 
 <svelte:head>
-  <title>Plancia — Scriptorium</title>
+  <title>{t("Plancia — Scriptorium")}</title>
 </svelte:head>
 
 <div class="plancia" class:alarm={alert != null}>
@@ -521,33 +556,33 @@
   <div class="scan"></div>
   <header>
     <div class="brand">
-      <span class="t1">PLANCIA</span><span class="t2">// SCRIPTORIUM</span>
-      <span class="t3">SESSIONE {uptime} · {eventsPerMin} EV/MIN</span>
+      <span class="t1">{t("PLANCIA")}</span><span class="t2">// SCRIPTORIUM</span><!-- i18n-exempt: nome proprio del programma -->
+      <span class="t3">{t("SESSIONE {durata} · {ev} EV/MIN", { durata: uptime, ev: eventsPerMin })}</span>
     </div>
     <div class="gates">
       {#if gates}
-        <span class="chip {gates.discovery ? 'g-on' : 'g-off'}">RETE {gates.discovery ? "ONLINE" : "OFF"}</span>
-        <span class="chip {gates.ai_enabled ? 'g-on' : 'g-off'}">AI {gates.ai_enabled ? (gates.ai_model || gates.ai_provider || "ON").toUpperCase() : "OFF"}</span>
-        <span class="chip {gates.watched_folder ? 'g-on' : 'g-off'}">CARTELLA {gates.watched_folder ? "●" : "—"}</span>
-        <span class="chip {gates.connector ? 'g-on' : 'g-off'}">CONNETTORE {gates.connector ? "●" : "—"}</span>
-        <span class="chip {gates.mirror_enabled ? 'g-on' : 'g-off'}" title={gates.mirror_enabled ? gates.mirror_dir : "Specchio su disco spento (si attiva dall'Archivio)"}>SPECCHIO {gates.mirror_enabled ? "●" : "—"}</span>
+        <span class="chip {gates.discovery ? 'g-on' : 'g-off'}">{gates.discovery ? t("RETE ONLINE") : t("RETE OFF")}</span>
+        <span class="chip {gates.ai_enabled ? 'g-on' : 'g-off'}">{gates.ai_enabled ? t("AI {modello}", { modello: (gates.ai_model || gates.ai_provider || "ON").toUpperCase() }) : t("AI OFF")}</span>
+        <span class="chip {gates.watched_folder ? 'g-on' : 'g-off'}">{t("CARTELLA")} {gates.watched_folder ? "●" : "—"}</span>
+        <span class="chip {gates.connector ? 'g-on' : 'g-off'}">{t("CONNETTORE")} {gates.connector ? "●" : "—"}</span>
+        <span class="chip {gates.mirror_enabled ? 'g-on' : 'g-off'}" title={gates.mirror_enabled ? gates.mirror_dir : t("Specchio su disco spento (si attiva dall'Archivio)")}>{t("SPECCHIO")} {gates.mirror_enabled ? "●" : "—"}</span>
       {/if}
       {#if errCount > 0}
-        <span class="chip g-err">{errCount} ERRORI</span>
+        <span class="chip g-err">{tp(errCount, "1 ERRORE", "{n} ERRORI")}</span>
       {/if}
       {#if logToFile}
-        <span class="chip g-on" title="Il registro viene scritto anche su file (Impostazioni → Manutenzione)">LOG SU FILE ●</span>
+        <span class="chip g-on" title={t("Il registro viene scritto anche su file (Impostazioni → Manutenzione)")}>{t("LOG SU FILE ●")}</span>
       {/if}
-      <span class="chip {activeCount > 0 ? 'g-run' : 'g-idle'}">{activeCount > 0 ? `${activeCount} PROCESSI ATTIVI` : "SISTEMA IN QUIETE"}</span>
-      <button class="chip g-btn" onclick={exportLog} title="Salva il registro della sessione in un file di testo">SALVA REGISTRO…</button>
+      <span class="chip {activeCount > 0 ? 'g-run' : 'g-idle'}">{activeCount > 0 ? tp(activeCount, "1 PROCESSO ATTIVO", "{n} PROCESSI ATTIVI") : t("SISTEMA IN QUIETE")}</span>
+      <button class="chip g-btn" onclick={exportLog} title={t("Salva il registro della sessione in un file di testo")}>{t("SALVA REGISTRO…")}</button>
       {#if exportMsg}<span class="chip g-idle">{exportMsg}</span>{/if}
     </div>
   </header>
 
   {#if alert}
-    <button class="alert glitch" onclick={() => (alert = null)} title="Chiudi">
-      <span class="a1">{nodeDef(alert.node)?.label ?? alert.node} — ERRORE</span>
-      <span class="a2">{alert.label}{alert.detail ? " · " + alert.detail : ""}</span>
+    <button class="alert glitch" onclick={() => (alert = null)} title={t("Chiudi")}>
+      <span class="a1">{t("{nodo} — ERRORE", { nodo: nodeDef(alert.node)?.label ?? alert.node })}</span>
+      <span class="a2">{alert.detail ? t("{testo} · {dettaglio}", { testo: te(alert.label), dettaglio: te(alert.detail) }) : te(alert.label)}</span>
     </button>
   {/if}
 
@@ -571,10 +606,10 @@
         {/each}
       </g>
 
-      <text class="zone" x="60"   y="100">SORGENTI</text>
-      <text class="zone" x="400"  y="150">ELABORAZIONE</text>
-      <text class="zone" x="760"  y="270">NUCLEO</text>
-      <text class="zone" x="1160" y="90">INTELLIGENZA</text>
+      <text class="zone" x="60"   y="100">{t("SORGENTI")}</text>
+      <text class="zone" x="400"  y="150">{t("ELABORAZIONE")}</text>
+      <text class="zone" x="760"  y="270">{t("NUCLEO")}</text>
+      <text class="zone" x="1160" y="90">{t("INTELLIGENZA")}</text>
 
       {#each EDGES as e (e.from + ">" + e.to)}
         {@const act = edgeActive(e)}
@@ -597,6 +632,7 @@
       {/each}
 
       <!-- sottosistemi del nucleo: esagoni FTS5 / VEC con conteggi veri -->
+      <!-- i18n-exempt: FTS5 e VEC sono i nomi dei moduli SQLite, identici in ogni lingua -->
       {#if stats}
         <g class="hexes">
           <line x1="970" y1="322" x2="1006" y2="308" />
@@ -630,16 +666,16 @@
           <line class="stub" x1={n.x + n.w} y1={n.y + n.h / 2 - 6} x2={n.x + n.w + 6} y2={n.y + n.h / 2 - 6} />
           <line class="stub" x1={n.x + n.w} y1={n.y + n.h / 2 + 6} x2={n.x + n.w + 6} y2={n.y + n.h / 2 + 6} />
           {#if n.gate}
-            <text class="gatebadge" class:gb-off={off != null} x={n.x + 2} y={n.y - 5}>{off ? "OFFLINE" : "ONLINE"}</text>
+            <text class="gatebadge" class:gb-off={off != null} x={n.x + 2} y={n.y - 5}>{off ? t("OFFLINE") : t("ONLINE")}</text>
           {/if}
           <text class="nlabel" x={n.x + 14} y={n.y + 23}>{n.label}</text>
           <text class="nsub" x={n.x + 14} y={n.y + 41}>
             {#if st.busy > 0 || st.extUntil > nowTick}
-              {#if st.prog}{st.prog.done}/{st.prog.total}{:else}in lavorazione{/if}{#if st.busySince} · {elapsed(st)}{/if}{#if st.err} · con errori{/if}
+              {#if st.prog}{st.prog.done}/{st.prog.total}{:else}{t("in lavorazione")}{/if}{#if st.busySince} · {elapsed(st)}{/if}{#if st.err} · {t("con errori")}{/if}
             {:else if st.err}
-              AVARIA
+              {t("AVARIA")}
             {:else if off}
-              OFFLINE — {off}
+              {t("OFFLINE — {motivo}", { motivo: off })}
             {:else}
               {readout(n)}
             {/if}
@@ -667,38 +703,39 @@
 
         <div class="pstate">
           {#if st.err}
-            <div class="prow perr">AVARIA · {fmtTime(st.errAt)}</div>
-            <div class="perrmsg">{st.label}{st.err ? " — " + st.err : ""}</div>
-            <button class="pack" onclick={() => ackErr(n.id)}>PRESA VISIONE</button>
+            <div class="prow perr">{t("AVARIA · {ora}", { ora: fmtTime(st.errAt) })}</div>
+            <div class="perrmsg">{st.err ? t("{testo} — {dettaglio}", { testo: te(st.label), dettaglio: te(st.err) }) : te(st.label)}</div>
+            <button class="pack" onclick={() => ackErr(n.id)}>{t("PRESA VISIONE")}</button>
           {:else if st.busy > 0 || st.extUntil > nowTick}
-            <div class="prow pon">IN LAVORAZIONE{st.busySince ? ` · da ${elapsed(st)}` : ""}</div>
-            <div class="plabel">{st.label}{st.prog ? ` — ${st.prog.done}/${st.prog.total}` : ""}</div>
+            <div class="prow pon">{st.busySince ? t("IN LAVORAZIONE · da {durata}", { durata: elapsed(st) }) : t("IN LAVORAZIONE")}</div>
+            <div class="plabel">{st.prog ? t("{testo} — {fatti}/{totale}", { testo: te(st.label), fatti: st.prog.done, totale: st.prog.total }) : te(st.label)}</div>
           {:else if off}
-            <div class="prow poff">OFFLINE — {off}</div>
+            <div class="prow poff">{t("OFFLINE — {motivo}", { motivo: off })}</div>
           {:else}
-            <div class="prow pidle">IN QUIETE</div>
+            <div class="prow pidle">{t("IN QUIETE")}</div>
             {#if st.lastOkAt}
-              <div class="plabel">ultimo esito · {fmtTime(st.lastOkAt)}{st.lastDur ? ` (${fmtDur(st.lastDur)})` : ""}{st.lastOkDetail ? ` — ${st.lastOkDetail}` : ""}</div>
+              {@const esito = t("ultimo esito · {ora}", { ora: fmtTime(st.lastOkAt) }) + (st.lastDur ? " " + t("({durata})", { durata: fmtDur(st.lastDur) }) : "")}
+              <div class="plabel">{st.lastOkDetail ? t("{testo} — {dettaglio}", { testo: esito, dettaglio: te(st.lastOkDetail) }) : esito}</div>
             {/if}
           {/if}
         </div>
 
         <div class="pstats">
-          <span>avvii <b>{st.nStart}</b></span>
-          <span>ok <b class="okc">{st.nOk}</b></span>
-          <span>errori <b class="errc">{st.nErr}</b></span>
-          {#if st.lastDur}<span>ultima durata <b>{fmtDur(st.lastDur)}</b></span>{/if}
+          <span>{t("avvii")} <b>{st.nStart}</b></span>
+          <span>{t("ok")} <b class="okc">{st.nOk}</b></span>
+          <span>{t("errori")} <b class="errc">{st.nErr}</b></span>
+          {#if st.lastDur}<span>{t("ultima durata")} <b>{fmtDur(st.lastDur)}</b></span>{/if}
         </div>
 
-        <div class="phist-head">STORICO DEL NODO (sessione)</div>
+        <div class="phist-head">{t("STORICO DEL NODO (sessione)")}</div>
         <div class="phist">
           {#each log.filter((e) => e.node === n.id).slice(-40).reverse() as ev (ev.id)}
             <div class="lrow {ev.state}">
               <span class="lt">{fmtTime(ev.ts)}</span>
-              <span class="ll">{ev.state === "ok" ? "✓" : ev.state === "err" ? "✗" : ev.state === "start" ? "▶" : "·"} {ev.label}{ev.state === "progress" && ev.done != null ? ` ${ev.done}/${ev.total}` : ""}{ev.detail ? " — " + ev.detail : ""}</span>
+              <span class="ll">{ev.state === "ok" ? "✓" : ev.state === "err" ? "✗" : ev.state === "start" ? "▶" : "·"} {rigaEvento(ev)}</span>
             </div>
           {:else}
-            <div class="lrow idle-msg"><span class="ll">Nessun evento in questa sessione.</span></div>
+            <div class="lrow idle-msg"><span class="ll">{t("Nessun evento in questa sessione.")}</span></div>
           {/each}
         </div>
       </aside>
@@ -707,10 +744,11 @@
 
   <footer>
     <div class="loghead">
-      <span>REGISTRO ATTIVITÀ{selected ? ` — ${nodeDef(selected)?.label}` : ""}</span>
+      <span>{selected ? t("REGISTRO ATTIVITÀ — {nodo}", { nodo: nodeDef(selected)?.label ?? "" }) : t("REGISTRO ATTIVITÀ")}</span>
       <span class="lfilters">
-        <button class="lf" class:active={logFilter === "tutti"} onclick={() => (logFilter = "tutti")}>TUTTI</button>
-        <button class="lf" class:active={logFilter === "errori"} onclick={() => (logFilter = "errori")}>ERRORI</button>
+        <!-- i18n-exempt: "tutti"/"errori" sono i valori del filtro, non le etichette -->
+        <button class="lf" class:active={logFilter === "tutti"} onclick={() => (logFilter = "tutti")}>{t("TUTTI")}</button>
+        <button class="lf" class:active={logFilter === "errori"} onclick={() => (logFilter = "errori")}>{t("ERRORI")}</button>
       </span>
     </div>
     <div class="logbody">
@@ -718,10 +756,10 @@
         <div class="lrow {ev.state}">
           <span class="lt">{fmtTime(ev.ts)}</span>
           <span class="ln">{nodeDef(ev.node)?.label ?? ev.node}</span>
-          <span class="ll">{ev.label}{ev.state === "progress" && ev.done != null ? ` ${ev.done}/${ev.total}` : ""}{ev.detail ? " — " + ev.detail : ""}</span>
+          <span class="ll">{rigaEvento(ev)}</span>
         </div>
       {:else}
-        <div class="lrow idle-msg"><span class="ll">{logFilter === "errori" ? "Nessun errore registrato. Ottimo segno." : "Nessuna attività registrata da quando l'app è aperta. Lo schema si accende quando qualcosa lavora davvero."}</span></div>
+        <div class="lrow idle-msg"><span class="ll">{logFilter === "errori" ? t("Nessun errore registrato. Ottimo segno.") : t("Nessuna attività registrata da quando l'app è aperta. Lo schema si accende quando qualcosa lavora davvero.")}</span></div>
       {/each}
     </div>
   </footer>

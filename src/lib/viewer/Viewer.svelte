@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  // `invoke` viene da $lib/api (non da Tauri): e' l'imbuto che traduce i
+  // messaggi d'errore del backend nella lingua scelta. `read_pdf` non e'
+  // incapsulato in api.ts perche' restituisce byte grezzi.
+  import { invoke } from "$lib/api";
   import { listen } from "@tauri-apps/api/event";
   import * as pdfjsLib from "pdfjs-dist";
   import { TextLayer } from "pdfjs-dist";
@@ -27,6 +30,7 @@
   import ShareMenu from "$lib/ShareMenu.svelte";
   import RadialMenu from "$lib/RadialMenu.svelte";
   import type { RadialItem } from "$lib/radial";
+  import { t, tp } from "$lib/i18n/index.svelte";
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -117,18 +121,21 @@
   }
 
   // Selection-time palette: swatch colors + the active markup style.
-  const PALETTE: { color: string; label: string }[] = [
-    { color: "#ffd54a", label: "Giallo" },
-    { color: "#7ed957", label: "Verde" },
-    { color: "#5aa9ff", label: "Blu" },
-    { color: "#ff8fb1", label: "Rosa" },
-    { color: "#ffb454", label: "Arancio" },
-  ];
-  const KINDS: { kind: AnnotationKind; label: string; glyph: string }[] = [
-    { kind: "highlight", label: "Evidenzia", glyph: "▆" },
-    { kind: "underline", label: "Sottolinea", glyph: "U" },
-    { kind: "strikethrough", label: "Barra", glyph: "S" },
-  ];
+  // i18n-exempt: `color` (l'esadecimale e' cio' che viene salvato) e `kind` (colonna
+  // del DB, protocollo col Rust) sono VALORI, come i `glyph` che sono icone: solo le
+  // etichette sono testo. Derivati e non costanti perche' la lingua cambia a caldo.
+  const PALETTE: { color: string; label: string }[] = $derived([
+    { color: "#ffd54a", label: t("Giallo") },
+    { color: "#7ed957", label: t("Verde") },
+    { color: "#5aa9ff", label: t("Blu") },
+    { color: "#ff8fb1", label: t("Rosa") },
+    { color: "#ffb454", label: t("Arancio") },
+  ]);
+  const KINDS: { kind: AnnotationKind; label: string; glyph: string }[] = $derived([
+    { kind: "highlight", label: t("Evidenzia"), glyph: "▆" },
+    { kind: "underline", label: t("Sottolinea"), glyph: "U" },
+    { kind: "strikethrough", label: t("Barra"), glyph: "S" },
+  ]);
   let hlKind = $state<AnnotationKind>("highlight");
 
   // Right-hand side panel: free-text notes + the annotations index.
@@ -619,7 +626,7 @@
         missingPath = s.slice(s.indexOf(MISSING_FILE_MARKER) + MISSING_FILE_MARKER.length).trim();
         error = "";
       } else {
-        error = "Impossibile aprire il PDF: " + e;
+        error = t("Impossibile aprire il PDF: {err}", { err: String(e) });
       }
     } finally {
       loading = false;
@@ -641,19 +648,19 @@
       const picked = await openDialog({
         multiple: false,
         filters: [{ name: "PDF", extensions: ["pdf"] }],
-        title: "Dov'è finito questo PDF?",
+        title: t("Dov'è finito questo PDF?"),
       });
       if (typeof picked !== "string") return;
       const res = await relinkDocument(id, picked);
       relinkInfo = res;
       missingPath = "";
       if (res.had_hash && !res.hash_match) {
-        relinkMsg = "Collegato — attenzione: il file scelto non è identico all'originale.";
+        relinkMsg = t("Collegato — attenzione: il file scelto non è identico all'originale.");
       }
       await load(); // the document opens for real now
       onRelinked?.();
     } catch (e) {
-      relinkMsg = "Non riesco a ricollegare: " + e;
+      relinkMsg = t("Non riesco a ricollegare: {err}", { err: String(e) });
     } finally {
       relinkBusy = false;
     }
@@ -665,11 +672,11 @@
     relinkBusy = true;
     try {
       const n = await relinkApplyMapping(info.old_prefix, info.new_prefix);
-      relinkMsg = n === 1 ? "Ricollegato anche 1 altro file." : `Ricollegati anche ${n} file.`;
+      relinkMsg = tp(n, "Ricollegato anche 1 altro file.", "Ricollegati anche {n} file.");
       relinkInfo = null;
       onRelinked?.();
     } catch (e) {
-      relinkMsg = "Non riesco: " + e;
+      relinkMsg = t("Non riesco: {err}", { err: String(e) });
     } finally {
       relinkBusy = false;
     }
@@ -697,7 +704,7 @@
       figureMode = false;
       clearSelection();
       cancelExtractDrag();
-      setNotice("Modalità tabella: trascina un rettangolo attorno a una tabella");
+      setNotice(t("Modalità tabella: trascina un rettangolo attorno a una tabella"));
     } else cancelExtractDrag();
   }
   function toggleText() {
@@ -709,7 +716,7 @@
       figureMode = false;
       clearSelection();
       cancelExtractDrag();
-      setNotice("Estrai testo: trascina un rettangolo attorno al testo da copiare");
+      setNotice(t("Estrai testo: trascina un rettangolo attorno al testo da copiare"));
     } else cancelExtractDrag();
   }
   function toggleFormula() {
@@ -721,7 +728,7 @@
       figureMode = false;
       clearSelection();
       cancelExtractDrag();
-      setNotice("Formula → LaTeX: trascina un rettangolo attorno a una formula");
+      setNotice(t("Formula → LaTeX: trascina un rettangolo attorno a una formula"));
     } else cancelExtractDrag();
   }
   function toggleFigure() {
@@ -733,7 +740,7 @@
       formulaMode = false;
       clearSelection();
       cancelExtractDrag();
-      setNotice("Estrai figura: trascina un rettangolo attorno alla figura da ritagliare come PNG");
+      setNotice(t("Estrai figura: trascina un rettangolo attorno alla figura da ritagliare come PNG"));
     } else cancelExtractDrag();
   }
   /** Crop a screen-space rectangle out of a page's rendered canvas to a PNG data
@@ -825,7 +832,7 @@
       figureMode = false;
       const dataUrl = cropCanvasRegion(start.wrap, rect);
       if (!dataUrl) {
-        setNotice("Impossibile ritagliare la figura");
+        setNotice(t("Impossibile ritagliare la figura"));
         return;
       }
       figureImg = dataUrl;
@@ -838,7 +845,7 @@
       formulaMode = false;
       const dataUrl = cropCanvasRegion(start.wrap, rect);
       if (!dataUrl) {
-        setNotice("Impossibile ritagliare la formula");
+        setNotice(t("Impossibile ritagliare la formula"));
         return;
       }
       formulaImg = dataUrl;
@@ -893,11 +900,11 @@
     try {
       let out: string;
       if (engine === "ollama") {
-        if (!textImg) throw "Immagine del testo non disponibile";
-        if (!visionModel) throw "Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).";
+        if (!textImg) throw t("Immagine del testo non disponibile");
+        if (!visionModel) throw t("Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).");
         out = await textFromImageAi(textImg, visionModel);
       } else {
-        if (!textRegion) throw "Regione non disponibile";
+        if (!textRegion) throw t("Regione non disponibile");
         out = await extractRegionText(id, textPageId, textRegion);
       }
       if (textReq !== req) return;
@@ -908,7 +915,7 @@
     } catch (err) {
       if (textReq !== req) return;
       textError = String(err);
-      setNotice("Errore estrazione testo: " + err);
+      setNotice(t("Errore estrazione testo: {err}", { err: String(err) }));
     } finally {
       if (textReq === req) textLoading = false;
     }
@@ -936,21 +943,20 @@
     return fmt === "md" ? `$$\n${l}\n$$` : l;
   }
   async function copyFormatted(str: string) {
-    const t = (str ?? "").trim();
-    if (!t) {
-      setNotice("Niente da copiare");
+    if (!(str ?? "").trim()) {
+      setNotice(t("Niente da copiare"));
       return;
     }
     try {
       await navigator.clipboard.writeText(str);
-      setNotice("Copiato ✓");
+      setNotice(t("Copiato ✓"));
     } catch {
-      setNotice("Impossibile copiare");
+      setNotice(t("Impossibile copiare"));
     }
   }
   async function saveFormatted(str: string, base: string, ext: string) {
     if (!str.trim()) {
-      setNotice("Niente da salvare");
+      setNotice(t("Niente da salvare"));
       return;
     }
     const path = await save({
@@ -960,9 +966,9 @@
     if (!path) return;
     try {
       await writeTextFile(path, str);
-      setNotice("Salvato ✓");
+      setNotice(t("Salvato ✓"));
     } catch (e) {
-      error = "Errore salvataggio: " + e;
+      error = t("Errore salvataggio: {err}", { err: String(e) });
     }
   }
   /** Send content to the appunto picker; `code` wraps it in a fenced block, `raw`
@@ -973,7 +979,7 @@
     e: MouseEvent,
   ) {
     if (!content.trim()) {
-      setNotice("Niente da mandare agli Appunti");
+      setNotice(t("Niente da mandare agli Appunti"));
       return;
     }
     onSendToNote?.(content, extractPage, { x: e.clientX, y: e.clientY }, opts);
@@ -984,25 +990,29 @@
     copyFormatted(textOut());
   }
   function textSave() {
-    saveFormatted(textOut(), "testo", textExt());
+    saveFormatted(textOut(), "testo" /* i18n-exempt: nome del file proposto, dato su disco */, textExt());
   }
+  /** Le `label` qui sotto NON si traducono: notecite.ts le incastona nella riga di
+   *  attribuzione dentro l'appunto .md dell'utente, quindi cambiare lingua renderebbe
+   *  incoerente per sempre un quaderno raccolto meta' in italiano e meta' in inglese.
+   *  `code` e' il linguaggio del blocco recintato: valore, non testo. */
   function textToNote(e: MouseEvent) {
     textModal = false;
-    if (textFormat === "latex") sendFormatted(textOut("latex"), { code: "latex", label: "Testo (LaTeX) da" }, e);
-    else if (textFormat === "md") sendFormatted(textOut("md"), { raw: true, label: "Testo da" }, e);
-    else sendFormatted(textOut("txt"), { label: "Testo da" }, e);
+    if (textFormat === "latex") sendFormatted(textOut("latex"), { code: "latex", label: "Testo (LaTeX) da" /* i18n-exempt: attribuzione scritta nell'appunto */ }, e);
+    else if (textFormat === "md") sendFormatted(textOut("md"), { raw: true, label: "Testo da" /* i18n-exempt: attribuzione scritta nell'appunto */ }, e);
+    else sendFormatted(textOut("txt"), { label: "Testo da" /* i18n-exempt: attribuzione scritta nell'appunto */ }, e);
   }
   function tableCopy() {
     copyFormatted(tableOut());
   }
   function tableSave() {
-    saveFormatted(tableOut(), "tabella", tableExt());
+    saveFormatted(tableOut(), "tabella" /* i18n-exempt: nome del file proposto, dato su disco */, tableExt());
   }
   function tableToNote(e: MouseEvent) {
     tableModal = false;
-    if (tableFormat === "latex") sendFormatted(tableToLatex(tableGrid), { code: "latex", label: "Tabella (LaTeX) da" }, e);
-    else if (tableFormat === "csv") sendFormatted(tableToCsv(tableGrid), { code: "csv", label: "Tabella (CSV) da" }, e);
-    else sendFormatted(tableToMarkdown(tableGrid), { raw: true, label: "Tabella da" }, e);
+    if (tableFormat === "latex") sendFormatted(tableToLatex(tableGrid), { code: "latex", label: "Tabella (LaTeX) da" /* i18n-exempt: attribuzione scritta nell'appunto */ }, e);
+    else if (tableFormat === "csv") sendFormatted(tableToCsv(tableGrid), { code: "csv", label: "Tabella (CSV) da" /* i18n-exempt: attribuzione scritta nell'appunto */ }, e);
+    else sendFormatted(tableToMarkdown(tableGrid), { raw: true, label: "Tabella da" /* i18n-exempt: attribuzione scritta nell'appunto */ }, e);
   }
   // ----- Wrap / unwrap the whole formula in \mathrm{…} (renders it all upright) -----
   const MATHRM_PRE = "\\mathrm{";
@@ -1041,44 +1051,46 @@
     copyFormatted(formulaOut());
   }
   function formulaSave() {
-    saveFormatted(formulaOut(), "formula", formulaFormat === "md" ? "md" : "tex");
+    saveFormatted(formulaOut(), "formula" /* i18n-exempt: nome del file proposto, dato su disco */, formulaFormat === "md" ? "md" : "tex");
   }
   function formulaToNoteFmt(e: MouseEvent) {
     formulaModal = false;
-    if (formulaFormat === "md") sendFormatted(formulaOut("md"), { raw: true, label: "Formula da" }, e);
-    else sendFormatted(formulaLatex, { code: "latex", label: "Formula (LaTeX) da" }, e);
+    if (formulaFormat === "md") sendFormatted(formulaOut("md"), { raw: true, label: "Formula da" /* i18n-exempt: attribuzione scritta nell'appunto */ }, e);
+    else sendFormatted(formulaLatex, { code: "latex", label: "Formula (LaTeX) da" /* i18n-exempt: attribuzione scritta nell'appunto */ }, e);
   }
   // ----- Figure (PNG) export -----
   async function saveFigurePng() {
     if (!figureImg) return;
     const path = await save({
-      defaultPath: `figura${figurePage != null ? "-p" + figurePage : ""}.png`,
+      defaultPath: `figura${figurePage != null ? "-p" + figurePage : ""}.png` /* i18n-exempt: nome del file proposto, dato su disco */,
       filters: [{ name: "PNG", extensions: ["png"] }],
     });
     if (!path) return;
     try {
       await writeBinaryFile(path, figureImg);
-      setNotice("Figura salvata ✓");
+      setNotice(t("Figura salvata ✓"));
     } catch (e) {
-      figureError = "Errore salvataggio PNG: " + e;
+      figureError = t("Errore salvataggio PNG: {err}", { err: String(e) });
     }
   }
   function figureToNote(e: MouseEvent) {
     if (!figureImg) return;
     figureModal = false;
-    const cap = `Figura${figurePage != null ? ` — p. ${figurePage}` : ""}`;
+    // La didascalia finisce nel Markdown dell'appunto, accanto all'attribuzione:
+    // resta nella stessa lingua di quella, altrimenti il blocco esce bilingue.
+    const cap = `Figura${figurePage != null ? ` — p. ${figurePage}` : ""}`; /* i18n-exempt: testo scritto nell'appunto */
     const md = `![${cap}](${figureImg})`;
-    onSendToNote?.(md, figurePage, { x: e.clientX, y: e.clientY }, { raw: true, label: "Figura da" });
+    onSendToNote?.(md, figurePage, { x: e.clientX, y: e.clientY }, { raw: true, label: "Figura da" /* i18n-exempt: attribuzione scritta nell'appunto */ });
   }
   /** Copy an arbitrary snippet (the current PDF text selection) to the clipboard. */
   async function copySelection(text: string) {
-    const t = text.trim();
-    if (!t) return;
+    const sel = text.trim();
+    if (!sel) return;
     try {
-      await navigator.clipboard.writeText(t);
-      setNotice("Testo copiato ✓");
+      await navigator.clipboard.writeText(sel);
+      setNotice(t("Testo copiato ✓"));
     } catch {
-      setNotice("Impossibile copiare");
+      setNotice(t("Impossibile copiare"));
     }
   }
   /** The live PDF text selection, if any — read at right-click time for the radial.
@@ -1092,15 +1104,15 @@
   }
   async function doExportTable(fmt: "csv" | "md" | "xlsx") {
     const path = await save({
-      defaultPath: `tabella.${fmt}`,
+      defaultPath: `tabella.${fmt}` /* i18n-exempt: nome del file proposto, dato su disco */,
       filters: [{ name: fmt.toUpperCase(), extensions: [fmt] }],
     });
     if (!path) return;
     try {
       await exportTable(tableGrid, fmt, path);
-      setNotice("Tabella esportata ✓");
+      setNotice(t("Tabella esportata ✓"));
     } catch (e) {
-      error = "Errore export tabella: " + e;
+      error = t("Errore export tabella: {err}", { err: String(e) });
     }
   }
   async function doCleanTable() {
@@ -1110,10 +1122,10 @@
       const cleaned = await aiCleanTable(tableGrid);
       if (tableReq !== req) return; // a newer extraction superseded this clean
       tableGrid = cleaned;
-      setNotice("Tabella rifinita con AI");
+      setNotice(t("Tabella rifinita con AI"));
     } catch (e) {
       if (tableReq !== req) return;
-      setNotice("AI non disponibile: " + e);
+      setNotice(t("AI non disponibile: {err}", { err: String(e) }));
     } finally {
       aiCleaning = false;
     }
@@ -1121,14 +1133,14 @@
   // ----- LaTeX from a selection / extracted table / extracted text -----
   async function copyLatex(latex: string) {
     if (!latex.trim()) {
-      setNotice("Niente da convertire in LaTeX");
+      setNotice(t("Niente da convertire in LaTeX"));
       return;
     }
     try {
       await navigator.clipboard.writeText(latex);
-      setNotice("LaTeX copiato ✓");
+      setNotice(t("LaTeX copiato ✓"));
     } catch {
-      setNotice("Impossibile copiare");
+      setNotice(t("Impossibile copiare"));
     }
   }
   /** Recognize the currently-cropped formula image (in the modal) as LaTeX.
@@ -1194,13 +1206,13 @@
     try {
       let out: string;
       if (engine === "ollama") {
-        if (!visionModel) throw "Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).";
+        if (!visionModel) throw t("Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).");
         out = await formulaToLatexAi(formulaImg, visionModel, multi);
       } else {
         const st = await mathocrStatus();
         if (formulaReq !== req) return; // superseded while awaiting
         if (!st.ready) {
-          setNotice(`Primo uso: scarico il modello formula (~${st.downloadMb} MB), attendi…`);
+          setNotice(t("Primo uso: scarico il modello formula (~{mb} MB), attendi…", { mb: st.downloadMb }));
         }
         out = await formulaToLatex(formulaImg, multi);
       }
@@ -1211,7 +1223,7 @@
     } catch (err) {
       if (formulaReq !== req) return;
       formulaError = String(err);
-      setNotice("Errore riconoscimento formula: " + err);
+      setNotice(t("Errore riconoscimento formula: {err}", { err: String(err) }));
     } finally {
       if (formulaReq === req) formulaLoading = false;
     }
@@ -1238,24 +1250,24 @@
     try {
       let grid: string[][];
       if (engine === "ollama") {
-        if (!tableImg) throw "Immagine della tabella non disponibile";
-        if (!visionModel) throw "Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).";
+        if (!tableImg) throw t("Immagine della tabella non disponibile");
+        if (!visionModel) throw t("Nessun modello di visione disponibile — abilita l'AI e scarica un modello vision (es. qwen2.5vl, minicpm-v).");
         grid = await tableFromImageAi(tableImg, visionModel);
       } else if (engine === "model") {
         // TATR structure model: reads the crop IMAGE for rows/columns/spans, fills
         // the cells with the PDF's own words (byte-exact, no OCR).
-        if (!tableImg || !tableRegion) throw "Immagine o regione della tabella non disponibile";
+        if (!tableImg || !tableRegion) throw t("Immagine o regione della tabella non disponibile");
         // The crop is in the ROTATED view frame while the PDF words live in the
         // rotation-0 frame: mixing them would garble the grid. Known limitation.
-        if (rotation % 360 !== 0) throw "Il motore «Modello» non supporta la pagina ruotata: riporta la rotazione a 0°, oppure usa «Nativa» o «Ollama».";
+        if (rotation % 360 !== 0) throw t("Il motore «Modello» non supporta la pagina ruotata: riporta la rotazione a 0°, oppure usa «Nativa» o «Ollama».");
         const st = await tablestructStatus();
         if (tableReq !== req) return; // superseded while awaiting
         if (!st.ready) {
-          setNotice(`Primo uso: scarico il modello struttura tabelle (~${st.downloadMb} MB), attendi…`);
+          setNotice(t("Primo uso: scarico il modello struttura tabelle (~{mb} MB), attendi…", { mb: st.downloadMb }));
         }
         grid = await extractTableModel(tableImg, id, tablePage, tableRegion);
       } else {
-        if (!tableRegion) throw "Regione non disponibile";
+        if (!tableRegion) throw t("Regione non disponibile");
         grid = await extractTable(id, tablePage, tableRegion);
       }
       if (tableReq !== req) return;
@@ -1343,7 +1355,7 @@
       annos = await listAnnotations(id);
       for (const page of p.byPage.keys()) drawHighlights(page);
     } catch (e) {
-      error = "Errore salvataggio: " + e;
+      error = t("Errore salvataggio: {err}", { err: String(e) });
     } finally {
       clearSelection();
     }
@@ -1368,7 +1380,7 @@
       const a = annos.find((x) => x.id === pid);
       if (a) drawHighlights(a.page);
     } catch (e) {
-      error = "Errore nota: " + e;
+      error = t("Errore nota: {err}", { err: String(e) });
     } finally {
       popover = null;
     }
@@ -1383,7 +1395,7 @@
       annos = await listAnnotations(id);
       if (a) drawHighlights(a.page);
     } catch (e) {
-      error = "Errore eliminazione: " + e;
+      error = t("Errore eliminazione: {err}", { err: String(e) });
     } finally {
       popover = null;
     }
@@ -1401,7 +1413,7 @@
       await setDocumentNotes(id, docNotes);
       notesSaved = true;
     } catch (e) {
-      setNotice("Nota del documento non salvata: " + e);
+      setNotice(t("Nota del documento non salvata: {err}", { err: String(e) }));
     }
   }
 
@@ -1415,6 +1427,10 @@
     ),
   );
 
+  /** i18n-exempt: serve SOLO a buildAnnoMarkdown, che scrive il file .md dell'utente
+   *  (`_(sottolineato)_`). E' testo su disco, non interfaccia: tradurlo produrrebbe
+   *  esportazioni bilingui a chiazze. Se un giorno l'etichetta servisse anche a
+   *  schermo, va sdoppiata (una versione tradotta per l'interfaccia). */
   function kindLabel(k: AnnotationKind): string {
     return k === "underline"
       ? "Sottolineato"
@@ -1446,7 +1462,7 @@
       annos = await listAnnotations(id);
       drawHighlights(a.page);
     } catch (e) {
-      setNotice("Nota non salvata: " + e);
+      setNotice(t("Nota non salvata: {err}", { err: String(e) }));
     } finally {
       editingAnno = null;
     }
@@ -1457,11 +1473,16 @@
       annos = await listAnnotations(id);
       drawHighlights(a.page);
     } catch (e) {
-      setNotice("Eliminazione non riuscita: " + e);
+      setNotice(t("Eliminazione non riuscita: {err}", { err: String(e) }));
     }
   }
 
-  /** Render the document's annotations (+ notes) as a Markdown document, page-ordered. */
+  /** Render the document's annotations (+ notes) as a Markdown document, page-ordered.
+   *
+   *  i18n-exempt (tutto il corpo): e' il CONTENUTO di un file .md che finisce sul disco
+   *  dell'utente — intestazioni, marcatore di pagina, virgolette caporali, tipo
+   *  dell'annotazione. Tradurlo spaccherebbe in due lingue l'archivio di chi esporta
+   *  oggi e riesporta domani, e nessuna funzione «si romperebbe» segnalandolo. */
   function buildAnnoMarkdown(): string {
     const lines: string[] = [`# ${title} — evidenziazioni\n`];
     if (docNotes.trim()) lines.push(`## Nota del documento\n\n${docNotes.trim()}\n`);
@@ -1479,22 +1500,22 @@
   async function copyAnnoMarkdown() {
     try {
       await navigator.clipboard.writeText(buildAnnoMarkdown());
-      setNotice("Annotazioni copiate in Markdown ✓");
+      setNotice(t("Annotazioni copiate in Markdown ✓"));
     } catch {
-      setNotice("Impossibile copiare");
+      setNotice(t("Impossibile copiare"));
     }
   }
   async function exportAnnoMarkdown() {
     const path = await save({
-      defaultPath: `${title.replace(/[^\w.-]+/g, "_").slice(0, 80) || "annotazioni"}.md`,
+      defaultPath: `${title.replace(/[^\w.-]+/g, "_").slice(0, 80) || "annotazioni"}.md` /* i18n-exempt: nome del file proposto, dato su disco */,
       filters: [{ name: "Markdown", extensions: ["md"] }],
     });
     if (!path) return;
     try {
       await writeTextFile(path, buildAnnoMarkdown());
-      setNotice("Annotazioni esportate ✓");
+      setNotice(t("Annotazioni esportate ✓"));
     } catch (e) {
-      setNotice("Errore export: " + e);
+      setNotice(t("Errore export: {err}", { err: String(e) }));
     }
   }
 
@@ -1562,7 +1583,7 @@
       formulaMode = false;
       figureMode = false;
       clearSelection();
-      setNotice("Modalità nota: clicca un punto della pagina per aggiungere un appunto");
+      setNotice(t("Modalità nota: clicca un punto della pagina per aggiungere un appunto"));
     }
   }
 
@@ -1600,7 +1621,7 @@
       // Open the popover right away to type the note.
       popover = { id: newId, quote: "", note: "", x: cx, y: cy };
     } catch (err) {
-      error = "Errore nota: " + err;
+      error = t("Errore nota: {err}", { err: String(err) });
     }
   }
 
@@ -1614,7 +1635,7 @@
     try {
       await revealDocument(id);
     } catch {
-      setNotice("Questo documento non ha un file da mostrare");
+      setNotice(t("Questo documento non ha un file da mostrare"));
     }
   }
 
@@ -1624,7 +1645,7 @@
     try {
       await printDocument(id);
     } catch (e) {
-      error = "Stampa non riuscita: " + e;
+      error = t("Stampa non riuscita: {err}", { err: String(e) });
     } finally {
       printing = false;
     }
@@ -1830,11 +1851,13 @@
   let lensActiveReq: string | null = null;
   let unlistenExplain: (() => void) | undefined;
 
-  const LENS_LABEL: Record<LensTask, string> = {
-    explain: "Spiega",
-    translate: "Traduci",
-    ask: "Chiedi",
-  };
+  // i18n-exempt: le chiavi (`explain`/`translate`/`ask`) sono il compito mandato al
+  // backend, non testo. Derivato, non costante: la lingua cambia a caldo.
+  const LENS_LABEL: Record<LensTask, string> = $derived({
+    explain: t("Spiega"),
+    translate: t("Traduci"),
+    ask: t("Chiedi"),
+  });
 
   function lensSnippet(q: string): string {
     const t = q.replace(/\s+/g, " ").trim();
@@ -1919,9 +1942,9 @@
     if (!lens?.answer) return;
     try {
       await navigator.clipboard.writeText(lens.answer);
-      setNotice("Risposta copiata ✓");
+      setNotice(t("Risposta copiata ✓"));
     } catch {
-      setNotice("Impossibile copiare");
+      setNotice(t("Impossibile copiare"));
     }
   }
 
@@ -1934,7 +1957,7 @@
       ? docNotes + "\n\n> " + quoteSnippet + "\n" + answer
       : "> " + quoteSnippet + "\n" + answer;
     onNotesInput(); // marks unsaved + debounced flushNotes, exactly like typing
-    setNotice("Aggiunto alla Nota del documento");
+    setNotice(t("Aggiunto alla Nota del documento"));
   }
 
   // ----- "⋯ Altro": overflow menu for the regrouped toolbar -----
@@ -2010,58 +2033,60 @@
     const items: RadialItem[] = [];
     if (sel) {
       const preview = sel.length > 40 ? sel.slice(0, 40) + "…" : sel;
-      items.push({ id: "copysel", label: "Copia", hint: `Copia il testo selezionato: “${preview}”`, action: () => copySelection(sel) });
+      items.push({ id: "copysel", label: t("Copia"), hint: t("Copia il testo selezionato: “{testo}”", { testo: preview }), action: () => copySelection(sel) });
       if (onSendToNote) {
         const selText = sel;
         const page = pending ? [...pending.byPage.keys()][0] ?? null : null;
         const at = { x: radialAt.x, y: radialAt.y };
         items.push({
           id: "tonote",
-          label: "Manda agli Appunti",
-          hint: "Manda la selezione a un appunto, con citazione al paper",
+          label: t("Manda agli Appunti"),
+          hint: t("Manda la selezione a un appunto, con citazione al paper"),
           action: () => onSendToNote?.(selText, page, at),
         });
       }
       items.push({
         id: "sellatex",
-        label: "Copia come LaTeX",
-        hint: "Copia la selezione come LaTeX (escape dei caratteri speciali)",
+        label: t("Copia come LaTeX"),
+        hint: t("Copia la selezione come LaTeX (escape dei caratteri speciali)"),
         action: () => copyLatex(escapeLatex(sel)),
       });
     }
+    // i18n-exempt: gli `id` sono identita' stabili delle voci (memoria del radiale e
+    // dei recenti della palette), non etichette: restano com'erano in ogni lingua.
     items.push(
-      { id: "fitw", label: "Adatta larghezza", hint: "Larghezza pagina = finestra (W)", action: fitWidth },
-      { id: "fith", label: "Adatta pagina", hint: "Pagina intera nella finestra (H)", action: fitPage },
-      { id: "spread", label: "Due pagine", checked: spread, hint: "Vista a due pagine (2)", action: toggleSpread },
-      { id: "night", label: "Notte", checked: night, hint: "Inverti i colori (I)", action: () => (night = !night) },
-      { id: "find", label: "Cerca", hint: "Cerca nel documento (Ctrl+F)", action: () => { openFind(); } },
-      { id: "toc", label: "Indice", disabled: !outline.length, checked: showToc, hint: "Indice del documento", action: () => (showToc = !showToc) },
-      { id: "annos", label: "Annotazioni", checked: panel === "annos", hint: "Pannello delle annotazioni (A)", action: () => (panel = panel === "annos" ? "none" : "annos") },
-      { id: "notes", label: "Nota del documento", checked: panel === "notes", hint: "Nota libera su questo documento (E)", action: () => (panel = panel === "notes" ? "none" : "notes") },
+      { id: "fitw", label: t("Adatta larghezza"), hint: t("Larghezza pagina = finestra (W)"), action: fitWidth },
+      { id: "fith", label: t("Adatta pagina"), hint: t("Pagina intera nella finestra (H)"), action: fitPage },
+      { id: "spread", label: t("Due pagine"), checked: spread, hint: t("Vista a due pagine (2)"), action: toggleSpread },
+      { id: "night", label: t("Notte"), checked: night, hint: t("Inverti i colori (I)"), action: () => (night = !night) },
+      { id: "find", label: t("Cerca"), hint: t("Cerca nel documento (Ctrl+F)"), action: () => { openFind(); } },
+      { id: "toc", label: t("Indice"), disabled: !outline.length, checked: showToc, hint: t("Indice del documento"), action: () => (showToc = !showToc) },
+      { id: "annos", label: t("Annotazioni"), checked: panel === "annos", hint: t("Pannello delle annotazioni (A)"), action: () => (panel = panel === "annos" ? "none" : "annos") },
+      { id: "notes", label: t("Nota del documento"), checked: panel === "notes", hint: t("Nota libera su questo documento (E)"), action: () => (panel = panel === "notes" ? "none" : "notes") },
       {
         id: "tools",
-        label: "Strumenti",
-        hint: "Nota puntuale, estrazione, rotazione…",
+        label: t("Strumenti"),
+        hint: t("Nota puntuale, estrazione, rotazione…"),
         children: [
-          { id: "note", label: "Nota puntuale", checked: noteMode, action: toggleNote },
-          { id: "table", label: "Estrai tabella", checked: tableMode, action: toggleTable },
-          { id: "text", label: "Estrai testo", checked: textMode, action: toggleText },
-          { id: "formula", label: "Formula → LaTeX", checked: formulaMode, action: toggleFormula },
-          { id: "figure", label: "Estrai figura", checked: figureMode, action: toggleFigure },
-          { id: "rotl", label: "Ruota sx", action: () => rotate(-90) },
-          { id: "rotr", label: "Ruota dx", action: () => rotate(90) },
-          { id: "reveal", label: "Posizione", action: doReveal },
-          { id: "print", label: "Stampa", action: doPrint },
+          { id: "note", label: t("Nota puntuale"), checked: noteMode, action: toggleNote },
+          { id: "table", label: t("Estrai tabella"), checked: tableMode, action: toggleTable },
+          { id: "text", label: t("Estrai testo"), checked: textMode, action: toggleText },
+          { id: "formula", label: t("Formula → LaTeX"), checked: formulaMode, action: toggleFormula },
+          { id: "figure", label: t("Estrai figura"), checked: figureMode, action: toggleFigure },
+          { id: "rotl", label: t("Ruota sx"), action: () => rotate(-90) },
+          { id: "rotr", label: t("Ruota dx"), action: () => rotate(90) },
+          { id: "reveal", label: t("Posizione"), action: doReveal },
+          { id: "print", label: t("Stampa"), action: doPrint },
         ],
       },
-      { id: "close", label: "Chiudi lettore", danger: true, hint: "Torna alla libreria (Esc)", action: onClose },
+      { id: "close", label: t("Chiudi lettore"), danger: true, hint: t("Torna alla libreria (Esc)"), action: onClose },
     );
     if (onOpenNotes) {
       // Jump to the standalone Appunti (.md) surface, leaving the reader.
       items.splice(items.length - 1, 0, {
         id: "gotonotes",
-        label: "Vai agli Appunti",
-        hint: "Chiudi il lettore e apri gli Appunti (.md)",
+        label: t("Vai agli Appunti"),
+        hint: t("Chiudi il lettore e apri gli Appunti (.md)"),
         action: () => onOpenNotes?.(),
       });
     }
@@ -2226,53 +2251,54 @@
 <div class="overlay" bind:this={overlayEl}>
   <div class="bar" class:hidden={chromeHidden}>
     <span class="title" title={title}>{title}</span>
-    <span class="acount">{annos.length} evidenziazioni</span>
+    <span class="acount">{tp(annos.length, "1 evidenziazione", "{n} evidenziazioni")}</span>
     <div class="ctrl">
-      <button onclick={() => zoom(-0.2)} title="Riduci (−)">−</button>
+      <button onclick={() => zoom(-0.2)} title={t("Riduci (−)")}>−</button>
       <span class="pct">{Math.round(scale * 100)}%</span>
-      <button onclick={() => zoom(0.2)} title="Ingrandisci (+, oppure Ctrl + rotella)">+</button>
+      <button onclick={() => zoom(0.2)} title={t("Ingrandisci (+, oppure Ctrl + rotella)")}>+</button>
       <span class="tsep"></span>
-      <button onclick={fitWidth} title="Adatta alla larghezza (W)">↔</button>
-      <button onclick={fitPage} title="Adatta alla pagina (H)">⤢</button>
+      <button onclick={fitWidth} title={t("Adatta alla larghezza (W)")}>↔</button>
+      <button onclick={fitPage} title={t("Adatta alla pagina (H)")}>⤢</button>
       <span class="tsep"></span>
-      <button class:active={findOpen} onclick={openFind} title="Cerca nel documento (Ctrl+F)">Cerca</button>
+      <button class:active={findOpen} onclick={openFind} title={t("Cerca nel documento (Ctrl+F)")}>{t("Cerca")}</button>
       {#if outline.length}
-        <button class:active={showToc} onclick={() => (showToc = !showToc)} title="Mostra/nascondi l'indice del documento">Indice</button>
+        <button class:active={showToc} onclick={() => (showToc = !showToc)} title={t("Mostra/nascondi l'indice del documento")}>{t("Indice")}</button>
       {/if}
-      <button class:active={panel === "annos"} onclick={() => (panel = panel === "annos" ? "none" : "annos")} title="Indice delle annotazioni di questo documento (A)">Annotazioni</button>
-      <button class:active={panel === "notes"} onclick={() => (panel = panel === "notes" ? "none" : "notes")} title="Nota del documento: un appunto libero su questo paper (E)">Nota del doc.{#if !notesSaved}<span class="dot" aria-label="non salvate">•</span>{/if}</button>
+      <button class:active={panel === "annos"} onclick={() => (panel = panel === "annos" ? "none" : "annos")} title={t("Indice delle annotazioni di questo documento (A)")}>{t("Annotazioni")}</button>
+      <button class:active={panel === "notes"} onclick={() => (panel = panel === "notes" ? "none" : "notes")} title={t("Nota del documento: un appunto libero su questo paper (E)")}>{t("Nota del doc.")}{#if !notesSaved}<span class="dot" aria-label={t("non salvate")}>•</span>{/if}</button>
       <span class="tsep"></span>
-      <button class:active={!!moreOpen} onclick={toggleMore} title="Altri strumenti: rotazione, estrazione, stampa, condivisione…">⋯ Altro</button>
+      <button class:active={!!moreOpen} onclick={toggleMore} title={t("Altri strumenti: rotazione, estrazione, stampa, condivisione…")}>{t("⋯ Altro")}</button>
       <span class="tsep"></span>
-      <button class="close" onclick={onClose} title="Chiudi il lettore (Esc)">Chiudi</button>
+      <button class="close" onclick={onClose} title={t("Chiudi il lettore (Esc)")}>{t("Chiudi")}</button>
     </div>
   </div>
 
   {#if moreOpen}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-    <div class="morepop" style="left:{moreOpen.x}px; top:{moreOpen.y}px" role="menu" tabindex="-1" aria-label="Altri strumenti" onclick={(e) => e.stopPropagation()}>
-      <button class="mitem" onclick={() => moreDo(() => rotate(-90))} title="Ruota a sinistra 90° ([)"><span class="mck"></span>⟲ Ruota sinistra</button>
-      <button class="mitem" onclick={() => moreDo(() => rotate(90))} title="Ruota a destra 90° (])"><span class="mck"></span>⟳ Ruota destra</button>
+    <div class="morepop" style="left:{moreOpen.x}px; top:{moreOpen.y}px" role="menu" tabindex="-1" aria-label={t("Altri strumenti")} onclick={(e) => e.stopPropagation()}>
+      <button class="mitem" onclick={() => moreDo(() => rotate(-90))} title={t("Ruota a sinistra 90° ([)")}><span class="mck"></span>{t("⟲ Ruota sinistra")}</button>
+      <button class="mitem" onclick={() => moreDo(() => rotate(90))} title={t("Ruota a destra 90° (])")}><span class="mck"></span>{t("⟳ Ruota destra")}</button>
       <div class="msep"></div>
-      <button class="mitem" onclick={() => moreDo(toggleSpread)} title="Vista a due pagine (2)"><span class="mck">{spread ? "✓" : ""}</span>▥ Due pagine</button>
-      <button class="mitem" onclick={() => moreDo(toggleNote)} title="Aggiungi una nota a un punto della pagina (N)"><span class="mck">{noteMode ? "✓" : ""}</span>Nota puntuale</button>
-      <button class="mitem" onclick={() => moreDo(() => (night = !night))} title="Modalità notte: inverti i colori (I)"><span class="mck">{night ? "✓" : ""}</span>Notte</button>
-      <button class="mitem" onclick={() => moreDo(toggleTable)} title="Estrai una tabella: trascina un rettangolo attorno alla tabella (scorciatoia: T)"><span class="mck">{tableMode ? "✓" : ""}</span>Estrai tabella <span class="mkey">T</span></button>
-      <button class="mitem" onclick={() => moreDo(toggleText)} title="Estrai testo: trascina un rettangolo attorno al testo (scorciatoia: X)"><span class="mck">{textMode ? "✓" : ""}</span>Estrai testo <span class="mkey">X</span></button>
-      <button class="mitem" onclick={() => moreDo(toggleFormula)} title="Riconosci una formula come LaTeX: trascina un rettangolo attorno all'equazione (scorciatoia: F)"><span class="mck">{formulaMode ? "✓" : ""}</span>Formula → LaTeX <span class="mkey">F</span></button>
-      <button class="mitem" onclick={() => moreDo(toggleFigure)} title="Ritaglia una figura come immagine PNG: trascina un rettangolo attorno alla figura (scorciatoia: G)"><span class="mck">{figureMode ? "✓" : ""}</span>Estrai figura <span class="mkey">G</span></button>
+      <button class="mitem" onclick={() => moreDo(toggleSpread)} title={t("Vista a due pagine (2)")}><span class="mck">{spread ? "✓" : ""}</span>{t("▥ Due pagine")}</button>
+      <button class="mitem" onclick={() => moreDo(toggleNote)} title={t("Aggiungi una nota a un punto della pagina (N)")}><span class="mck">{noteMode ? "✓" : ""}</span>{t("Nota puntuale")}</button>
+      <button class="mitem" onclick={() => moreDo(() => (night = !night))} title={t("Modalità notte: inverti i colori (I)")}><span class="mck">{night ? "✓" : ""}</span>{t("Notte")}</button>
+      <!-- Le lettere nei <span class="mkey"> sono le scorciatoie vere e non si rilegano: la descrizione si traduce, il tasto no. -->
+      <button class="mitem" onclick={() => moreDo(toggleTable)} title={t("Estrai una tabella: trascina un rettangolo attorno alla tabella (scorciatoia: T)")}><span class="mck">{tableMode ? "✓" : ""}</span>{t("Estrai tabella")} <span class="mkey">T</span></button>
+      <button class="mitem" onclick={() => moreDo(toggleText)} title={t("Estrai testo: trascina un rettangolo attorno al testo (scorciatoia: X)")}><span class="mck">{textMode ? "✓" : ""}</span>{t("Estrai testo")} <span class="mkey">X</span></button>
+      <button class="mitem" onclick={() => moreDo(toggleFormula)} title={t("Riconosci una formula come LaTeX: trascina un rettangolo attorno all'equazione (scorciatoia: F)")}><span class="mck">{formulaMode ? "✓" : ""}</span>{t("Formula → LaTeX")} <span class="mkey">F</span></button>
+      <button class="mitem" onclick={() => moreDo(toggleFigure)} title={t("Ritaglia una figura come immagine PNG: trascina un rettangolo attorno alla figura (scorciatoia: G)")}><span class="mck">{figureMode ? "✓" : ""}</span>{t("Estrai figura")} <span class="mkey">G</span></button>
       <div class="msep"></div>
-      <button class="mitem" onclick={() => moreDo(doReveal)} title="Apri la posizione del PDF in Esplora risorse"><span class="mck"></span>Posizione</button>
-      <button class="mitem" onclick={() => moreDo(doPrint)} disabled={printing} title="Stampa questo documento"><span class="mck"></span>{printing ? "Stampa…" : "Stampa"}</button>
+      <button class="mitem" onclick={() => moreDo(doReveal)} title={t("Apri la posizione del PDF in Esplora risorse")}><span class="mck"></span>{t("Posizione")}</button>
+      <button class="mitem" onclick={() => moreDo(doPrint)} disabled={printing} title={t("Stampa questo documento")}><span class="mck"></span>{printing ? t("Stampa…") : t("Stampa")}</button>
       <ShareMenu ids={[id]} label={title} {link} variant="menuitem" onstatus={setNotice} onclose={() => (moreOpen = null)} />
       <div class="msep"></div>
-      <button class="mitem" onclick={() => moreDo(() => (showHelp = true))} title="Scorciatoie da tastiera (?)"><span class="mck"></span>? Aiuto</button>
+      <button class="mitem" onclick={() => moreDo(() => (showHelp = true))} title={t("Scorciatoie da tastiera (?)")}><span class="mck"></span>{t("? Aiuto")}</button>
     </div>
   {/if}
 
   {#if findOpen}
     <div class="findbar">
-      <span class="findlbl">Cerca nel documento</span>
+      <span class="findlbl">{t("Cerca nel documento")}</span>
       <input
         bind:this={findInput}
         bind:value={findQuery}
@@ -2281,7 +2307,7 @@
           if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); gotoHit(e.shiftKey ? -1 : 1); }
           else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeFind(); }
         }}
-        placeholder="Cerca nel documento…"
+        placeholder={t("Cerca nel documento…")}
       />
       <span class="fcount">
         {findQuery.length < 2
@@ -2289,12 +2315,14 @@
           : findPending
             ? "…"
             : findHits.length
-              ? `${findActive + 1}/${findHits.length}${findCapped ? "+" : ""}`
-              : "nessun risultato"}
+              ? findCapped
+                ? t("{i}/{tot}+", { i: findActive + 1, tot: findHits.length })
+                : t("{i}/{tot}", { i: findActive + 1, tot: findHits.length })
+              : t("nessun risultato")}
       </span>
-      <button onclick={() => gotoHit(-1)} disabled={!findHits.length} title="Precedente (Maiusc+Invio)">↑</button>
-      <button onclick={() => gotoHit(1)} disabled={!findHits.length} title="Successivo (Invio)">↓</button>
-      <button onclick={closeFind} title="Chiudi (Esc)">✕</button>
+      <button onclick={() => gotoHit(-1)} disabled={!findHits.length} title={t("Precedente (Maiusc+Invio)")}>↑</button>
+      <button onclick={() => gotoHit(1)} disabled={!findHits.length} title={t("Successivo (Invio)")}>↓</button>
+      <button onclick={closeFind} title={t("Chiudi (Esc)")}>✕</button>
     </div>
   {/if}
 
@@ -2323,9 +2351,9 @@
     {#if panel !== "none"}
       <aside class="sidepanel">
         <div class="sptabs">
-          <button class:on={panel === "annos"} onclick={() => (panel = "annos")}>Annotazioni ({annos.length})</button>
-          <button class:on={panel === "notes"} onclick={() => (panel = "notes")}>Nota del documento</button>
-          <button class="spclose" onclick={() => (panel = "none")} title="Chiudi pannello" aria-label="Chiudi">✕</button>
+          <button class:on={panel === "annos"} onclick={() => (panel = "annos")}>{t("Annotazioni ({n})", { n: annos.length })}</button>
+          <button class:on={panel === "notes"} onclick={() => (panel = "notes")}>{t("Nota del documento")}</button>
+          <button class="spclose" onclick={() => (panel = "none")} title={t("Chiudi pannello")} aria-label={t("Chiudi")}>✕</button>
         </div>
 
         {#if panel === "notes"}
@@ -2335,60 +2363,61 @@
               bind:value={docNotes}
               oninput={onNotesInput}
               onblur={flushNotes}
-              placeholder="Nota libera su questo documento… (salvataggio automatico)"
+              placeholder={t("Nota libera su questo documento… (salvataggio automatico)")}
             ></textarea>
-            <div class="notesfoot">{notesSaved ? "Salvato ✓" : "Salvataggio…"}</div>
+            <div class="notesfoot">{notesSaved ? t("Salvato ✓") : t("Salvataggio…")}</div>
           </div>
         {:else}
           <div class="annospane">
             {#if annos.length === 0}
-              <p class="empty">Nessuna annotazione. Seleziona del testo nel PDF per evidenziarlo, o aggiungi una nota a un punto.</p>
+              <p class="empty">{t("Nessuna annotazione. Seleziona del testo nel PDF per evidenziarlo, o aggiungi una nota a un punto.")}</p>
             {:else}
               <div class="annofilters">
-                <select bind:value={annoKindFilter} title="Filtra per tipo">
-                  <option value="all">Tutti i tipi</option>
-                  <option value="highlight">Evidenziazioni</option>
-                  <option value="underline">Sottolineati</option>
-                  <option value="strikethrough">Barrati</option>
-                  <option value="note">Note</option>
+                <!-- i18n-exempt: i `value` delle opzioni sono i tipi di annotazione (colonna del DB), non etichette. -->
+                <select bind:value={annoKindFilter} title={t("Filtra per tipo")}>
+                  <option value="all">{t("Tutti i tipi")}</option>
+                  <option value="highlight">{t("Evidenziazioni")}</option>
+                  <option value="underline">{t("Sottolineati")}</option>
+                  <option value="strikethrough">{t("Barrati")}</option>
+                  <option value="note">{t("Note")}</option>
                 </select>
                 {#if annoColors.length > 1}
-                  <button class="cdot all" class:on={annoColorFilter === "all"} onclick={() => (annoColorFilter = "all")} title="Tutti i colori" aria-label="Tutti i colori">∗</button>
+                  <button class="cdot all" class:on={annoColorFilter === "all"} onclick={() => (annoColorFilter = "all")} title={t("Tutti i colori")} aria-label={t("Tutti i colori")}>∗</button>
                   {#each annoColors as c (c)}
-                    <button class="cdot" class:on={annoColorFilter === c} onclick={() => (annoColorFilter = c)} style="background:{c}" title="Filtra per colore" aria-label="Filtra colore"></button>
+                    <button class="cdot" class:on={annoColorFilter === c} onclick={() => (annoColorFilter = c)} style="background:{c}" title={t("Filtra per colore")} aria-label={t("Filtra colore")}></button>
                   {/each}
                 {/if}
               </div>
               <div class="annolist">
                 {#each annoList as a (a.id)}
                   <div class="annoitem">
-                    <button class="annojump" onclick={() => jumpToAnno(a)} title="Vai a pagina {a.page}">
+                    <button class="annojump" onclick={() => jumpToAnno(a)} title={t("Vai a pagina {pagina}", { pagina: a.page })}>
                       <span class="adot" style="background:{safeColor(a.color)}"></span>
-                      <span class="apage">p.{a.page}</span>
-                      <span class="aquote">{a.quote ?? (a.kind === "note" ? "(nota)" : "(selezione)")}</span>
+                      <span class="apage">{t("p.{pagina}", { pagina: a.page })}</span>
+                      <span class="aquote">{a.quote ?? (a.kind === "note" ? t("(nota)") : t("(selezione)"))}</span>
                     </button>
                     {#if editingAnno === a.id}
                       <div class="annoedit">
-                        <textarea bind:value={editingNote} rows="2" placeholder="Nota…"></textarea>
+                        <textarea bind:value={editingNote} rows="2" placeholder={t("Nota…")}></textarea>
                         <div class="aerow">
-                          <button onclick={() => (editingAnno = null)}>Annulla</button>
-                          <button class="save" onclick={() => saveEditAnno(a)}>Salva</button>
+                          <button onclick={() => (editingAnno = null)}>{t("Annulla")}</button>
+                          <button class="save" onclick={() => saveEditAnno(a)}>{t("Salva")}</button>
                         </div>
                       </div>
                     {:else}
                       {#if a.note}<button class="anote" onclick={() => startEditAnno(a)}>{a.note}</button>{/if}
                       <div class="aactions">
-                        <button onclick={() => startEditAnno(a)}>{a.note ? "Modifica nota" : "Aggiungi nota"}</button>
-                        <button class="del" onclick={() => deleteAnno(a)}>Elimina</button>
+                        <button onclick={() => startEditAnno(a)}>{a.note ? t("Modifica nota") : t("Aggiungi nota")}</button>
+                        <button class="del" onclick={() => deleteAnno(a)}>{t("Elimina")}</button>
                       </div>
                     {/if}
                   </div>
                 {/each}
-                {#if annoList.length === 0}<p class="empty">Nessuna annotazione con questi filtri.</p>{/if}
+                {#if annoList.length === 0}<p class="empty">{t("Nessuna annotazione con questi filtri.")}</p>{/if}
               </div>
               <div class="annofoot">
-                <button onclick={copyAnnoMarkdown} title="Copia tutte le annotazioni come Markdown">Copia MD</button>
-                <button onclick={exportAnnoMarkdown} title="Esporta come file Markdown">Esporta MD</button>
+                <button onclick={copyAnnoMarkdown} title={t("Copia tutte le annotazioni come Markdown")}>{t("Copia MD")}</button>
+                <button onclick={exportAnnoMarkdown} title={t("Esporta come file Markdown")}>{t("Esporta MD")}</button>
               </div>
             {/if}
           </div>
@@ -2401,44 +2430,42 @@
   {/if}
 
 
-  {#if loading}<div class="msg">Caricamento…</div>{/if}
+  {#if loading}<div class="msg">{t("Caricamento…")}</div>{/if}
   {#if error}<div class="msg err">{error}</div>{/if}
   {#if missingPath}
     <div class="msg relink">
-      <p class="rtitle">Il PDF non è più dov'era</p>
+      <p class="rtitle">{t("Il PDF non è più dov'era")}</p>
       <p class="rpath">{missingPath}</p>
       <p class="rhint">
-        L'hai spostato o rinominato fuori da Scriptorium. Indicami dov'è ora: appunti, evidenziazioni,
-        tag e nota restano tutti al loro posto.
+        {t("L'hai spostato o rinominato fuori da Scriptorium. Indicami dov'è ora: appunti, evidenziazioni, tag e nota restano tutti al loro posto.")}
       </p>
       <div class="racts">
         <button class="rbtn primary" disabled={relinkBusy} onclick={pickAndRelink}>
-          {relinkBusy ? "…" : "Ritrova il file…"}
+          {relinkBusy ? "…" : t("Ritrova il file…")}
         </button>
-        <button class="rbtn" onclick={onClose}>Chiudi</button>
+        <button class="rbtn" onclick={onClose}>{t("Chiudi")}</button>
       </div>
       {#if relinkMsg}<p class="rmsg">{relinkMsg}</p>{/if}
     </div>
   {/if}
   {#if relinkInfo && relinkInfo.mappable > 0}
     <div class="msg relink low">
-      <p class="rtitle">Altri {relinkInfo.mappable} file sono nella stessa cartella</p>
+      <p class="rtitle">{tp(relinkInfo.mappable, "Un altro file è nella stessa cartella", "Altri {n} file sono nella stessa cartella")}</p>
       <p class="rhint">
-        Hai spostato un'intera cartella: posso ricollegarli tutti allo stesso modo, verificando
-        l'impronta di ciascun file — chi non corrisponde viene lasciato stare.
+        {t("Hai spostato un'intera cartella: posso ricollegarli tutti allo stesso modo, verificando l'impronta di ciascun file — chi non corrisponde viene lasciato stare.")}
       </p>
       <div class="racts">
         <button class="rbtn primary" disabled={relinkBusy} onclick={applyRelinkMapping}>
-          {relinkBusy ? "…" : `Ricollega gli altri ${relinkInfo.mappable}`}
+          {relinkBusy ? "…" : tp(relinkInfo.mappable, "Ricollega anche l'altro", "Ricollega gli altri {n}")}
         </button>
-        <button class="rbtn" onclick={() => (relinkInfo = null)}>No, grazie</button>
+        <button class="rbtn" onclick={() => (relinkInfo = null)}>{t("No, grazie")}</button>
       </div>
       {#if relinkMsg}<p class="rmsg">{relinkMsg}</p>{/if}
     </div>
   {:else if relinkMsg && !missingPath}
     <div class="msg relink low">
       <p class="rmsg">{relinkMsg}</p>
-      <div class="racts"><button class="rbtn" onclick={() => (relinkMsg = "")}>Ho capito</button></div>
+      <div class="racts"><button class="rbtn" onclick={() => (relinkMsg = "")}>{t("Ho capito")}</button></div>
     </div>
   {/if}
   {#if notice}<div class="toast">{notice}</div>{/if}
@@ -2451,7 +2478,7 @@
       onmousedown={(e) => e.preventDefault()}
       role="toolbar"
       tabindex="-1"
-      aria-label="Stile e colore evidenziazione"
+      aria-label={t("Stile e colore evidenziazione")}
     >
       <div class="hlkinds">
         {#each KINDS as k (k.kind)}
@@ -2466,15 +2493,15 @@
       {#if onSendToNote}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="hlnote" onmousedown={(e) => e.preventDefault()}>
-          <button onclick={sendSelToNote} title="Manda la selezione agli Appunti, con citazione a questo paper">→ Appunti</button>
+          <button onclick={sendSelToNote} title={t("Manda la selezione agli Appunti, con citazione a questo paper")}>{t("→ Appunti")}</button>
         </div>
       {/if}
       {#if aiEnabled}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="hlai" onmousedown={(e) => e.preventDefault()}>
-          <button onclick={() => runLens("explain")} disabled={!!lens?.busy} title="Spiega la selezione con l'AI locale">Spiega</button>
-          <button onclick={() => runLens("translate")} disabled={!!lens?.busy} title="Traduci la selezione con l'AI locale">Traduci</button>
-          <button onclick={openLensAsk} disabled={!!lens?.busy} title="Fai una domanda sulla selezione">Chiedi</button>
+          <button onclick={() => runLens("explain")} disabled={!!lens?.busy} title={t("Spiega la selezione con l'AI locale")}>{t("Spiega")}</button>
+          <button onclick={() => runLens("translate")} disabled={!!lens?.busy} title={t("Traduci la selezione con l'AI locale")}>{t("Traduci")}</button>
+          <button onclick={openLensAsk} disabled={!!lens?.busy} title={t("Fai una domanda sulla selezione")}>{t("Chiedi")}</button>
         </div>
       {/if}
     </div>
@@ -2488,13 +2515,13 @@
         : `left:${lensPos.x}px; bottom:${lensPos.bottom}px`}
       role="dialog"
       tabindex="-1"
-      aria-label="Lente AI"
+      aria-label={t("Lente AI")}
     >
       <div class="lenshd">
-        <strong>Lente AI — {LENS_LABEL[lens.task]}</strong>
+        <strong>{t("Lente AI — {compito}", { compito: LENS_LABEL[lens.task] })}</strong>
         {#if lens.busy}<span class="lensdot" aria-hidden="true"></span>{/if}
         <span style="flex:1"></span>
-        <button class="lensx" onclick={closeLens} title="Chiudi (Esc)" aria-label="Chiudi">✕</button>
+        <button class="lensx" onclick={closeLens} title={t("Chiudi (Esc)")} aria-label={t("Chiudi")}>✕</button>
       </div>
       <p class="lensquote">{lensSnippet(lens.quote)}</p>
       {#if lens.asking}
@@ -2502,24 +2529,24 @@
           <input
             bind:this={lensAskInput}
             bind:value={lensQuestion}
-            placeholder="Fai una domanda sul testo selezionato…"
+            placeholder={t("Fai una domanda sul testo selezionato…")}
             onkeydown={(e) => {
               if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); submitLensQuestion(); }
               else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeLens(); }
             }}
           />
-          <button class="lensgo" onclick={submitLensQuestion} disabled={!lensQuestion.trim()}>Invia</button>
+          <button class="lensgo" onclick={submitLensQuestion} disabled={!lensQuestion.trim()}>{t("Invia")}</button>
         </div>
       {:else}
         <div class="lensbody">
-          {#if lens.answer}{lens.answer}{:else if lens.busy}<span class="lensdots" aria-label="In attesa della risposta"><i></i><i></i><i></i></span>{/if}
+          {#if lens.answer}{lens.answer}{:else if lens.busy}<span class="lensdots" aria-label={t("In attesa della risposta")}><i></i><i></i><i></i></span>{/if}
         </div>
       {/if}
       <div class="lensft">
-        <button onclick={copyLensAnswer} disabled={!lens.answer || lens.busy}>Copia</button>
-        <button onclick={lensToNotes} disabled={!lens.answer || lens.busy} title="Aggiungi la risposta alla Nota del documento">→ Nota del doc.</button>
+        <button onclick={copyLensAnswer} disabled={!lens.answer || lens.busy}>{t("Copia")}</button>
+        <button onclick={lensToNotes} disabled={!lens.answer || lens.busy} title={t("Aggiungi la risposta alla Nota del documento")}>{t("→ Nota del doc.")}</button>
         <span style="flex:1"></span>
-        <button onclick={closeLens}>Chiudi</button>
+        <button onclick={closeLens}>{t("Chiudi")}</button>
       </div>
     </div>
   {/if}
@@ -2527,18 +2554,18 @@
   {#if popover}
     <div class="popover" style="left:{popover.x}px; top:{popover.y + 8}px">
       {#if popover.quote}<p class="quote">“{popover.quote}”</p>{/if}
-      <textarea bind:value={popover.note} placeholder="Aggiungi una nota…" rows="3"></textarea>
+      <textarea bind:value={popover.note} placeholder={t("Aggiungi una nota…")} rows="3"></textarea>
       <div class="prow">
         {#if confirmDel}
-          <span class="delask">Eliminare?</span>
-          <button class="del" onclick={removeHighlight}>Sì, elimina</button>
-          <button onclick={() => (confirmDel = false)}>No</button>
+          <span class="delask">{t("Eliminare?")}</span>
+          <button class="del" onclick={removeHighlight}>{t("Sì, elimina")}</button>
+          <button onclick={() => (confirmDel = false)}>{t("No")}</button>
           <span style="flex:1"></span>
         {:else}
-          <button class="del" onclick={() => (confirmDel = true)}>Elimina</button>
+          <button class="del" onclick={() => (confirmDel = true)}>{t("Elimina")}</button>
           <span style="flex:1"></span>
-          <button onclick={() => (popover = null)}>Annulla</button>
-          <button class="save" onclick={saveNote}>Salva</button>
+          <button onclick={() => (popover = null)}>{t("Annulla")}</button>
+          <button class="save" onclick={saveNote}>{t("Salva")}</button>
         {/if}
       </div>
     </div>
@@ -2547,31 +2574,36 @@
   {#if showHelp}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="helpback" onmousedown={(e) => { if (e.target === e.currentTarget) showHelp = false; }} role="presentation">
-      <div class="helpcard" role="dialog" tabindex="-1" aria-label="Scorciatoie da tastiera" onclick={(e) => e.stopPropagation()}>
-        <h3>Scorciatoie da tastiera</h3>
+      <div class="helpcard" role="dialog" tabindex="-1" aria-label={t("Scorciatoie da tastiera")} onclick={(e) => e.stopPropagation()}>
+        <h3>{t("Scorciatoie da tastiera")}</h3>
+        <!-- Le lettere dei <kbd> sono le scorciatoie vere e NON si rilegano cambiando
+             lingua (memoria muscolare): si traduce la descrizione accanto. -->
         <ul class="keys">
-          <li><kbd>Ctrl</kbd>+<kbd>F</kbd> <span>Cerca nel documento</span></li>
-          <li><kbd>+</kbd> / <kbd>−</kbd> <span>Ingrandisci / riduci</span></li>
-          <li><kbd>0</kbd> <span>Zoom 100%</span></li>
-          <li><kbd>W</kbd> <span>Adatta alla larghezza</span></li>
-          <li><kbd>H</kbd> <span>Adatta alla pagina</span></li>
-          <li><kbd>2</kbd> <span>Vista a due pagine</span></li>
-          <li><kbd>N</kbd> <span>Aggiungi una nota</span></li>
-          <li><kbd>I</kbd> <span>Modalità notte</span></li>
-          <li><kbd>[</kbd> / <kbd>]</kbd> <span>Ruota</span></li>
-          <li>Selezione testo <span>Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)</span></li>
-          <li><kbd>T</kbd> / <kbd>X</kbd> / <kbd>F</kbd> / <kbd>G</kbd> <span>Estrai tabella / testo / formula / figura: attiva la selezione, poi trascina un riquadro sulla pagina (premi di nuovo per annullare)</span></li>
-          <li>Formula → LaTeX <span><kbd>F</kbd>, da ⋯ Altro o dal radiale: trascina attorno a un'equazione. Motore «Locale» (math-OCR integrato, il 1º uso scarica ~180 MB) o «Ollama» (modello di visione). «Più righe» = blocco gathered. Il LaTeX riconosciuto è <strong>modificabile</strong> con <strong>anteprima resa</strong> che si aggiorna mentre correggi; il pulsante <strong>\mathrm&#123;&#125;</strong> avvolge (o toglie) tutta la formula in tondo. Esporta come LaTeX o Markdown ($$…$$): Copia, Salva… o → Appunti</span></li>
-          <li>Estrai tabella / testo <span><kbd>T</kbd> / <kbd>X</kbd>. Motore «Nativa» (dal testo del PDF) o «Ollama» (modello di visione — utile per tabelle-immagine e pagine scansionate). Esporta scegliendo il formato: tabella MD/LaTeX/CSV (+ Excel), testo Testo/LaTeX/MD — con Copia, Salva… o → Appunti</span></li>
-          <li>Estrai figura <span><kbd>G</kbd>, da ⋯ Altro o dal radiale: trascina attorno a una figura per ritagliarla come immagine PNG. «Salva PNG…» su file, oppure «→ Appunti» per incorporarla in un appunto</span></li>
-          <li>Finestre di estrazione <span>Trascinabili dalla barra del titolo (per confrontarle con la pagina sotto) e ridimensionabili dall'angolo</span></li>
-          <li>⋯ Altro <span>Rotazione, note, estrazione tabella/testo/formula/figura, stampa, condivisione</span></li>
-          <li>Tasto destro <span>Menu radiale con i comandi di lettura</span></li>
-          <li>Mouse fermo <span>La barra si nasconde; muovi il mouse per mostrarla</span></li>
-          <li><kbd>Esc</kbd> <span>Chiudi / annulla</span></li>
-          <li><kbd>?</kbd> <span>Mostra questo aiuto</span></li>
+          <li><kbd>Ctrl</kbd>+<kbd>F</kbd> <span>{t("Cerca nel documento")}</span></li>
+          <li><kbd>+</kbd> / <kbd>−</kbd> <span>{t("Ingrandisci / riduci")}</span></li>
+          <li><kbd>0</kbd> <span>{t("Zoom 100%")}</span></li>
+          <li><kbd>W</kbd> <span>{t("Adatta alla larghezza")}</span></li>
+          <li><kbd>H</kbd> <span>{t("Adatta alla pagina")}</span></li>
+          <li><kbd>2</kbd> <span>{t("Vista a due pagine")}</span></li>
+          <li><kbd>N</kbd> <span>{t("Aggiungi una nota")}</span></li>
+          <li><kbd>I</kbd> <span>{t("Modalità notte")}</span></li>
+          <li><kbd>[</kbd> / <kbd>]</kbd> <span>{t("Ruota")}</span></li>
+          <li>{t("Selezione testo")} <span>{t("Lente AI: Spiega / Traduci / Chiedi (con AI locale attiva)")}</span></li>
+          <li><kbd>T</kbd> / <kbd>X</kbd> / <kbd>F</kbd> / <kbd>G</kbd> <span>{t("Estrai tabella / testo / formula / figura: attiva la selezione, poi trascina un riquadro sulla pagina (premi di nuovo per annullare)")}</span></li>
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa del dizionario, nessun input dell'utente: il marcato (<kbd>, <strong>) fa parte della frase e spezzarlo darebbe frammenti intraducibili -->
+          <li>{t("Formula → LaTeX")} <span>{@html t("<kbd>F</kbd>, da ⋯ Altro o dal radiale: trascina attorno a un'equazione. Motore «Locale» (math-OCR integrato, il 1º uso scarica ~180 MB) o «Ollama» (modello di visione). «Più righe» = blocco gathered. Il LaTeX riconosciuto è <strong>modificabile</strong> con <strong>anteprima resa</strong> che si aggiorna mentre correggi; il pulsante <strong>\\mathrm{}</strong> avvolge (o toglie) tutta la formula in tondo. Esporta come LaTeX o Markdown ($$…$$): Copia, Salva… o → Appunti")}</span></li>
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa del dizionario, nessun input dell'utente -->
+          <li>{t("Estrai tabella / testo")} <span>{@html t("<kbd>T</kbd> / <kbd>X</kbd>. Motore «Nativa» (dal testo del PDF) o «Ollama» (modello di visione — utile per tabelle-immagine e pagine scansionate). Esporta scegliendo il formato: tabella MD/LaTeX/CSV (+ Excel), testo Testo/LaTeX/MD — con Copia, Salva… o → Appunti")}</span></li>
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa del dizionario, nessun input dell'utente -->
+          <li>{t("Estrai figura")} <span>{@html t("<kbd>G</kbd>, da ⋯ Altro o dal radiale: trascina attorno a una figura per ritagliarla come immagine PNG. «Salva PNG…» su file, oppure «→ Appunti» per incorporarla in un appunto")}</span></li>
+          <li>{t("Finestre di estrazione")} <span>{t("Trascinabili dalla barra del titolo (per confrontarle con la pagina sotto) e ridimensionabili dall'angolo")}</span></li>
+          <li>{t("⋯ Altro")} <span>{t("Rotazione, note, estrazione tabella/testo/formula/figura, stampa, condivisione")}</span></li>
+          <li>{t("Tasto destro")} <span>{t("Menu radiale con i comandi di lettura")}</span></li>
+          <li>{t("Mouse fermo")} <span>{t("La barra si nasconde; muovi il mouse per mostrarla")}</span></li>
+          <li><kbd>Esc</kbd> <span>{t("Chiudi / annulla")}</span></li>
+          <li><kbd>?</kbd> <span>{t("Mostra questo aiuto")}</span></li>
         </ul>
-        <button class="save" onclick={() => (showHelp = false)}>Chiudi</button>
+        <button class="save" onclick={() => (showHelp = false)}>{t("Chiudi")}</button>
       </div>
     </div>
   {/if}
@@ -2580,14 +2612,14 @@
        grouped and starred so the user is nudged to pick a vision-capable model. -->
   {#snippet vmodelSelect(kind: "formula" | "table" | "text")}
     {#if visionModels.length}
-      <select class="vmodel" value={visionModel} onchange={(e) => pickVisionModel(e.currentTarget.value, kind)} title="Modello — ⭐ = adatto alle immagini (VLM)">
+      <select class="vmodel" value={visionModel} onchange={(e) => pickVisionModel(e.currentTarget.value, kind)} title={t("Modello — ⭐ = adatto alle immagini (VLM)")}>
         {#if visionGroups.vision.length}
-          <optgroup label="⭐ Visione (consigliati)">
+          <optgroup label={t("⭐ Visione (consigliati)")}>
             {#each visionGroups.vision as m (m)}<option value={m}>⭐ {m}</option>{/each}
           </optgroup>
         {/if}
         {#if visionGroups.other.length}
-          <optgroup label="Altri (no visione)">
+          <optgroup label={t("Altri (no visione)")}>
             {#each visionGroups.other as m (m)}<option value={m}>{m}</option>{/each}
           </optgroup>
         {/if}
@@ -2601,42 +2633,42 @@
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
       <div class="tablecard" role="dialog" tabindex="-1" use:dragCard onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
-          <strong>Tabella estratta</strong>
-          <div class="viewtoggle" title="Motore di estrazione">
-            <button class:on={tableEngine === "native"} onclick={() => selectTableEngine("native")} title="Euristica veloce sul testo del PDF (tabelle semplici)">Nativa</button>
-            <button class:on={tableEngine === "model"} onclick={() => selectTableEngine("model")} title="Modello struttura tabelle (TATR, locale): righe/colonne/intestazioni riconosciute dall'immagine, testo esatto dal PDF — il migliore per le tabelle dei paper (~111 MB al primo uso)">Modello</button>
-            <button class:on={tableEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectTableEngine("ollama")} title={aiEnabled ? "Estrai con un modello di visione locale (Ollama / LM Studio) — utile su pagine scansionate" : "Abilita l'AI locale nelle Impostazioni per usare Ollama"}>Ollama</button>
+          <strong>{t("Tabella estratta")}</strong>
+          <div class="viewtoggle" title={t("Motore di estrazione")}>
+            <button class:on={tableEngine === "native"} onclick={() => selectTableEngine("native")} title={t("Euristica veloce sul testo del PDF (tabelle semplici)")}>{t("Nativa")}</button>
+            <button class:on={tableEngine === "model"} onclick={() => selectTableEngine("model")} title={t("Modello struttura tabelle (TATR, locale): righe/colonne/intestazioni riconosciute dall'immagine, testo esatto dal PDF — il migliore per le tabelle dei paper (~111 MB al primo uso)")}>{t("Modello")}</button>
+            <button class:on={tableEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectTableEngine("ollama")} title={aiEnabled ? t("Estrai con un modello di visione locale (Ollama / LM Studio) — utile su pagine scansionate") : t("Abilita l'AI locale nelle Impostazioni per usare Ollama")}>Ollama</button>
           </div>
           {#if tableEngine === "ollama"}{@render vmodelSelect("table")}{/if}
           {#if !tableLoading && tableGrid.length}
             <span class="tdim">{tableGrid.length}×{tableGrid[0]?.length ?? 0}</span>
             <div class="viewtoggle">
-              <button class:on={tableView === "grid"} onclick={() => (tableView = "grid")} title="Anteprima come griglia">Griglia</button>
-              <button class:on={tableView === "latex"} onclick={() => (tableView = "latex")} title="Anteprima del formato scelto">Formato</button>
+              <button class:on={tableView === "grid"} onclick={() => (tableView = "grid")} title={t("Anteprima come griglia")}>{t("Griglia")}</button>
+              <button class:on={tableView === "latex"} onclick={() => (tableView = "latex")} title={t("Anteprima del formato scelto")}>{t("Formato")}</button>
             </div>
-            <div class="viewtoggle" title="Formato di esportazione (Copia / Salva / → Appunti)">
-              <button class:on={tableFormat === "md"} onclick={() => (tableFormat = "md")} title="Tabella Markdown">MD</button>
-              <button class:on={tableFormat === "latex"} onclick={() => (tableFormat = "latex")} title="Tabella LaTeX in stile booktabs (nel documento serve il pacchetto booktabs)">LaTeX</button>
+            <div class="viewtoggle" title={t("Formato di esportazione (Copia / Salva / → Appunti)")}>
+              <button class:on={tableFormat === "md"} onclick={() => (tableFormat = "md")} title={t("Tabella Markdown")}>MD</button>
+              <button class:on={tableFormat === "latex"} onclick={() => (tableFormat = "latex")} title={t("Tabella LaTeX in stile booktabs (nel documento serve il pacchetto booktabs)")}>LaTeX</button>
               <button class:on={tableFormat === "csv"} onclick={() => (tableFormat = "csv")} title="CSV">CSV</button>
             </div>
           {/if}
           <span style="flex:1"></span>
           {#if !tableLoading && tableGrid.length}
-            <button onclick={doCleanTable} disabled={aiCleaning} title="Rifinisci righe/colonne con l'AI locale (Ollama/LM Studio)">{aiCleaning ? "AI…" : "Migliora con AI"}</button>
-            <button onclick={tableCopy} title="Copia la tabella nel formato scelto">Copia</button>
-            <button onclick={tableSave} title="Salva la tabella su file nel formato scelto">Salva…</button>
-            <button onclick={() => doExportTable("xlsx")} title="Esporta come foglio Excel (.xlsx)">Excel</button>
-            {#if onSendToNote}<button onclick={tableToNote} title="Manda la tabella agli Appunti nel formato scelto (con citazione al paper)">→ Appunti</button>{/if}
+            <button onclick={doCleanTable} disabled={aiCleaning} title={t("Rifinisci righe/colonne con l'AI locale (Ollama/LM Studio)")}>{aiCleaning ? "AI…" : t("Migliora con AI")}</button>
+            <button onclick={tableCopy} title={t("Copia la tabella nel formato scelto")}>{t("Copia")}</button>
+            <button onclick={tableSave} title={t("Salva la tabella su file nel formato scelto")}>{t("Salva…")}</button>
+            <button onclick={() => doExportTable("xlsx")} title={t("Esporta come foglio Excel (.xlsx)")}>Excel</button>
+            {#if onSendToNote}<button onclick={tableToNote} title={t("Manda la tabella agli Appunti nel formato scelto (con citazione al paper)")}>{t("→ Appunti")}</button>{/if}
           {/if}
-          <button class="close" onclick={() => (tableModal = false)}>Chiudi</button>
+          <button class="close" onclick={() => (tableModal = false)}>{t("Chiudi")}</button>
         </div>
         <div class="tablebody">
           {#if tableLoading}
-            <p class="tdim">{tableEngine === "ollama" ? "Estraggo la tabella con il modello di visione…" : "Estraggo la tabella…"}</p>
+            <p class="tdim">{tableEngine === "ollama" ? t("Estraggo la tabella con il modello di visione…") : t("Estraggo la tabella…")}</p>
           {:else if tableError}
             <p class="tdim">{tableError}</p>
           {:else if !tableGrid.length}
-            <p class="tdim">Nessun testo tabellare riconosciuto nell'area selezionata. Seleziona più precisamente attorno alla tabella, prova il motore «Ollama», oppure usa un PDF con testo (non scansionato).</p>
+            <p class="tdim">{t("Nessun testo tabellare riconosciuto nell'area selezionata. Seleziona più precisamente attorno alla tabella, prova il motore «Ollama», oppure usa un PDF con testo (non scansionato).")}</p>
           {:else if tableView === "latex"}
             <pre class="latexview">{tableOut()}</pre>
           {:else}
@@ -2659,43 +2691,43 @@
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
       <div class="tablecard textcard" role="dialog" tabindex="-1" use:dragCard onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
-          <strong>Testo estratto</strong>
-          <div class="viewtoggle" title="Motore di estrazione">
-            <button class:on={textEngine === "native"} onclick={() => selectTextEngine("native")} title="Estrazione nativa dal testo del PDF">Nativa</button>
-            <button class:on={textEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectTextEngine("ollama")} title={aiEnabled ? "OCR con un modello di visione locale (Ollama / LM Studio) — utile per pagine scansionate" : "Abilita l'AI locale nelle Impostazioni per usare Ollama"}>Ollama</button>
+          <strong>{t("Testo estratto")}</strong>
+          <div class="viewtoggle" title={t("Motore di estrazione")}>
+            <button class:on={textEngine === "native"} onclick={() => selectTextEngine("native")} title={t("Estrazione nativa dal testo del PDF")}>{t("Nativa")}</button>
+            <button class:on={textEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectTextEngine("ollama")} title={aiEnabled ? t("OCR con un modello di visione locale (Ollama / LM Studio) — utile per pagine scansionate") : t("Abilita l'AI locale nelle Impostazioni per usare Ollama")}>Ollama</button>
           </div>
           {#if textEngine === "ollama"}{@render vmodelSelect("text")}{/if}
           {#if !textLoading && textContent.trim()}
-            <div class="viewtoggle" title="Formato di esportazione (Copia / Salva / → Appunti)">
-              <button class:on={textFormat === "txt"} onclick={() => (textFormat = "txt")} title="Testo semplice">Testo</button>
-              <button class:on={textFormat === "latex"} onclick={() => (textFormat = "latex")} title="LaTeX (caratteri speciali con escape)">LaTeX</button>
+            <div class="viewtoggle" title={t("Formato di esportazione (Copia / Salva / → Appunti)")}>
+              <button class:on={textFormat === "txt"} onclick={() => (textFormat = "txt")} title={t("Testo semplice")}>{t("Testo")}</button>
+              <button class:on={textFormat === "latex"} onclick={() => (textFormat = "latex")} title={t("LaTeX (caratteri speciali con escape)")}>LaTeX</button>
               <button class:on={textFormat === "md"} onclick={() => (textFormat = "md")} title="Markdown">MD</button>
             </div>
           {/if}
           <span style="flex:1"></span>
           {#if !textLoading && textContent.trim()}
-            <button onclick={textCopy} title="Copia il testo nel formato scelto">Copia</button>
-            <button onclick={textSave} title="Salva il testo su file nel formato scelto">Salva…</button>
-            {#if onSendToNote}<button onclick={textToNote} title="Manda il testo agli Appunti nel formato scelto (con citazione al paper)">→ Appunti</button>{/if}
+            <button onclick={textCopy} title={t("Copia il testo nel formato scelto")}>{t("Copia")}</button>
+            <button onclick={textSave} title={t("Salva il testo su file nel formato scelto")}>{t("Salva…")}</button>
+            {#if onSendToNote}<button onclick={textToNote} title={t("Manda il testo agli Appunti nel formato scelto (con citazione al paper)")}>{t("→ Appunti")}</button>{/if}
           {/if}
-          <button class="close" onclick={() => (textModal = false)}>Chiudi</button>
+          <button class="close" onclick={() => (textModal = false)}>{t("Chiudi")}</button>
         </div>
         <div class="tablebody">
           {#if textLoading}
-            <p class="tdim">{textEngine === "ollama" ? "Riconosco il testo con il modello di visione…" : "Estraggo il testo…"}</p>
+            <p class="tdim">{textEngine === "ollama" ? t("Riconosco il testo con il modello di visione…") : t("Estraggo il testo…")}</p>
           {:else if textError}
             <p class="tdim">{textError}</p>
           {:else if !textContent.trim()}
-            <p class="tdim">Nessun testo riconosciuto nell'area selezionata. Se il PDF è scansionato, prova il motore «Ollama» (OCR con un modello di visione).</p>
+            <p class="tdim">{t("Nessun testo riconosciuto nell'area selezionata. Se il PDF è scansionato, prova il motore «Ollama» (OCR con un modello di visione).")}</p>
           {:else if textFormat === "latex"}
             <pre class="latexview">{textOut("latex")}</pre>
           {:else if textFormat === "txt"}
-            <textarea class="exttext" value={textOut("txt")} oninput={(e) => { textContent = e.currentTarget.value; textIsRich = false; }} spellcheck="false" title="Testo semplice (formattazione rimossa). Passa a MD per vedere/correggere corsivi, apici e pedici."></textarea>
+            <textarea class="exttext" value={textOut("txt")} oninput={(e) => { textContent = e.currentTarget.value; textIsRich = false; }} spellcheck="false" title={t("Testo semplice (formattazione rimossa). Passa a MD per vedere/correggere corsivi, apici e pedici.")}></textarea>
           {:else}
-            <textarea class="exttext" bind:value={textContent} spellcheck="false" title={textIsRich ? "Markdown con la formattazione del PDF: *corsivo*, **grassetto**, <sup>apici</sup>, <sub>pedici</sub> — modificabile" : "Testo estratto — modificabile"}></textarea>
+            <textarea class="exttext" bind:value={textContent} spellcheck="false" title={textIsRich ? t("Markdown con la formattazione del PDF: *corsivo*, **grassetto**, <sup>apici</sup>, <sub>pedici</sub> — modificabile") : t("Testo estratto — modificabile")}></textarea>
           {/if}
           {#if !textLoading && textIsRich && /((^|[^\\])\*|<su[bp]>)/.test(textContent)}
-            <p class="tdim richnote">Formattazione del PDF rilevata (corsivo, grassetto, apici/pedici): conservata negli export MD e LaTeX, rimossa in «Testo».</p>
+            <p class="tdim richnote">{t("Formattazione del PDF rilevata (corsivo, grassetto, apici/pedici): conservata negli export MD e LaTeX, rimossa in «Testo».")}</p>
           {/if}
         </div>
       </div>
@@ -2708,61 +2740,61 @@
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
       <div class="tablecard textcard" role="dialog" tabindex="-1" use:dragCard onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
-          <strong>Formula → LaTeX</strong>
-          <div class="viewtoggle" title="Motore di riconoscimento">
-            <button class:on={formulaEngine === "local"} onclick={() => selectFormulaEngine("local")} title="Math-OCR locale integrato (pix2tex)">Locale</button>
-            <button class:on={formulaEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectFormulaEngine("ollama")} title={aiEnabled ? "Riconosci con un modello di visione locale (Ollama / LM Studio)" : "Abilita l'AI locale nelle Impostazioni per usare Ollama"}>Ollama</button>
+          <strong>{t("Formula → LaTeX")}</strong>
+          <div class="viewtoggle" title={t("Motore di riconoscimento")}>
+            <button class:on={formulaEngine === "local"} onclick={() => selectFormulaEngine("local")} title={t("Math-OCR locale integrato (pix2tex)")}>{t("Locale")}</button>
+            <button class:on={formulaEngine === "ollama"} disabled={!aiEnabled} onclick={() => selectFormulaEngine("ollama")} title={aiEnabled ? t("Riconosci con un modello di visione locale (Ollama / LM Studio)") : t("Abilita l'AI locale nelle Impostazioni per usare Ollama")}>Ollama</button>
           </div>
           {#if formulaEngine === "ollama"}{@render vmodelSelect("formula")}{/if}
           {#if !formulaLoading}
             <div class="viewtoggle">
-              <button class:on={!formulaMulti} onclick={() => runFormula(false)} title="Una singola formula">Una</button>
-              <button class:on={formulaMulti} onclick={() => runFormula(true)} title="Più equazioni impilate → un blocco gathered">Più righe</button>
+              <button class:on={!formulaMulti} onclick={() => runFormula(false)} title={t("Una singola formula")}>{t("Una")}</button>
+              <button class:on={formulaMulti} onclick={() => runFormula(true)} title={t("Più equazioni impilate → un blocco gathered")}>{t("Più righe")}</button>
             </div>
           {/if}
           {#if !formulaLoading && formulaLatex.trim()}
-            <div class="viewtoggle" title="Formato di esportazione (Copia / Salva / → Appunti)">
-              <button class:on={formulaFormat === "latex"} onclick={() => (formulaFormat = "latex")} title="LaTeX grezzo">LaTeX</button>
-              <button class:on={formulaFormat === "md"} onclick={() => (formulaFormat = "md")} title="Markdown, blocco $$…$$">MD</button>
+            <div class="viewtoggle" title={t("Formato di esportazione (Copia / Salva / → Appunti)")}>
+              <button class:on={formulaFormat === "latex"} onclick={() => (formulaFormat = "latex")} title={t("LaTeX grezzo")}>LaTeX</button>
+              <button class:on={formulaFormat === "md"} onclick={() => (formulaFormat = "md")} title={t("Markdown, blocco $$…$$")}>MD</button>
             </div>
-            <button class:on={formulaWrapped} disabled={formulaHasEnv && !formulaWrapped} onclick={toggleMathrmWrap} title={formulaWrapped ? "Togli l'involucro \\mathrm{} (torna al corsivo matematico)" : formulaHasEnv ? "Le formule su più righe non si possono avvolgere in \\mathrm{} (avvolgi le singole righe a mano)" : "Avvolgi tutta la formula in \\mathrm{} (la rende tutta in tondo/dritto)"}>\mathrm&#123;&#125;</button>
+            <button class:on={formulaWrapped} disabled={formulaHasEnv && !formulaWrapped} onclick={toggleMathrmWrap} title={formulaWrapped ? t("Togli l'involucro \\mathrm{} (torna al corsivo matematico)") : formulaHasEnv ? t("Le formule su più righe non si possono avvolgere in \\mathrm{} (avvolgi le singole righe a mano)") : t("Avvolgi tutta la formula in \\mathrm{} (la rende tutta in tondo/dritto)")}>\mathrm&#123;&#125;</button>
           {/if}
           <span style="flex:1"></span>
           {#if !formulaLoading && formulaLatex.trim()}
-            <button onclick={formulaCopyFmt} title="Copia la formula nel formato scelto">Copia</button>
-            <button onclick={formulaSave} title="Salva la formula su file nel formato scelto">Salva…</button>
-            {#if onSendToNote}<button onclick={formulaToNoteFmt} title="Manda la formula agli Appunti nel formato scelto (con citazione al paper)">→ Appunti</button>{/if}
+            <button onclick={formulaCopyFmt} title={t("Copia la formula nel formato scelto")}>{t("Copia")}</button>
+            <button onclick={formulaSave} title={t("Salva la formula su file nel formato scelto")}>{t("Salva…")}</button>
+            {#if onSendToNote}<button onclick={formulaToNoteFmt} title={t("Manda la formula agli Appunti nel formato scelto (con citazione al paper)")}>{t("→ Appunti")}</button>{/if}
           {/if}
-          <button class="close" onclick={() => (formulaModal = false)}>Chiudi</button>
+          <button class="close" onclick={() => (formulaModal = false)}>{t("Chiudi")}</button>
         </div>
         <div class="tablebody">
           {#if formulaImg}
-            <img class="formulaimg" src={formulaImg} alt="Formula selezionata" />
+            <img class="formulaimg" src={formulaImg} alt={t("Formula selezionata")} />
           {/if}
           {#if formulaLoading}
-            <p class="tdim">{formulaEngine === "ollama" ? "Riconosco la formula con il modello di visione…" : "Riconosco la formula in locale… (il primo uso scarica il modello, ~180 MB)"}</p>
+            <p class="tdim">{formulaEngine === "ollama" ? t("Riconosco la formula con il modello di visione…") : t("Riconosco la formula in locale… (il primo uso scarica il modello, ~180 MB)")}</p>
           {:else if formulaError}
             <p class="tdim">{formulaError}</p>
           {:else if formulaEmpty}
-            <p class="tdim">Nessuna formula riconosciuta. Riprova selezionando l'area più precisamente attorno all'equazione.</p>
+            <p class="tdim">{t("Nessuna formula riconosciuta. Riprova selezionando l'area più precisamente attorno all'equazione.")}</p>
           {:else}
             <div class="formulaedit">
               <div class="fecol">
-                <span class="felbl">LaTeX riconosciuto — modificabile</span>
-                <textarea class="exttext feta" bind:value={formulaLatex} oninput={scheduleFormulaPreview} spellcheck="false" title="Correggi qui il LaTeX: l'anteprima si aggiorna mentre scrivi"></textarea>
+                <span class="felbl">{t("LaTeX riconosciuto — modificabile")}</span>
+                <textarea class="exttext feta" bind:value={formulaLatex} oninput={scheduleFormulaPreview} spellcheck="false" title={t("Correggi qui il LaTeX: l'anteprima si aggiorna mentre scrivi")}></textarea>
               </div>
               <div class="fecol">
-                <span class="felbl">Anteprima resa {formulaFormat === "md" ? "(blocco $$…$$)" : ""}</span>
+                <span class="felbl">{formulaFormat === "md" ? t("Anteprima resa (blocco $$…$$)") : t("Anteprima resa")}</span>
                 <div class="formulaprev">
                   {#if formulaPreviewHtml}
                     <!-- eslint-disable-next-line svelte/no-at-html-tags -- resa da KaTeX (trust:false, nessuno script) -->
                     {@html formulaPreviewHtml}
                   {:else}
-                    <p class="tdim">{formulaInvalid ? "Impossibile rendere la formula." : "Anteprima vuota."}</p>
+                    <p class="tdim">{formulaInvalid ? t("Impossibile rendere la formula.") : t("Anteprima vuota.")}</p>
                   {/if}
                 </div>
                 {#if formulaInvalid}
-                  <p class="feinvalid" title={formulaInvalid}>⚠ LaTeX non valido — controlla la formula</p>
+                  <p class="feinvalid" title={formulaInvalid}>{t("⚠ LaTeX non valido — controlla la formula")}</p>
                 {/if}
               </div>
             </div>
@@ -2778,22 +2810,22 @@
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
       <div class="tablecard textcard" role="dialog" tabindex="-1" use:dragCard onclick={(e) => e.stopPropagation()}>
         <div class="tablehd">
-          <strong>Figura → PNG</strong>
+          <strong>{t("Figura → PNG")}</strong>
           <span style="flex:1"></span>
           {#if figureImg}
-            <button onclick={saveFigurePng} title="Salva la figura come file PNG">Salva PNG…</button>
-            {#if onSendToNote}<button onclick={figureToNote} title="Incorpora la figura in un appunto come immagine Markdown, con citazione al paper">→ Appunti</button>{/if}
+            <button onclick={saveFigurePng} title={t("Salva la figura come file PNG")}>{t("Salva PNG…")}</button>
+            {#if onSendToNote}<button onclick={figureToNote} title={t("Incorpora la figura in un appunto come immagine Markdown, con citazione al paper")}>{t("→ Appunti")}</button>{/if}
           {/if}
-          <button class="close" onclick={() => (figureModal = false)}>Chiudi</button>
+          <button class="close" onclick={() => (figureModal = false)}>{t("Chiudi")}</button>
         </div>
         <div class="tablebody">
           {#if figureError}
             <p class="tdim">{figureError}</p>
           {/if}
           {#if figureImg}
-            <img class="figureimg" src={figureImg} alt="Figura ritagliata" />
+            <img class="figureimg" src={figureImg} alt={t("Figura ritagliata")} />
           {:else}
-            <p class="tdim">Nessuna figura ritagliata.</p>
+            <p class="tdim">{t("Nessuna figura ritagliata.")}</p>
           {/if}
         </div>
       </div>

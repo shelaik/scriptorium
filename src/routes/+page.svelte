@@ -4,6 +4,8 @@
   import { listen } from "@tauri-apps/api/event";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { fmtDateShort, fmtDateTime } from "$lib/format";
+  import { i18n, t, tp, te, LOCALES, applyLangAttribute, systemLocale, hasExplicitLocale } from "$lib/i18n/index.svelte";
+  import { setUiLang, type AiLang } from "$lib/api";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import {
@@ -200,6 +202,10 @@
   import SendToNotePicker from "$lib/SendToNotePicker.svelte";
   import TexProjects from "$lib/TexProjects.svelte";
   import Archivio from "$lib/Archivio.svelte";
+  // La prosa della guida (~4.800 parole per lingua) sta fuori dalla pagina e
+  // fuori dal dizionario: due componenti gemelli, uno per lingua.
+  import HelpProse from "$lib/help/HelpProse.svelte";
+  import type { HelpTab } from "$lib/help/tabs";
   import { refToken, type NotePayload } from "$lib/notecite";
 
   type Filter = {
@@ -315,6 +321,10 @@
   let searching = $state(false);
   let printing = $state(false);
   let dragOver = $state(false);
+  // Separatore dei messaggi costruiti a frammenti («12 importati · 3 errori»).
+  // NON è testo: i frammenti sono sintagmi nominali autonomi anche in inglese,
+  // quindi il punto mediano resta identico in tutte le lingue.
+  const SEP = " · "; /* i18n-exempt: punteggiatura, non testo */
   let status = $state("");
   let openDoc = $state<DocumentItem | null>(null);
   // The last PDF opened in the reader — powers the "Riprendi lettura" quick action
@@ -397,7 +407,11 @@
   let terminalOpened = $state(false); // mount the terminal lazily, then keep it alive across tabs
   // ----- Reusable confirmation dialog (for destructive actions) -----
   let confirmBox = $state<{ msg: string; ok: string; danger: boolean; resolve: (v: boolean) => void } | null>(null);
-  function confirmAsk(msg: string, ok = "Elimina", danger = true): Promise<boolean> {
+  // Il valore predefinito di `ok` è tradotto QUI: 8 chiamate su 15 lo usano
+  // senza nominarlo, quindi è l'unico punto dove la parola esiste. I default
+  // dei parametri sono valutati a ogni chiamata, non una volta sola: cambiando
+  // lingua il pulsante cambia davvero.
+  function confirmAsk(msg: string, ok = t("Elimina"), danger = true): Promise<boolean> {
     return new Promise((resolve) => {
       confirmBox = { msg, ok, danger, resolve };
     });
@@ -408,7 +422,7 @@
   }
   // Close the integrated terminal (kills the PTY session by unmounting it).
   async function closeTerminal() {
-    if (!(await confirmAsk("Chiudere il terminale? La sessione in corso verrà terminata.", "Chiudi"))) return;
+    if (!(await confirmAsk(t("Chiudere il terminale? La sessione in corso verrà terminata."), t("Chiudi")))) return;
     terminalOpened = false;
     setFilter({ kind: "all" });
   }
@@ -430,6 +444,12 @@
   // Multi-criteria sort: criteria apply in the order the user activated them.
   let sortChain = $state<{ key: SortKey; dir: "asc" | "desc" }[]>([]);
   const SORT_KEYS: SortKey[] = ["favorite", "author", "title", "year", "venue", "added"];
+  // Le chiavi (`favorite`, `author`, …) sono valori di `SortKey`, non testo.
+  // I valori sono etichette mostrate, ma restano qui in italiano perché sono le
+  // CHIAVI di traduzione: la tabella è una costante valutata una volta sola,
+  // quindi si traduce al punto d'uso con `t(SORT_LABELS[k])` — così l'etichetta
+  // cambia davvero quando l'utente cambia lingua.
+  /* i18n-exempt: chiavi = valori di SortKey; i valori sono chiavi tradotte al punto d'uso */
   const SORT_LABELS: Record<SortKey, string> = {
     favorite: "Preferiti",
     author: "Primo autore",
@@ -585,7 +605,7 @@
   /** Controlla se c'è una versione nuova. Parte SOLO da un'azione dell'utente:
    *  l'app non contatta la rete da sola per gli aggiornamenti. */
   async function checkUpdatesNow(manual: boolean) {
-    if (manual) status = "Controllo aggiornamenti…";
+    if (manual) status = t("Controllo aggiornamenti…");
     updateErr = "";
     try {
       // Il canale firmato può non rispondere (manifesto assente sulla release
@@ -612,14 +632,17 @@
       updateUrl = u.url;
       if (u.newer && u.latest) {
         updateLatest = u.latest;
-        status = `È disponibile Scriptorium ${u.latest} (hai la ${u.current}) — scaricala da GitHub col segnalino in alto`;
+        status = t("È disponibile Scriptorium {nuova} (hai la {attuale}) — scaricala da GitHub col segnalino in alto", {
+          nuova: u.latest,
+          attuale: u.current,
+        });
       } else if (manual) {
         status = u.latest
-          ? `Sei aggiornato: ${u.current} è l'ultima versione`
-          : "Controllo non riuscito: GitHub non raggiungibile (sei offline?)";
+          ? t("Sei aggiornato: {attuale} è l'ultima versione", { attuale: u.current })
+          : t("Controllo non riuscito: GitHub non raggiungibile (sei offline?)");
       }
     } catch (e) {
-      if (manual) status = "Controllo aggiornamenti: " + e;
+      if (manual) status = t("Controllo aggiornamenti: {err}", { err: String(e) });
     }
   }
 
@@ -671,6 +694,14 @@
   async function showWhatsNewIfUpdated() {
     try {
       const seen = await lastSeenVersion();
+      // Installazione DAVVERO nuova (il database non ha mai visto una versione):
+      // solo qui la lingua di sistema decide. Chi aggiorna da una versione
+      // precedente resta in italiano — la lingua con cui ha sempre usato il
+      // programma — perché vedersela cambiare da sola sarebbe una sorpresa.
+      if (!seen && !hasExplicitLocale()) {
+        const sys = systemLocale();
+        if (sys && sys !== i18n.locale) setLocale(sys);
+      }
       if (seen === APP_VERSION) return;
       // Alla PRIMA installazione non c'è nulla da raccontare: registra e taci.
       const notes = seen ? await releaseNotesSince(seen) : [];
@@ -688,7 +719,8 @@
   // Guida a schede: si riapre sempre da «Inizia qui». È una finestra flottante
   // NON modale: si trascina, resta aperta mentre si lavora e — a scelta — resta
   // in primo piano sopra ogni vista (lettore incluso).
-  type HelpTab = "inizia" | "libreria" | "lettura" | "scrittura" | "scoperta" | "ai" | "faq";
+  // Il tipo delle schede vive in $lib/help/tabs: lo condividono la pagina e i
+  // due componenti di prosa (HelpIt/HelpEn).
   let helpTab = $state<HelpTab>("inizia");
   let helpPos = $state({ x: 80, y: 80 });
   let helpPin = $state(false);
@@ -749,16 +781,16 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.50";
+  const APP_VERSION = "0.9.51";
   const APP_YEAR = "2026";
-  let settingsTab = $state<"online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
+  let settingsTab = $state<"lang" | "online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
   let companions = $state<CompanionPaths | null>(null);
   async function loadCompanions() {
     try {
       companions = await companionPaths();
     } catch (e) {
-      status = "Errore percorsi: " + e;
+      status = t("Errore percorsi: {err}", { err: String(e) });
     }
   }
   const mcpAddCmd = $derived(companions ? `claude mcp add scriptorium -- "${companions.mcp}"` : "");
@@ -770,7 +802,7 @@
       await navigator.clipboard.writeText(text);
       status = okMsg;
     } catch {
-      status = "Copia non riuscita";
+      status = t("Copia non riuscita");
     }
   }
   let obsidianVault = $state("");
@@ -789,6 +821,34 @@
   let aiModel = $state("llama3.2:3b");
   let aiEmbedGpu = $state(false);
   let aiEmbedBatch = $state(0); // 0 = auto
+  /** Lingua delle RISPOSTE dell'AI: manopola separata da quella dell'interfaccia.
+   *  «auto» segue l'interfaccia — chi non ci pensa non deve pensarci. */
+  let aiLang = $state<AiLang>("auto");
+  let aiLangEffective = $state<"it" | "en">("it");
+
+  /** Unico punto in cui si cambia lingua all'interfaccia. Oltre a cambiarla,
+   *  la rispecchia in `settings` lato Rust: la lingua vive in localStorage e il
+   *  backend non la vedrebbe, quindi senza questo la voce «come l'interfaccia»
+   *  della lingua AI non saprebbe cosa seguire. */
+  function setLocale(l: "it" | "en") {
+    i18n.locale = l;
+    aiLangEffective = aiLang === "auto" ? l : aiLang;
+    void setUiLang(l).catch(() => {
+      /* la lingua dell'interfaccia è comunque cambiata */
+    });
+  }
+
+  /** Salva SOLO la lingua dell'AI, senza toccare il resto delle impostazioni:
+   *  il menu sta nella scheda Lingua, non in quella dell'AI. */
+  async function persistAiLang() {
+    try {
+      const cur = await getAiSettings();
+      await setAiSettings({ ...cur, lang: aiLang });
+      aiLangEffective = aiLang === "auto" ? i18n.locale : aiLang;
+    } catch (e) {
+      status = t("Non riesco a salvare la lingua delle risposte AI: {err}", { err: String(e) });
+    }
+  }
   let ollamaModels = $state<string[] | null>(null);
   let lmstudioModels = $state<string[] | null>(null);
   let ollamaErr = $state("");
@@ -939,7 +999,7 @@
         results = r;
         ensureThumbs(r);
       } catch (e) {
-        if (myId === searchSeq) status = "Errore ricerca: " + e;
+        if (myId === searchSeq) status = t("Errore ricerca: {err}", { err: String(e) });
       } finally {
         if (myId === searchSeq) searching = false;
       }
@@ -1008,7 +1068,7 @@
   async function rebuildThumbs() {
     if (rebuildingThumbs) return;
     rebuildingThumbs = true;
-    status = "Rigenerazione anteprime in corso…";
+    status = t("Rigenerazione anteprime in corso…");
     try {
       const n = await rebuildThumbnails();
       // Drop the cached data URLs so the freshly-rendered, higher-res covers reload.
@@ -1016,9 +1076,9 @@
       thumbQueue = [];
       thumbQueued.clear();
       ensureThumbs(displayed);
-      status = `✓ ${n} anteprime rigenerate ad alta risoluzione`;
+      status = tp(n, "✓ 1 anteprima rigenerata ad alta risoluzione", "✓ {n} anteprime rigenerate ad alta risoluzione");
     } catch (e) {
-      status = `Errore nella rigenerazione delle anteprime: ${e}`;
+      status = t("Errore nella rigenerazione delle anteprime: {err}", { err: String(e) });
     } finally {
       rebuildingThumbs = false;
     }
@@ -1164,19 +1224,19 @@
         selected = selected.filter((x) => x !== doc.id);
       }
     } catch (e) {
-      status = "Errore preferiti: " + e;
+      status = t("Errore preferiti: {err}", { err: String(e) });
     } finally {
     }
   }
   async function doBackup() {
     const dir = await open({ directory: true, multiple: false, title: "Scegli dove salvare il backup" });
     if (!dir || Array.isArray(dir)) return;
-    status = "Backup in corso…";
+    status = t("Backup in corso…");
     try {
       const path = await backupLibrary(dir);
-      status = "Backup salvato: " + path;
+      status = t("Backup salvato: {percorso}", { percorso: path });
     } catch (e) {
-      status = "Errore backup: " + e;
+      status = t("Errore backup: {err}", { err: String(e) });
     }
   }
   async function doRestoreFolder() {
@@ -1189,7 +1249,7 @@
       directory: false,
       multiple: false,
       title: "Scegli un file .db di backup",
-      filters: [{ name: "Database", extensions: ["db"] }],
+      filters: [{ name: t("Database"), extensions: ["db"] }],
     });
     if (!f || Array.isArray(f)) return;
     await restoreFrom(f);
@@ -1199,28 +1259,31 @@
     try {
       info = await inspectBackup(source);
     } catch (e) {
-      status = "Backup non valido: " + e;
+      status = t("Backup non valido: {err}", { err: String(e) });
       return;
     }
     const kind = info.full
-      ? "libreria completa (database + PDF + note + progetti)"
-      : "solo il database (catalogo, tag, grafo, annotazioni)";
+      ? t("libreria completa (database + PDF + note + progetti)")
+      : t("solo il database (catalogo, tag, grafo, annotazioni)");
     const ok = await confirmAsk(
-      `Ripristinare da questo backup?\n\n• ${info.doc_count} documenti\n• ${kind}\n\nLa libreria ATTUALE verrà sostituita (ne viene salvata prima una copia di sicurezza in backups/). L'app si riavvierà per applicare il ripristino.`,
-      "Ripristina e riavvia",
+      t(
+        "Ripristinare da questo backup?\n\n• {docs} documenti\n• {contenuto}\n\nLa libreria ATTUALE verrà sostituita (ne viene salvata prima una copia di sicurezza in backups/). L'app si riavvierà per applicare il ripristino.",
+        { docs: info.doc_count, contenuto: kind },
+      ),
+      t("Ripristina e riavvia"),
       true,
     );
     if (!ok) return;
     try {
       await stageRestore(source);
     } catch (e) {
-      status = "Non riesco a preparare il ripristino: " + e;
+      status = t("Non riesco a preparare il ripristino: {err}", { err: String(e) });
       return;
     }
     try {
       await restartApp();
     } catch {
-      status = "Ripristino pronto: verrà applicato al prossimo avvio di Scriptorium.";
+      status = t("Ripristino pronto: verrà applicato al prossimo avvio di Scriptorium.");
     }
   }
 
@@ -1228,7 +1291,14 @@
   async function trashSelected(ids: number[]) {
     if (!ids.length) return;
     const n = ids.length;
-    if (!(await confirmAsk(`Spostare ${n} ${n > 1 ? "documenti" : "documento"} nel cestino?`, "Sposta nel cestino", false))) return;
+    if (
+      !(await confirmAsk(
+        tp(n, "Spostare 1 documento nel cestino?", "Spostare {n} documenti nel cestino?"),
+        t("Sposta nel cestino"),
+        false,
+      ))
+    )
+      return;
     await deleteDocuments(ids);
     await loadDocs();
     await loadSidebar();
@@ -1240,7 +1310,8 @@
   }
   async function bulkAddCollection(coll: Collection) {
     for (const id of selected) await addToCollection(coll.id, id);
-    status = `${selected.length} aggiunti a "${coll.name}"`;
+    // Virgolette caporali come nel resto dell'app (prima erano dritte).
+    status = tp(selected.length, "1 aggiunto a «{raccolta}»", "{n} aggiunti a «{raccolta}»", { raccolta: coll.name });
     selected = [];
   }
 
@@ -1248,31 +1319,35 @@
   async function printSelected() {
     if (!selected.length || printing) return;
     printing = true;
-    status = "Preparazione stampa…";
+    status = t("Preparazione stampa…");
     try {
       const r = await printDocuments(selected);
       if (r.printed === 0) {
-        status = "Nessun PDF da stampare (i riferimenti senza file sono stati saltati)";
+        status = t("Nessun PDF da stampare (i riferimenti senza file sono stati saltati)");
       } else {
-        const noun = r.printed === 1 ? "documento" : "documenti";
         status = r.skipped
-          ? `Stampa avviata: ${r.printed} ${noun} · ${r.skipped} senza PDF saltati`
-          : `Stampa avviata: ${r.printed} ${noun}`;
+          ? tp(
+              r.printed,
+              "Stampa avviata: 1 documento · {salt} senza PDF saltati",
+              "Stampa avviata: {n} documenti · {salt} senza PDF saltati",
+              { salt: r.skipped },
+            )
+          : tp(r.printed, "Stampa avviata: 1 documento", "Stampa avviata: {n} documenti");
       }
     } catch (e) {
-      status = "Errore stampa: " + e;
+      status = t("Errore stampa: {err}", { err: String(e) });
     } finally {
       printing = false;
     }
   }
   async function printOne(doc: DocumentItem) {
     printing = true;
-    status = "Preparazione stampa…";
+    status = t("Preparazione stampa…");
     try {
       await printDocument(doc.id);
-      status = "Stampa avviata";
+      status = t("Stampa avviata");
     } catch {
-      status = "Questo elemento non ha un PDF da stampare";
+      status = t("Questo elemento non ha un PDF da stampare");
     } finally {
       printing = false;
     }
@@ -1287,7 +1362,7 @@
     await loadSidebar();
   }
   async function purgeFromTrash(id: number) {
-    if (!(await confirmAsk("Eliminare definitivamente questo documento? L'operazione è irreversibile."))) return;
+    if (!(await confirmAsk(t("Eliminare definitivamente questo documento? L'operazione è irreversibile.")))) return;
     await purgeDocuments([id]);
     forgetThumbs([id]);
     await loadDocs();
@@ -1295,36 +1370,57 @@
   async function emptyTrash() {
     const n = docs.length;
     if (!n) return;
-    if (!(await confirmAsk(`Svuotare il cestino? ${n} ${n > 1 ? "documenti verranno eliminati" : "documento verrà eliminato"} definitivamente.`, "Svuota cestino"))) return;
+    if (
+      !(await confirmAsk(
+        tp(
+          n,
+          "Svuotare il cestino? 1 documento verrà eliminato definitivamente.",
+          "Svuotare il cestino? {n} documenti verranno eliminati definitivamente.",
+        ),
+        t("Svuota cestino"),
+      ))
+    )
+      return;
     const ids = docs.map((d) => d.id);
     await purgeDocuments(ids);
     forgetThumbs(ids);
     await loadDocs();
   }
   async function doMerge(group: number[]) {
-    if (!(await confirmAsk(`Unire ${group.length} documenti in uno? Gli altri verranno rimossi (note e tag confluiscono nel primo).`, "Unisci", false))) return;
+    if (
+      !(await confirmAsk(
+        t("Unire {n} documenti in uno? Gli altri verranno rimossi (note e tag confluiscono nel primo).", {
+          n: group.length,
+        }),
+        t("Unisci"),
+        false,
+      ))
+    )
+      return;
     await mergeDocuments(group[0], group.slice(1));
-    status = `Uniti ${group.length} documenti`;
+    status = t("Uniti {n} documenti", { n: group.length });
     await loadDuplicates();
   }
 
   async function handleImport(paths: string[]) {
     if (!paths.length) return;
     busy = true;
-    status = `Importazione di ${paths.length} file…`;
+    status = tp(paths.length, "Importazione di 1 file…", "Importazione di {n} file…");
     try {
       const res = await importFiles(paths);
-      const parts = [`${res.imported.length} importati`];
-      if (res.duplicates.length) parts.push(`${res.duplicates.length} già presenti`);
-      if (res.warnings.length) parts.push(`${res.warnings.length} senza testo`);
-      if (res.errors.length) parts.push(`${res.errors.length} errori`);
+      const parts = [tp(res.imported.length, "1 importato", "{n} importati")];
+      if (res.duplicates.length) parts.push(tp(res.duplicates.length, "1 già presente", "{n} già presenti"));
+      if (res.warnings.length) parts.push(tp(res.warnings.length, "1 senza testo", "{n} senza testo"));
+      if (res.errors.length) parts.push(tp(res.errors.length, "1 errore", "{n} errori"));
       // Gli errori erano solo un numero e venivano buttati: ora restano
       // consultabili sotto la griglia finche' l'utente non li chiude.
-      importErrors = [...res.errors, ...res.warnings];
-      status = parts.join(" · ");
+      // Arrivano dal Rust in italiano nel canale Ok: NON passano dal rigetto di
+      // invoke, quindi l'imbuto di api.ts non li vede e vanno tradotti qui.
+      importErrors = [...res.errors, ...res.warnings].map(te);
+      status = parts.join(SEP);
       await loadDocs();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       busy = false;
       importProg = null;
@@ -1334,18 +1430,24 @@
   async function enrichMeta() {
     if (enriching) return; // callable from header/radial/palette: no concurrent runs
     enriching = true;
-    status = "Recupero metadati dei documenti incompleti (arXiv dal nome file, DOI e titolo dal PDF)…";
+    status = t("Recupero metadati dei documenti incompleti (arXiv dal nome file, DOI e titolo dal PDF)…");
     try {
       const res = await recoverMissingMetadata();
-      const parts = [`${res.updated} aggiornati`];
-      if (res.from_arxiv) parts.push(`${res.from_arxiv} da arXiv (nome file)`);
+      const parts = [tp(res.updated, "1 aggiornato", "{n} aggiornati")];
+      if (res.from_arxiv) parts.push(tp(res.from_arxiv, "1 da arXiv (nome file)", "{n} da arXiv (nome file)"));
       if (res.unresolved)
-        parts.push(`${res.unresolved} da confermare a mano (tasto destro → Organizza → Recupera metadati)`);
-      if (res.errors.length) parts.push(`${res.errors.length} errori`);
-      status = "Metadati: " + parts.join(" · ");
+        parts.push(
+          tp(
+            res.unresolved,
+            "1 da confermare a mano (tasto destro → Organizza → Recupera metadati)",
+            "{n} da confermare a mano (tasto destro → Organizza → Recupera metadati)",
+          ),
+        );
+      if (res.errors.length) parts.push(tp(res.errors.length, "1 errore", "{n} errori"));
+      status = t("Metadati: {dettaglio}", { dettaglio: parts.join(SEP) });
       await loadDocs();
     } catch (e) {
-      status = "Errore metadati: " + e;
+      status = t("Errore metadati: {err}", { err: String(e) });
     } finally {
       enriching = false;
       metaScan = null;
@@ -1362,7 +1464,7 @@
       pulseLog = s.enabled;
       pulseLogDir = s.dir;
     } catch (e) {
-      status = "Log Plancia: " + e;
+      status = t("Log Plancia: {err}", { err: String(e) });
       // La checkbox non deve mentire: riallineala allo stato reale del backend.
       try {
         const s = await pulseLogStatus();
@@ -1375,32 +1477,36 @@
   }
   let repairMsg = $state("");
   async function repairMeta() {
-    if (!(await confirmAsk(
-      "Verifico ogni documento e correggo quelli il cui titolo non corrisponde al PDF " +
-      "(di solito causati dal DOI di un lavoro citato). Per ognuno cerco il record giusto " +
-      "online per titolo (Crossref/arXiv); i paper arXiv si recuperano dall'id nel nome file; " +
-      "se non è indicizzato da nessuna parte, ricavo almeno il titolo dalla prima riga del PDF. " +
-      "I documenti già corretti non vengono toccati. Può richiedere fino a un minuto. Procedo?",
-      "Ripara", false
-    ))) return;
+    // Chiave su UNA riga (per quanto lunga): spezzata in concatenazioni,
+    // `scripts/i18n-check.mjs` ne vedrebbe solo il primo pezzo e la darebbe
+    // per mancante mentre in inglese resterebbe muta.
+    if (
+      !(await confirmAsk(
+        t("Verifico ogni documento e correggo quelli il cui titolo non corrisponde al PDF (di solito causati dal DOI di un lavoro citato). Per ognuno cerco il record giusto online per titolo (Crossref/arXiv); i paper arXiv si recuperano dall'id nel nome file; se non è indicizzato da nessuna parte, ricavo almeno il titolo dalla prima riga del PDF. I documenti già corretti non vengono toccati. Può richiedere fino a un minuto. Procedo?"),
+        t("Ripara"),
+        false,
+      ))
+    )
+      return;
     repairing = true;
-    repairMsg = "Verifica e riparazione in corso… (può richiedere fino a un minuto)";
+    repairMsg = t("Verifica e riparazione in corso… (può richiedere fino a un minuto)");
     status = repairMsg;
     try {
       const res = await repairMetadata();
       if (res.checked === 0) {
-        repairMsg = "Nessun metadato errato trovato — tutto a posto ✓";
+        repairMsg = t("Nessun metadato errato trovato — tutto a posto ✓");
       } else {
-        const parts = [`${res.checked} corretti`];
-        if (res.repaired_arxiv) parts.push(`${res.repaired_arxiv} da arXiv`);
-        if (res.resolved_online) parts.push(`${res.resolved_online} risolti online per titolo`);
-        if (res.retitled) parts.push(`${res.retitled} dal testo del PDF`);
-        repairMsg = "Riparazione completata: " + parts.join(" · ");
+        const parts = [tp(res.checked, "1 corretto", "{n} corretti")];
+        if (res.repaired_arxiv) parts.push(tp(res.repaired_arxiv, "1 da arXiv", "{n} da arXiv"));
+        if (res.resolved_online)
+          parts.push(tp(res.resolved_online, "1 risolto online per titolo", "{n} risolti online per titolo"));
+        if (res.retitled) parts.push(tp(res.retitled, "1 dal testo del PDF", "{n} dal testo del PDF"));
+        repairMsg = t("Riparazione completata: {dettaglio}", { dettaglio: parts.join(SEP) });
       }
       status = repairMsg;
       await loadDocs();
     } catch (e) {
-      repairMsg = "Errore riparazione: " + e;
+      repairMsg = t("Errore riparazione: {err}", { err: String(e) });
       status = repairMsg;
     } finally {
       repairing = false;
@@ -1410,15 +1516,15 @@
   async function generateIndex() {
     if (generating) return; // callable from radial/palette/map too: no concurrent jobs
     generating = true;
-    status = "Generazione indice semantico… (al primo uso scarica il modello bge-m3 ~2.3GB)";
+    status = t("Generazione indice semantico… (al primo uso scarica il modello bge-m3 ~2.3GB)");
     try {
       const res = await generateEmbeddings();
-      status =
-        `Indice semantico: +${res.embedded} documenti` +
-        (res.errors.length ? ` · ${res.errors.length} errori` : "");
+      const parts = [tp(res.embedded, "Indice semantico: +1 documento", "Indice semantico: +{n} documenti")];
+      if (res.errors.length) parts.push(tp(res.errors.length, "1 errore", "{n} errori"));
+      status = parts.join(SEP);
       await loadStatus();
     } catch (e) {
-      status = "Errore indice: " + e;
+      status = t("Errore indice: {err}", { err: String(e) });
     } finally {
       generating = false;
     }
@@ -1443,7 +1549,7 @@
   async function importViaDialog() {
     const selected = await open({
       multiple: true,
-      filters: [{ name: "PDF", extensions: ["pdf"] }],
+      filters: [{ name: "PDF" /* i18n-exempt: sigla identica in inglese */, extensions: ["pdf"] }],
     });
     if (!selected) return;
     await handleImport(Array.isArray(selected) ? selected : [selected]);
@@ -1454,7 +1560,7 @@
       multiple: false,
       filters: [
         {
-          name: "Bibliografia o progetto (BibTeX / RIS / CSL-JSON / .zip)",
+          name: t("Bibliografia o progetto (BibTeX / RIS / CSL-JSON / .zip)"),
           extensions: ["bib", "bibtex", "ris", "json", "csljson", "csl", "txt", "zip"],
         },
       ],
@@ -1496,7 +1602,7 @@
     const o = bibOpts;
     if (!o) return;
     bibOpts = null;
-    status = o.findPdfs ? "Importo la bibliografia e cerco i PDF…" : "Importo la bibliografia…";
+    status = o.findPdfs ? t("Importo la bibliografia e cerco i PDF…") : t("Importo la bibliografia…");
     try {
       const res = await importReferenceManager(
         o.file,
@@ -1505,16 +1611,19 @@
         o.collection ? o.base : undefined,
         o.isZip && o.latexProject ? o.base : undefined,
       );
-      const parts = [`${res.added} aggiunti`];
-      if (res.pdfs_attached) parts.push(`${res.pdfs_attached} con PDF`);
-      if (res.pdfs_downloaded) parts.push(`${res.pdfs_downloaded} PDF scaricati`);
-      if (res.tags_applied) parts.push(`${res.tags_applied} tag`);
-      if (res.collection) parts.push(`raccolta «${res.collection}»`);
-      if (res.project) parts.push("progetto LaTeX creato");
-      if (res.duplicates) parts.push(`${res.duplicates} già presenti`);
-      if (res.dois_resolved) parts.push(`${res.dois_resolved} DOI recuperati`);
-      if (res.errors.length) parts.push(`${res.errors.length} errori`);
-      status = `${res.format}: ` + (res.entries ? parts.join(" · ") : "nessuna voce trovata nel file");
+      const parts = [tp(res.added, "1 aggiunto", "{n} aggiunti")];
+      if (res.pdfs_attached) parts.push(tp(res.pdfs_attached, "1 con PDF", "{n} con PDF"));
+      if (res.pdfs_downloaded) parts.push(tp(res.pdfs_downloaded, "1 PDF scaricato", "{n} PDF scaricati"));
+      if (res.tags_applied) parts.push(tp(res.tags_applied, "1 tag", "{n} tag"));
+      if (res.collection) parts.push(t("raccolta «{nome}»", { nome: res.collection }));
+      if (res.project) parts.push(t("progetto LaTeX creato"));
+      if (res.duplicates) parts.push(tp(res.duplicates, "1 già presente", "{n} già presenti"));
+      if (res.dois_resolved) parts.push(tp(res.dois_resolved, "1 DOI recuperato", "{n} DOI recuperati"));
+      if (res.errors.length) parts.push(tp(res.errors.length, "1 errore", "{n} errori"));
+      status = t("{formato}: {dettaglio}", {
+        formato: res.format /* i18n-exempt: sigla del formato rilevato (BibTeX/RIS/CSL-JSON) */,
+        dettaglio: res.entries ? parts.join(SEP) : t("nessuna voce trovata nel file"),
+      });
       await loadDocs();
       await loadSidebar();
       // Passo successivo: portalo DOVE sono finite le voci, invece di lasciarlo
@@ -1524,31 +1633,32 @@
         if (c) setFilter({ kind: "collection", id: c.id, label: c.name });
       }
     } catch (e) {
-      status = "Errore import bibliografia: " + e;
+      status = t("Errore import bibliografia: {err}", { err: String(e) });
     }
   }
 
   async function importLatexDialog() {
     const file = await open({
       multiple: false,
-      filters: [{ name: "Progetto LaTeX (.zip)", extensions: ["zip"] }],
+      filters: [{ name: t("Progetto LaTeX (.zip)"), extensions: ["zip"] }],
     });
     if (typeof file !== "string") return;
-    status = "Importo il progetto LaTeX…";
+    status = t("Importo il progetto LaTeX…");
     try {
       const res = await importLatexZip(file);
       const parts: string[] = [];
-      if (res.imported) parts.push(`${res.imported} tuoi paper aggiunti`);
-      if (res.duplicates) parts.push(`${res.duplicates} già presenti`);
-      if (res.references_linked) parts.push(`${res.references_linked} riferimenti collegati`);
-      if (res.dois_resolved) parts.push(`${res.dois_resolved} DOI recuperati`);
-      if (!res.pdfs_found) parts.push("nessun PDF nel .zip");
-      if (res.errors.length) parts.push(`${res.errors.length} errori`);
-      status = "LaTeX: " + (parts.length ? parts.join(" · ") : "niente da importare");
+      if (res.imported) parts.push(tp(res.imported, "1 tuo paper aggiunto", "{n} tuoi paper aggiunti"));
+      if (res.duplicates) parts.push(tp(res.duplicates, "1 già presente", "{n} già presenti"));
+      if (res.references_linked)
+        parts.push(tp(res.references_linked, "1 riferimento collegato", "{n} riferimenti collegati"));
+      if (res.dois_resolved) parts.push(tp(res.dois_resolved, "1 DOI recuperato", "{n} DOI recuperati"));
+      if (!res.pdfs_found) parts.push(t("nessun PDF nel .zip"));
+      if (res.errors.length) parts.push(tp(res.errors.length, "1 errore", "{n} errori"));
+      status = t("LaTeX: {dettaglio}", { dettaglio: parts.length ? parts.join(SEP) : t("niente da importare") });
       await loadDocs();
       await loadSidebar();
     } catch (e) {
-      status = "Errore import LaTeX: " + e;
+      status = t("Errore import LaTeX: {err}", { err: String(e) });
     }
   }
 
@@ -1572,7 +1682,7 @@
     ghReadmeHtml = "";
     hfTitle = d.title ?? "documento";
     // Fetch HF resources and GitHub repos in parallel (both best-effort).
-    const hfP = hfResources(d.id).then((r) => (hfData = r)).catch((e) => { status = "HF: " + e; });
+    const hfP = hfResources(d.id).then((r) => (hfData = r)).catch((e) => { status = t("HF: {err}", { err: String(e) }); });
     const ghP = githubRepos(d.id).then((r) => (ghRepos = r)).catch(() => (ghRepos = []));
     await hfP;
     hfLoading = false;
@@ -1586,7 +1696,7 @@
     try {
       ghReadmeHtml = await githubReadme(r.owner, r.repo);
     } catch (e) {
-      ghReadmeError = "Impossibile caricare il README: " + e;
+      ghReadmeError = t("Impossibile caricare il README: {err}", { err: String(e) });
     } finally {
       ghReadmeLoading = false;
     }
@@ -1625,10 +1735,10 @@
         exploreModal = false;
         openDocument(d);
       } else {
-        status = "Non trovo questo DOI in libreria (rigenera l'esplorazione?)";
+        status = t("Non trovo questo DOI in libreria (rigenera l'esplorazione?)");
       }
     } catch (e) {
-      status = "" + e;
+      status = "" + e; /* i18n-exempt: nessun testo nostro, solo l'errore */
     }
   }
   let exploreLoading = $state(false);
@@ -1654,7 +1764,7 @@
     try {
       exploreData = await exploreCitations(seed);
     } catch (e) {
-      status = "Errore esplora citazioni: " + e;
+      status = t("Errore esplora citazioni: {err}", { err: String(e) });
       exploreModal = false;
     } finally {
       exploreLoading = false;
@@ -1679,7 +1789,7 @@
     if (!exploreData) return;
     const list = kind === "references" ? exploreData.references : exploreData.citations;
     if (!list.length) {
-      status = "La lista è vuota — niente da salvare";
+      status = t("La lista è vuota — niente da salvare");
       return;
     }
     const heading = kind === "references" ? "Riferimenti (questo paper cita)" : "Citato da";
@@ -1706,20 +1816,20 @@
       const path = await save({
         defaultPath: fname,
         filters: [
-          { name: "Markdown", extensions: ["md"] },
-          { name: "Testo", extensions: ["txt"] },
+          { name: t("Markdown"), extensions: ["md"] },
+          { name: t("Testo"), extensions: ["txt"] },
         ],
       });
       if (!path) return;
       await writeTextFile(path, lines.join("\n") + "\n");
-      status = `Lista salvata in ${path}`;
+      status = t("Lista salvata in {percorso}", { percorso: path });
     } catch (e) {
-      status = "Errore nel salvataggio della lista: " + e;
+      status = t("Errore nel salvataggio della lista: {err}", { err: String(e) });
     }
   }
   async function openExplore(d: DocumentItem) {
     if (!d.doi && !(d.title ?? "").trim()) {
-      status = "Serve un DOI o almeno un titolo per esplorare le citazioni";
+      status = t("Serve un DOI o almeno un titolo per esplorare le citazioni");
       return;
     }
     exploreStack = [];
@@ -1740,11 +1850,15 @@
       if (mapPop && mapPop.r.external_id === r.external_id)
         mapPop = { ...mapPop, r: { ...mapPop.r, in_library: true } };
       status =
-        res === "added_pdf" ? "Aggiunto con PDF ✓" : res === "added_ref" ? "Aggiunto (solo metadati) ✓" : "Già presente";
+        res === "added_pdf"
+          ? t("Aggiunto con PDF ✓")
+          : res === "added_ref"
+            ? t("Aggiunto (solo metadati) ✓")
+            : t("Già presente");
       await loadDocs();
       await loadSidebar();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       addingExt = null;
     }
@@ -1756,7 +1870,7 @@
     const url = pdfUrlInput.trim();
     if (!url) return;
     if (!/^https:\/\//i.test(url)) {
-      status = "Serve un link diretto al PDF che inizia con https://";
+      status = t("Serve un link diretto al PDF che inizia con https://");
       return;
     }
     addingExt = r.external_id;
@@ -1768,10 +1882,10 @@
         exploreData = { ...exploreData, references: mark(exploreData.references), citations: mark(exploreData.citations) };
       status =
         res === "added_pdf"
-          ? "Aggiunto col PDF ✓"
+          ? t("Aggiunto col PDF ✓")
           : res === "added_ref"
-            ? "Il link non era un PDF diretto: salvato come riferimento (controlla l'URL)"
-            : "Già presente";
+            ? t("Il link non era un PDF diretto: salvato come riferimento (controlla l'URL)")
+            : t("Già presente");
       if (res !== "added_ref") {
         pdfInputFor = null;
         pdfUrlInput = "";
@@ -1779,7 +1893,7 @@
       await loadDocs();
       await loadSidebar();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       addingExt = null;
     }
@@ -1787,11 +1901,13 @@
   /** Best-effort: fill the PDF-URL field from the clipboard (falls back to manual paste). */
   async function pastePdfUrlFromClipboard() {
     try {
-      const t = await navigator.clipboard.readText();
-      if (t && t.trim()) pdfUrlInput = t.trim();
-      else status = "Appunti vuoti — copia prima il link del PDF";
+      // `clip`, non `t`: una variabile locale chiamata `t` ombreggerebbe la
+      // funzione di traduzione usata due righe piu' sotto.
+      const clip = await navigator.clipboard.readText();
+      if (clip && clip.trim()) pdfUrlInput = clip.trim();
+      else status = t("Appunti vuoti — copia prima il link del PDF");
     } catch {
-      status = "Non riesco a leggere gli appunti: incolla con Ctrl+V";
+      status = t("Non riesco a leggere gli appunti: incolla con Ctrl+V");
     }
   }
 
@@ -1810,11 +1926,12 @@
   }
   async function pasteUrlFromClipboard() {
     try {
-      const t = await navigator.clipboard.readText();
-      if (t && t.trim()) urlInput = t.trim();
-      else status = "Appunti vuoti — copia prima il link del PDF";
+      // `clip`, non `t`: evita di ombreggiare la funzione di traduzione.
+      const clip = await navigator.clipboard.readText();
+      if (clip && clip.trim()) urlInput = clip.trim();
+      else status = t("Appunti vuoti — copia prima il link del PDF");
     } catch {
-      status = "Non riesco a leggere gli appunti: incolla con Ctrl+V";
+      status = t("Non riesco a leggere gli appunti: incolla con Ctrl+V");
     }
   }
   async function doAddFromUrl() {
@@ -1825,10 +1942,10 @@
       const r = await addFromUrl(u);
       status =
         r === "added"
-          ? "PDF agganciato alla libreria ✓"
+          ? t("PDF agganciato alla libreria ✓")
           : r === "duplicate"
-            ? "Già presente in libreria"
-            : "Non sembra un PDF diretto — usa il link che termina in .pdf";
+            ? t("Già presente in libreria")
+            : t("Non sembra un PDF diretto — usa il link che termina in .pdf");
       if (r === "added") {
         urlInput = "";
         urlModal = false;
@@ -1837,7 +1954,7 @@
         await loadSidebar();
       }
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       urlBusy = false;
     }
@@ -1846,7 +1963,7 @@
     try {
       connectorInfo = await setConnectorEnabled(enabled);
     } catch (e) {
-      status = "Errore connettore: " + e;
+      status = t("Errore connettore: {err}", { err: String(e) });
     }
   }
 
@@ -1892,22 +2009,22 @@
     if (!clipOffer || clipBusy) return;
     const u = clipOffer;
     clipBusy = true;
-    status = "Aggancio dagli appunti…";
+    status = t("Aggancio dagli appunti…");
     try {
       const r = await addFromUrl(u);
       status =
         r === "added"
-          ? "PDF agganciato dagli appunti ✓"
+          ? t("PDF agganciato dagli appunti ✓")
           : r === "duplicate"
-            ? "Già presente in libreria"
-            : "Quel link non è un PDF diretto";
+            ? t("Già presente in libreria")
+            : t("Quel link non è un PDF diretto");
       if (r === "added") {
         await loadDocs();
         await loadStatus();
         await loadSidebar();
       }
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       clipBusy = false;
       clipOffer = null;
@@ -1952,9 +2069,9 @@
     if (!bookmarklet) return;
     try {
       await navigator.clipboard.writeText(bookmarklet);
-      status = "Bookmarklet copiato — crea un preferito e incolla questo come indirizzo";
+      status = t("Bookmarklet copiato — crea un preferito e incolla questo come indirizzo");
     } catch {
-      status = "Copia non riuscita";
+      status = t("Copia non riuscita");
     }
   }
   async function openCitations(d: DocumentItem) {
@@ -1965,7 +2082,7 @@
     try {
       citData = await citationLinks(d.id);
     } catch (e) {
-      status = "Errore riferimenti: " + e;
+      status = t("Errore riferimenti: {err}", { err: String(e) });
       citModal = false;
     } finally {
       citLoading = false;
@@ -2001,7 +2118,7 @@
   async function batchFindPdf(targets: DocumentItem[]) {
     const list = targets.filter((d) => !d.has_file);
     if (!list.length) {
-      status = "Nessun riferimento senza PDF qui";
+      status = t("Nessun riferimento senza PDF qui");
       return;
     }
     if (pdfBatch) return; // one sweep at a time
@@ -2025,11 +2142,12 @@
       done++;
       pdfBatch = { done, total: list.length, found };
     }
-    const parts = [`${found} PDF allegati su ${list.length}`];
-    if (dup) parts.push(`${dup} già in libreria altrove`);
-    if (miss) parts.push(`${miss} senza copia Open Access`);
-    if (err) parts.push(`${err} errori`);
-    status = "Trova PDF: " + parts.join(" · ") + (pdfBatchCancel ? " · interrotto" : "");
+    const parts = [t("{trovati} PDF allegati su {totale}", { trovati: found, totale: list.length })];
+    if (dup) parts.push(tp(dup, "1 già in libreria altrove", "{n} già in libreria altrove"));
+    if (miss) parts.push(tp(miss, "1 senza copia Open Access", "{n} senza copia Open Access"));
+    if (err) parts.push(tp(err, "1 errore", "{n} errori"));
+    if (pdfBatchCancel) parts.push(t("interrotto"));
+    status = t("Trova PDF: {dettaglio}", { dettaglio: parts.join(SEP) });
     pdfBatch = null;
     await loadDocs();
     await loadSidebar();
@@ -2040,7 +2158,7 @@
       const all = await listDocuments();
       await batchFindPdf(all.filter((d) => !d.has_file));
     } catch (e) {
-      status = "Errore Trova PDF: " + e;
+      status = t("Errore Trova PDF: {err}", { err: String(e) });
     }
   }
 
@@ -2048,19 +2166,19 @@
     const lines = idText.split("\n").map((s) => s.trim()).filter(Boolean);
     if (!lines.length) return;
     addingIds = true;
-    status = `Recupero ${lines.length} riferimenti…`;
+    status = tp(lines.length, "Recupero 1 riferimento…", "Recupero {n} riferimenti…");
     try {
       const res = await addByIdentifiers(lines);
-      const parts = [`${res.added} aggiunti`];
-      if (res.skipped) parts.push(`${res.skipped} già presenti`);
-      if (res.errors.length) parts.push(`${res.errors.length} non trovati`);
-      status = parts.join(" · ");
+      const parts = [tp(res.added, "1 aggiunto", "{n} aggiunti")];
+      if (res.skipped) parts.push(tp(res.skipped, "1 già presente", "{n} già presenti"));
+      if (res.errors.length) parts.push(tp(res.errors.length, "1 non trovato", "{n} non trovati"));
+      status = parts.join(SEP);
       idText = "";
       idModal = false;
       await loadDocs();
       await loadSidebar();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       addingIds = false;
     }
@@ -2098,6 +2216,8 @@
       aiModel = a.model;
       aiEmbedGpu = a.embed_gpu;
       aiEmbedBatch = a.embed_batch;
+      aiLang = a.lang ?? "auto";
+      aiLangEffective = a.lang_effective ?? "it";
     } catch {
       /* ignore */
     }
@@ -2121,11 +2241,11 @@
   async function saveSettings() {
     // Save independently: a discovery hiccup must not silently block the AI save
     // (or vice versa) — that would leave the user thinking they enabled the AI.
-    let err = "";
+    const errs: string[] = [];
     try {
       await setDiscoverySettings(discEnabled, discEmail);
     } catch (e) {
-      err = "ricerca online: " + e;
+      errs.push(t("ricerca online: {err}", { err: String(e) }));
     }
     try {
       await setAiSettings({
@@ -2136,12 +2256,15 @@
         model: aiModel,
         embed_gpu: aiEmbedGpu,
         embed_batch: aiEmbedBatch,
+        lang: aiLang,
       });
     } catch (e) {
-      err = err ? `${err}; AI: ${e}` : "AI: " + e;
+      errs.push(t("AI: {err}", { err: String(e) }));
     }
     settingsModal = false;
-    status = err ? "Impostazioni salvate con errori — " + err : "Impostazioni salvate";
+    status = errs.length
+      ? t("Impostazioni salvate con errori — {dettaglio}", { dettaglio: errs.join("; ") })
+      : t("Impostazioni salvate");
     refreshAiStatus();
   }
   async function saveKey(name: string) {
@@ -2151,21 +2274,21 @@
       hasKey[name] = v.trim().length > 0;
       keyInput[name] = "";
       keyEditing[name] = false;
-      status = "Chiave salvata nel keychain ✓";
+      status = t("Chiave salvata nel keychain ✓");
     } catch (e) {
-      status = "Errore salvataggio chiave: " + e;
+      status = t("Errore salvataggio chiave: {err}", { err: String(e) });
     }
   }
   async function clearKey(name: string) {
-    if (!(await confirmAsk("Rimuovere questa chiave API dal keychain?", "Rimuovi"))) return;
+    if (!(await confirmAsk(t("Rimuovere questa chiave API dal keychain?"), t("Rimuovi")))) return;
     try {
       await setApiKey(name, "");
       hasKey[name] = false;
       keyEditing[name] = false;
       keyInput[name] = "";
-      status = "Chiave rimossa dal keychain";
+      status = t("Chiave rimossa dal keychain");
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     }
   }
   async function verifyProvider(provider: AiProvider) {
@@ -2220,6 +2343,7 @@
         model: aiModel,
         embed_gpu: aiEmbedGpu,
         embed_batch: aiEmbedBatch,
+        lang: aiLang,
       });
     } catch {
       /* non-fatal */
@@ -2228,10 +2352,10 @@
   async function startServer(provider: AiProvider) {
     const name = provider === "lmstudio" ? "LM Studio" : "Ollama";
     await persistAi(); // so ai_status (and the header chip) reflect this provider
-    status = `Avvio del server ${name}…`;
+    status = t("Avvio del server {nome}…", { nome: name });
     try {
       await aiServerStart(provider);
-      status = `${name}: avvio richiesto`;
+      status = t("{nome}: avvio richiesto", { nome: name });
       // Poll: a cold start can take a few seconds to bind the port.
       // verifyProvider also refreshes the header indicator (in its finally).
       for (let i = 0; i < 6; i++) {
@@ -2239,12 +2363,12 @@
         await verifyProvider(provider);
         const up = provider === "lmstudio" ? lmstudioModels : ollamaModels;
         if (up !== null) {
-          status = `${name}: avviato`;
+          status = t("{nome}: avviato", { nome: name });
           break;
         }
       }
     } catch (e) {
-      status = "Avvio non riuscito: " + e;
+      status = t("Avvio non riuscito: {err}", { err: String(e) });
     }
   }
   async function stopServer(provider: AiProvider) {
@@ -2256,10 +2380,10 @@
       // and leave the GPU memory allocated.
       try { await aiUnloadModels(); } catch { /* best-effort */ }
       await aiServerStop(provider);
-      status = `${name}: fermato`;
+      status = t("{nome}: fermato", { nome: name });
       setTimeout(() => verifyProvider(provider), 1000);
     } catch (e) {
-      status = "Arresto non riuscito: " + e;
+      status = t("Arresto non riuscito: {err}", { err: String(e) });
     }
   }
   /** Toolbar/radial: free the GPU by unloading the active provider's models from
@@ -2267,10 +2391,13 @@
   async function freeGpuMemory() {
     try {
       const n = await aiUnloadModels();
-      status = n > 0 ? `GPU liberata — ${n} modell${n === 1 ? "o" : "i"} scaricat${n === 1 ? "o" : "i"} dalla VRAM ✓` : "GPU liberata (nessun modello era caricato) ✓";
+      status =
+        n > 0
+          ? tp(n, "GPU liberata — 1 modello scaricato dalla VRAM ✓", "GPU liberata — {n} modelli scaricati dalla VRAM ✓")
+          : t("GPU liberata (nessun modello era caricato) ✓");
       setTimeout(() => refreshAiStatus(), 800);
     } catch (e) {
-      status = "Impossibile liberare la GPU: " + e;
+      status = t("Impossibile liberare la GPU: {err}", { err: String(e) });
     }
   }
   /** Toolbar/radial: fully stop the AI — unload models, stop the local server, and
@@ -2283,7 +2410,7 @@
     try {
       await persistAi();
     } catch { /* ignore */ }
-    status = "AI fermata: modelli scaricati, server arrestato, AI disattivata — il chip «AI off» in alto la riattiva";
+    status = t("AI fermata: modelli scaricati, server arrestato, AI disattivata — il chip «AI off» in alto la riattiva");
     setTimeout(() => refreshAiStatus(), 800);
   }
   /** One-click re-enable from the header chip / radial: flip the saved switch back
@@ -2298,41 +2425,41 @@
       // persistAi swallows its own errors — trust the LIVE state, not the absence
       // of an exception, before claiming success.
       if (!aiStat?.enabled) {
-        status = "Impossibile attivare l'AI: il salvataggio non è riuscito — riprova dalle Impostazioni";
+        status = t("Impossibile attivare l'AI: il salvataggio non è riuscito — riprova dalle Impostazioni");
         return;
       }
       status = aiStat.reachable
-        ? "AI attivata ✓"
-        : "AI attivata — il server non risponde: avvialo dalle Impostazioni (clic sul chip AI)";
+        ? t("AI attivata ✓")
+        : t("AI attivata — il server non risponde: avvialo dalle Impostazioni (clic sul chip AI)");
     } catch (e) {
-      status = "Impossibile attivare l'AI: " + e;
+      status = t("Impossibile attivare l'AI: {err}", { err: String(e) });
     }
   }
   async function summarizeDoc(doc: DocumentItem) {
     aiBusy = doc.id;
     status = doc.has_summary
-      ? "Rigenero il riassunto… (quello esistente verrà sostituito)"
-      : "Riassunto in corso… (può richiedere un momento)";
+      ? t("Rigenero il riassunto… (quello esistente verrà sostituito)")
+      : t("Riassunto in corso… (può richiedere un momento)");
     try {
       await summarizeDocument(doc.id);
-      status = 'Riassunto generato — aprilo da "Modifica metadati"';
+      status = t("Riassunto generato — aprilo da \"Modifica metadati\"");
       await loadDocs(); // refresh the ✦ indicator
     } catch (e) {
-      status = "Errore AI: " + e;
+      status = t("Errore AI: {err}", { err: String(e) });
     } finally {
       aiBusy = null;
     }
   }
   async function autotagDoc(doc: DocumentItem) {
     aiBusy = doc.id;
-    status = "Tag automatici in corso…";
+    status = t("Tag automatici in corso…");
     try {
       const tags = await autotagDocument(doc.id);
-      status = "Tag aggiunti: " + tags.join(", ");
+      status = t("Tag aggiunti: {elenco}", { elenco: tags.join(", ") });
       await loadDocs();
       await loadSidebar();
     } catch (e) {
-      status = "Errore AI: " + e;
+      status = t("Errore AI: {err}", { err: String(e) });
     } finally {
       aiBusy = null;
     }
@@ -2354,8 +2481,8 @@
     if (!ids.length) {
       status =
         kind === "summary"
-          ? "Tutti i selezionati hanno già un riassunto AI (per rifarne uno: tasto destro sul singolo documento)"
-          : "Tutti i selezionati hanno già dei tag";
+          ? t("Tutti i selezionati hanno già un riassunto AI (per rifarne uno: tasto destro sul singolo documento)")
+          : t("Tutti i selezionati hanno già dei tag");
       return;
     }
     batchCancel = false;
@@ -2384,12 +2511,17 @@
     // Refresh so tag chips / ✦ summary indicators appear.
     await loadDocs();
     if (kind === "tags") await loadSidebar();
-    const label = kind === "summary" ? "Riassunti" : "Tag automatici";
-    status =
-      `${label}: ${ok} completati` +
-      (skipped ? ` · ${skipped} saltati (già presenti)` : "") +
-      (errs ? ` · ${errs} errori (es. ${lastErr})` : "") +
-      (broke ? " · interrotto" : "");
+    // Il nome della lavorazione era una parola cucita dentro la frase: due frasi
+    // intere, così l'inglese resta idiomatico.
+    const parts = [
+      kind === "summary"
+        ? tp(ok, "Riassunti: 1 completato", "Riassunti: {n} completati")
+        : tp(ok, "Tag automatici: 1 completato", "Tag automatici: {n} completati"),
+    ];
+    if (skipped) parts.push(tp(skipped, "1 saltato (già presente)", "{n} saltati (già presenti)"));
+    if (errs) parts.push(tp(errs, "1 errore (es. {err})", "{n} errori (es. {err})", { err: lastErr }));
+    if (broke) parts.push(t("interrotto"));
+    status = parts.join(SEP);
   }
   async function runDiscover() {
     // Allow searching by query OR author alone.
@@ -2406,9 +2538,9 @@
         oaOnly: discoverOaOnly,
         sort: discoverSort,
       });
-      status = `${discoverResults.length} risultati`;
+      status = tp(discoverResults.length, "1 risultato", "{n} risultati");
     } catch (e) {
-      status = "" + e;
+      status = "" + e; /* i18n-exempt: nessun testo nostro, solo l'errore */
     } finally {
       discovering = false;
     }
@@ -2441,9 +2573,9 @@
         seenIds: discoverResults.map((r) => r.external_id),
       });
       await loadSaved();
-      status = `Ricerca salvata: «${name}»`;
+      status = t("Ricerca salvata: «{nome}»", { nome: name });
     } catch (e) {
-      status = "Errore salvataggio ricerca: " + e;
+      status = t("Errore salvataggio ricerca: {err}", { err: String(e) });
     } finally {
       savingSearch = false;
     }
@@ -2473,17 +2605,19 @@
       discoverNewIds = new Set(run.new_ids);
       status =
         run.new_ids.length > 0
-          ? `${run.new_ids.length} novità su ${run.results.length} risultati`
-          : `Nessuna novità (${run.results.length} risultati)`;
+          ? tp(run.new_ids.length, "1 novità su {tot} risultati", "{n} novità su {tot} risultati", {
+              tot: run.results.length,
+            })
+          : t("Nessuna novità ({tot} risultati)", { tot: run.results.length });
       await loadSaved();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       discovering = false;
     }
   }
   async function removeSaved(s: SavedSearch) {
-    if (!(await confirmAsk(`Eliminare la ricerca salvata «${s.name}»?`))) return;
+    if (!(await confirmAsk(t("Eliminare la ricerca salvata «{nome}»?", { nome: s.name })))) return;
     try {
       await deleteSavedSearch(s.id);
       await loadSaved();
@@ -2507,7 +2641,7 @@
     try {
       novitaGroups = await listNovita();
     } catch (e) {
-      status = "Errore nel caricare le novità: " + e;
+      status = t("Errore nel caricare le novità: {err}", { err: String(e) });
     } finally {
       novitaLoading = false;
     }
@@ -2520,15 +2654,15 @@
       const res = await acceptHit(hitId);
       status =
         res === "added_pdf"
-          ? "Aggiunto alla libreria (PDF scaricato) ✓"
+          ? t("Aggiunto alla libreria (PDF scaricato) ✓")
           : res === "added_ref"
-            ? "Aggiunto come riferimento ✓"
-            : "Era già in libreria";
+            ? t("Aggiunto come riferimento ✓")
+            : t("Era già in libreria");
       dropHitFromFeed(watchId, hitId);
       await refreshNovitaCount();
       loadDocs();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       acceptingHit = null;
       novitaMutating--;
@@ -2541,7 +2675,7 @@
       dropHitFromFeed(watchId, hitId);
       await refreshNovitaCount();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       novitaMutating--;
     }
@@ -2553,7 +2687,7 @@
       novitaGroups = novitaGroups.filter((g) => g.watch_id !== watchId);
       await refreshNovitaCount();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       novitaMutating--;
     }
@@ -2567,14 +2701,14 @@
   async function sweepNovitaNow() {
     if (novitaSweeping) return;
     novitaSweeping = true;
-    status = "Cerco novità negli archivi…";
+    status = t("Cerco novità negli archivi…");
     try {
       const fresh = await sweepWatchesNow();
-      status = fresh > 0 ? `${fresh} nuovi paper trovati` : "Nessuna novità al momento";
+      status = fresh > 0 ? tp(fresh, "1 nuovo paper trovato", "{n} nuovi paper trovati") : t("Nessuna novità al momento");
       novitaGroups = await listNovita();
       await refreshNovitaCount();
     } catch (e) {
-      status = "Errore ricerca novità: " + e;
+      status = t("Errore ricerca novità: {err}", { err: String(e) });
     } finally {
       novitaSweeping = false;
     }
@@ -2594,7 +2728,7 @@
     try {
       await buildRagIndex();
     } catch (e) {
-      status = "Errore indicizzazione: " + e;
+      status = t("Errore indicizzazione: {err}", { err: String(e) });
       ragBuilding = false;
     }
     // completion + progress handled by the "rag-progress" listener
@@ -2608,11 +2742,20 @@
   }
   async function doRebuildIndex() {
     if (ragBuilding) return;
-    if (!(await confirmAsk("Ricostruire l'indice da zero? I passaggi verranno rigenerati — utile per ottenere le pagine sui documenti già indicizzati.", "Ricostruisci", false))) return;
+    if (
+      !(await confirmAsk(
+        t(
+          "Ricostruire l'indice da zero? I passaggi verranno rigenerati — utile per ottenere le pagine sui documenti già indicizzati.",
+        ),
+        t("Ricostruisci"),
+        false,
+      ))
+    )
+      return;
     try {
       await clearRagIndex();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
       return;
     }
     await loadRagStatus();
@@ -2628,7 +2771,7 @@
       askAnswer = r.answer; // normalize to the final, trimmed text
       askSources = r.sources;
     } catch (e) {
-      status = "" + e;
+      status = "" + e; /* i18n-exempt: nessun testo nostro, solo l'errore */
     } finally {
       asking = false;
     }
@@ -2669,14 +2812,14 @@
       );
       status =
         res === "added_pdf"
-          ? "Aggiunto con PDF ✓"
+          ? t("Aggiunto con PDF ✓")
           : res === "added_ref"
-            ? "Aggiunto (solo metadati) ✓"
-            : "Già presente";
+            ? t("Aggiunto (solo metadati) ✓")
+            : t("Già presente");
       await loadDocs();
       await loadSidebar();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     } finally {
       addingExt = null;
     }
@@ -2687,9 +2830,9 @@
     try {
       const text = await citeText([doc.id], format);
       await navigator.clipboard.writeText(text);
-      status = format === "bibtex" ? "BibTeX copiato ✓" : "Citazione copiata ✓";
+      status = format === "bibtex" ? t("BibTeX copiato ✓") : t("Citazione copiata ✓");
     } catch (e) {
-      status = "Errore copia: " + e;
+      status = t("Errore copia: {err}", { err: String(e) });
     }
   }
 
@@ -2699,18 +2842,18 @@
     try {
       const text = await citeText(ids, format);
       if (!text.trim()) {
-        status = "Niente da citare nella selezione";
+        status = t("Niente da citare nella selezione");
         return;
       }
       await navigator.clipboard.writeText(text);
       status =
         format === "bibtex"
-          ? `BibTeX copiato (${ids.length} voci)`
+          ? tp(ids.length, "BibTeX copiato (1 voce)", "BibTeX copiato ({n} voci)")
           : format === "latex"
-            ? `\\cite copiato (${ids.length} chiavi)`
-            : `Citazioni copiate (${ids.length})`;
+            ? tp(ids.length, "\\cite copiato (1 chiave)", "\\cite copiato ({n} chiavi)")
+            : t("Citazioni copiate ({n})", { n: ids.length });
     } catch (e) {
-      status = "Errore copia: " + e;
+      status = t("Errore copia: {err}", { err: String(e) });
     }
   }
 
@@ -2719,24 +2862,25 @@
     if (!doc.citekey) return;
     try {
       await navigator.clipboard.writeText(doc.citekey);
-      status = `Citekey copiata: ${doc.citekey}`;
+      status = t("Citekey copiata: {citekey}", { citekey: doc.citekey });
     } catch (e) {
-      status = "Errore copia: " + e;
+      status = t("Errore copia: {err}", { err: String(e) });
     }
   }
 
   /** Copy the paper's title to the clipboard (quick action from grid/list menus). */
   async function copyTitle(doc: DocumentItem) {
-    const t = (doc.title ?? "").trim();
-    if (!t) {
-      status = "Questo documento non ha un titolo da copiare";
+    // `titolo`, non `t`: qui sotto serve la funzione di traduzione.
+    const titolo = (doc.title ?? "").trim();
+    if (!titolo) {
+      status = t("Questo documento non ha un titolo da copiare");
       return;
     }
     try {
-      await navigator.clipboard.writeText(t);
-      status = "Titolo copiato ✓";
+      await navigator.clipboard.writeText(titolo);
+      status = t("Titolo copiato ✓");
     } catch (e) {
-      status = "Errore copia: " + e;
+      status = t("Errore copia: {err}", { err: String(e) });
     }
   }
 
@@ -2762,7 +2906,7 @@
     try {
       health = await libraryHealth();
     } catch (e) {
-      status = "Errore salute libreria: " + e;
+      status = t("Errore salute libreria: {err}", { err: String(e) });
       careModal = false;
     } finally {
       healthLoading = false;
@@ -2777,16 +2921,23 @@
   let ocrBusy = $state<number | null>(null);
   async function runOcr(id: number) {
     ocrBusy = id;
-    status = "OCR in corso… (può richiedere qualche secondo per documenti lunghi)";
+    status = t("OCR in corso… (può richiedere qualche secondo per documenti lunghi)");
     try {
       const res = await ocrDocument(id);
       status = res.truncated
-        ? `OCR: ${res.chars.toLocaleString()} caratteri dalle prime ${res.pages} di ${res.total_pages} pagine (limite) ✓`
-        : `OCR completato: ${res.chars.toLocaleString()} caratteri da ${res.pages} pagine ✓`;
+        ? t("OCR: {car} caratteri dalle prime {pag} di {tot} pagine (limite) ✓", {
+            car: res.chars.toLocaleString(),
+            pag: res.pages,
+            tot: res.total_pages,
+          })
+        : t("OCR completato: {car} caratteri da {pag} pagine ✓", {
+            car: res.chars.toLocaleString(),
+            pag: res.pages,
+          });
       await loadDocs();
       if (careModal && careTab === "salute") await openHealth();
     } catch (e) {
-      status = "Errore OCR: " + e;
+      status = t("Errore OCR: {err}", { err: String(e) });
     } finally {
       ocrBusy = null;
     }
@@ -2804,32 +2955,36 @@
     try {
       const picked = await open({
         multiple: false,
-        filters: [{ name: "PDF", extensions: ["pdf"] }],
+        filters: [{ name: "PDF" /* i18n-exempt: sigla identica in inglese */, extensions: ["pdf"] }],
         title: `Dov'è finito «${title ?? "questo PDF"}»?`,
       });
       if (typeof picked !== "string") return;
       const res = await relinkDocument(id, picked);
       status =
         res.had_hash && !res.hash_match
-          ? "Ricollegato ✓ — attenzione: il file scelto non è identico all'originale"
-          : "Ricollegato ✓";
+          ? t("Ricollegato ✓ — attenzione: il file scelto non è identico all'originale")
+          : t("Ricollegato ✓");
       await loadDocs();
       if (careModal && careTab === "salute") await openHealth();
       if (res.mappable > 0 && res.old_prefix && res.new_prefix) {
         const ok = await confirmAsk(
-          `Altri ${res.mappable} file mancanti sono nella stessa cartella spostata. Li ricollego tutti? Verifico l'impronta di ciascuno: chi non corrisponde resta com'è.`,
-          "Ricollega tutti",
+          tp(
+            res.mappable,
+            "Un altro file mancante è nella stessa cartella spostata. Lo ricollego? Verifico l'impronta: se non corrisponde resta com'è.",
+            "Altri {n} file mancanti sono nella stessa cartella spostata. Li ricollego tutti? Verifico l'impronta di ciascuno: chi non corrisponde resta com'è.",
+          ),
+          t("Ricollega tutti"),
           false,
         );
         if (ok) {
           const n = await relinkApplyMapping(res.old_prefix, res.new_prefix);
-          status = n === 1 ? "Ricollegato anche 1 altro file ✓" : `Ricollegati anche ${n} file ✓`;
+          status = tp(n, "Ricollegato anche 1 altro file ✓", "Ricollegati anche {n} file ✓");
           await loadDocs();
           if (careModal && careTab === "salute") await openHealth();
         }
       }
     } catch (e) {
-      status = "Non riesco a ricollegare: " + e;
+      status = t("Non riesco a ricollegare: {err}", { err: String(e) });
     } finally {
       relinkBusy = null;
     }
@@ -2846,7 +3001,7 @@
     try {
       gaps = await citationGaps(60);
     } catch (e) {
-      status = "Errore gap citazioni: " + e;
+      status = t("Errore gap citazioni: {err}", { err: String(e) });
       careModal = false;
     } finally {
       gapsLoading = false;
@@ -2860,8 +3015,14 @@
       const s = await resolveReferenceDois();
       status =
         s.resolved > 0
-          ? `DOI riferimenti: ${s.resolved} risolti su ${s.scanned} citazioni (${s.updated_rows} righe aggiornate) — ${s.remaining} citazioni ancora senza DOI.`
-          : `Nessun DOI recuperato su ${s.scanned} citazioni — ${s.remaining} ancora senza DOI.`;
+          ? t(
+              "DOI riferimenti: {ris} risolti su {scan} citazioni ({righe} righe aggiornate) — {rest} citazioni ancora senza DOI.",
+              { ris: s.resolved, scan: s.scanned, righe: s.updated_rows, rest: s.remaining },
+            )
+          : t("Nessun DOI recuperato su {scan} citazioni — {rest} ancora senza DOI.", {
+              scan: s.scanned,
+              rest: s.remaining,
+            });
       // Newly-resolved DOIs can surface fresh gaps: refresh the list in place.
       try {
         gaps = await citationGaps(60);
@@ -2869,7 +3030,7 @@
         /* ignore */
       }
     } catch (e) {
-      status = "Errore risoluzione DOI: " + e;
+      status = t("Errore risoluzione DOI: {err}", { err: String(e) });
     } finally {
       refdoiRunning = false;
       refdoiProg = null;
@@ -2887,9 +3048,9 @@
   async function copyDoi(doi: string) {
     try {
       await navigator.clipboard.writeText(doi);
-      status = "DOI copiato ✓";
+      status = t("DOI copiato ✓");
     } catch {
-      status = "Impossibile copiare";
+      status = t("Impossibile copiare");
     }
   }
 
@@ -2899,9 +3060,9 @@
     const path = await save({
       defaultPath: "references.bib",
       filters: [
-        { name: "BibTeX", extensions: ["bib"] },
-        { name: "RIS", extensions: ["ris"] },
-        { name: "CSL-JSON", extensions: ["json"] },
+        { name: "BibTeX" /* i18n-exempt: nome di formato identico in inglese */, extensions: ["bib"] },
+        { name: "RIS" /* i18n-exempt: sigla identica in inglese */, extensions: ["ris"] },
+        { name: "CSL-JSON" /* i18n-exempt: sigla identica in inglese */, extensions: ["json"] },
       ],
     });
     if (!path) return;
@@ -2909,9 +3070,11 @@
     const format = ext === "ris" ? "ris" : ext === "json" ? "csljson" : "bibtex";
     try {
       await exportCitations(ids, format, path);
-      status = `Esportati ${ids.length} riferimenti (${format})`;
+      status = tp(ids.length, "Esportato 1 riferimento ({formato})", "Esportati {n} riferimenti ({formato})", {
+        formato: format /* i18n-exempt: codice del formato, non testo */,
+      });
     } catch (e) {
-      status = "Errore export: " + e;
+      status = t("Errore export: {err}", { err: String(e) });
     }
   }
 
@@ -2933,15 +3096,20 @@
     // Export the current selection if any, otherwise everything shown.
     const ids = selected.length ? selected : displayed.map((d) => d.id);
     if (!ids.length) {
-      status = "Niente da esportare";
+      status = t("Niente da esportare");
       return;
     }
     exportingObsidian = true;
     try {
       const n = await exportToObsidian(ids, vault);
-      status = `Esportate ${n} note in Obsidian (${baseName(vault)}/Scriptorium)`;
+      status = tp(
+        n,
+        "Esportata 1 nota in Obsidian ({cartella}/Scriptorium)",
+        "Esportate {n} note in Obsidian ({cartella}/Scriptorium)",
+        { cartella: baseName(vault) },
+      );
     } catch (e) {
-      status = "Errore export Obsidian: " + e;
+      status = t("Errore export Obsidian: {err}", { err: String(e) });
     } finally {
       exportingObsidian = false;
     }
@@ -2953,7 +3121,7 @@
     if (typeof dir !== "string") return;
     await setWatchedFolder(dir);
     watchedFolder = dir;
-    status = "Cartella sorvegliata attiva";
+    status = t("Cartella sorvegliata attiva");
   }
   async function clearWatchedFolder() {
     await setWatchedFolder(null);
@@ -3004,12 +3172,13 @@
       await loadSidebar();
       await loadDocs(); // i chip sulle card cambiano nome/colore
     } catch (e) {
-      status = "" + e;
+      status = "" + e; /* i18n-exempt: nessun testo nostro, solo l'errore */
     }
   }
 
   async function removeTag(tag: Tag) {
-    if (!(await confirmAsk(`Eliminare il tag «${tag.name}»? Verrà tolto da tutti i documenti.`))) return;
+    if (!(await confirmAsk(t("Eliminare il tag «{nome}»? Verrà tolto da tutti i documenti.", { nome: tag.name }))))
+      return;
     await deleteTag(tag.id);
     tagFilter = tagFilter.filter((id) => id !== tag.id);
     await loadDocs();
@@ -3018,7 +3187,8 @@
 
   async function addDocToCollection(doc: DocumentItem, coll: Collection) {
     await addToCollection(coll.id, doc.id);
-    status = `Aggiunto a "${coll.name}"`;
+    // Virgolette caporali come nel resto dell'app (prima erano dritte).
+    status = t("Aggiunto a «{raccolta}»", { raccolta: coll.name });
   }
 
   async function makeCollection() {
@@ -3041,7 +3211,15 @@
   }
 
   async function removeColl(coll: Collection) {
-    if (!(await confirmAsk(`Eliminare la raccolta «${coll.name}»? I documenti restano in libreria (le eventuali sotto-raccolte risalgono di un livello).`))) return;
+    if (
+      !(await confirmAsk(
+        t(
+          "Eliminare la raccolta «{nome}»? I documenti restano in libreria (le eventuali sotto-raccolte risalgono di un livello).",
+          { nome: coll.name },
+        ),
+      ))
+    )
+      return;
     await deleteCollection(coll.id);
     if (filter.kind === "collection" && filter.id === coll.id) filter = { kind: "all" };
     await loadDocs();
@@ -3059,7 +3237,7 @@
     try {
       await revealDocument(doc.id);
     } catch {
-      status = "Questo elemento non ha un file da mostrare";
+      status = t("Questo elemento non ha un file da mostrare");
     }
   }
 
@@ -3173,6 +3351,11 @@
     loadSidebar();
     loadConnector();
     checkClipboard(); // magari l'app è stata aperta subito dopo aver copiato un link
+    applyLangAttribute(); // <html lang> allineato alla lingua scelta
+    // Rispecchia la lingua nel DB anche se l'utente non tocca mai il selettore:
+    // altrimenti al primo avvio «lingua AI = come l'interfaccia» non saprebbe
+    // cosa seguire e ricadrebbe sull'italiano.
+    void setUiLang(i18n.locale).catch(() => {});
     // Nessun controllo aggiornamenti all'avvio: per scelta esplicita l'app non
     // contatta GitHub se non premi «Controlla aggiornamenti». (Prima c'era una
     // verifica silenziosa una volta al giorno.)
@@ -3191,6 +3374,8 @@
         aiModel = a.model;
         aiEmbedGpu = a.embed_gpu;
         aiEmbedBatch = a.embed_batch;
+        aiLang = a.lang ?? "auto";
+        aiLangEffective = a.lang_effective ?? "it";
         refreshAiStatus();
       })
       .catch(() => {});
@@ -3221,7 +3406,11 @@
           return;
         }
         if (bibs.length) {
-          status = `${bibs.length} file di bibliografia ignorati: trascina PDF, oppure usa Importa → Da bibliografia o progetto…`;
+          status = tp(
+            bibs.length,
+            "1 file di bibliografia ignorato: trascina PDF, oppure usa Importa → Da bibliografia o progetto…",
+            "{n} file di bibliografia ignorati: trascina PDF, oppure usa Importa → Da bibliografia o progetto…",
+          );
         }
         handleImport(pdfs);
       } else dragOver = false;
@@ -3250,20 +3439,20 @@
     watchedP = listen<string>("watched-imported", (e) => {
       const name = (e.payload ?? "").trim();
       status = name
-        ? `Importato dalla cartella sorvegliata: ${name} ✓`
-        : "Importato un PDF dalla cartella sorvegliata ✓";
+        ? t("Importato dalla cartella sorvegliata: {nome} ✓", { nome: name })
+        : t("Importato un PDF dalla cartella sorvegliata ✓");
     });
     // A PDF grabbed from the browser via the bookmarklet connector.
     connP = listen<string>("connector-added", (e) => {
       const s = e.payload;
       status =
         s === "added"
-          ? "PDF agganciato dal browser ✓"
+          ? t("PDF agganciato dal browser ✓")
           : s === "duplicate"
-            ? "Dal browser: già presente in libreria"
+            ? t("Dal browser: già presente in libreria")
             : s === "not_pdf"
-              ? "Dal browser: il link non è un PDF diretto"
-              : "Dal browser: errore nel download";
+              ? t("Dal browser: il link non è un PDF diretto")
+              : t("Dal browser: errore nel download");
     });
     ragP = listen<{ done: number; total: number; phase: string }>("rag-progress", (e) => {
       ragProg = { done: e.payload.done, total: e.payload.total };
@@ -3425,7 +3614,7 @@
       openDocument(d);
     } else {
       lastReadDoc = null;
-      status = "Nessun PDF letto di recente.";
+      status = t("Nessun PDF letto di recente.");
     }
   }
 
@@ -3447,12 +3636,12 @@
       const r = await attachFromUrl(refPanel.doc.id, u);
       status =
         r === "attached"
-          ? "PDF allegato al riferimento ✓"
+          ? t("PDF allegato al riferimento ✓")
           : r === "already"
-            ? "Questo documento ha già un PDF"
+            ? t("Questo documento ha già un PDF")
             : r === "duplicate"
-              ? "Quel PDF è già in libreria (in un altro documento): usa Strumenti → Duplicati per unirli"
-              : "Quel link non è un PDF diretto";
+              ? t("Quel PDF è già in libreria (in un altro documento): usa Strumenti → Duplicati per unirli")
+              : t("Quel link non è un PDF diretto");
       if (r === "attached") {
         await loadDocs();
         await loadSidebar();
@@ -3462,7 +3651,7 @@
         return;
       }
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     }
     if (refPanel) refPanel.busy = false;
   }
@@ -3470,10 +3659,11 @@
   async function refPaste() {
     if (!refPanel) return;
     try {
-      const t = await navigator.clipboard.readText();
-      if (t && t.trim()) refPanel.url = t.trim();
+      // `clip`, non `t`: evita di ombreggiare la funzione di traduzione.
+      const clip = await navigator.clipboard.readText();
+      if (clip && clip.trim()) refPanel.url = clip.trim();
     } catch {
-      status = "Non riesco a leggere gli appunti: incolla con Ctrl+V";
+      status = t("Non riesco a leggere gli appunti: incolla con Ctrl+V");
     }
   }
 
@@ -3487,13 +3677,13 @@
     try {
       const p = await documentPath(doc.id);
       if (!p) {
-        status = "Questo riferimento non ha un file PDF";
+        status = t("Questo riferimento non ha un file PDF");
         return;
       }
       await navigator.clipboard.writeText(p);
-      status = "Percorso copiato ✓";
+      status = t("Percorso copiato ✓");
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     }
   }
 
@@ -3502,13 +3692,19 @@
     if (filter.kind !== "collection" || filter.id == null) return;
     try {
       await removeFromCollection(filter.id, doc.id);
-      status = `Rimosso da «${filter.label}»`;
+      status = t("Rimosso da «{dove}»", { dove: filter.label ?? "" });
       await loadDocs();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     }
   }
 
+  // I `value` NON si traducono: sono al tempo stesso il selettore CSS
+  // (`[data-theme="forest"]`) e la chiave scritta in localStorage — tradurli
+  // significherebbe perdere il tema scelto cambiando lingua. Le `label` restano
+  // in italiano perché sono le chiavi di traduzione, risolte con `t(th.label)`
+  // dal radiale e dalla palette.
+  /* i18n-exempt: `value` = selettore CSS + chiave localStorage */
   const THEMES: { value: string; label: string; dark: boolean }[] = [
     { value: "paper", label: "Carta", dark: false },
     { value: "sepia", label: "Seppia", dark: false },
@@ -3526,82 +3722,82 @@
   /** Doc radial: everything the old flat context menu offered, organized in orbits. */
   function buildDocRadial(d: DocumentItem): RadialItem[] {
     const shareKids: RadialItem[] = [
-      { id: "sh-wa", label: "WhatsApp", hint: "Copia il PDF e apre WhatsApp: incolla con Ctrl+V", action: () => shareDoc("whatsapp", [d.id], d.title ?? "Documento PDF", paperLink(d)) },
-      { id: "sh-tm", label: "Teams", hint: "Copia il PDF e apre Teams", action: () => shareDoc("teams", [d.id], d.title ?? "Documento PDF", paperLink(d)) },
-      { id: "sh-gm", label: "Gmail", hint: "Copia il PDF e apre Gmail", action: () => shareDoc("gmail", [d.id], d.title ?? "Documento PDF", paperLink(d)) },
-      { id: "sh-ol", label: "Outlook", hint: "Outlook desktop: PDF allegato direttamente", action: () => shareDoc("outlook", [d.id], d.title ?? "Documento PDF", paperLink(d)) },
-      { id: "sh-pr", label: "Stampa", icon: I.print, disabled: printing, action: () => printOne(d) },
-      { id: "sh-rv", label: "Mostra nella cartella", icon: I.reveal, action: () => revealDoc(d) },
-      { id: "sh-cp", label: "Copia percorso", icon: I.copy, hint: "Copia il percorso del file PDF", action: () => copyPath(d) },
+      { id: "sh-wa", label: "WhatsApp" /* i18n-exempt: nome proprio */, hint: t("Copia il PDF e apre WhatsApp: incolla con Ctrl+V"), action: () => shareDoc("whatsapp", [d.id], d.title ?? t("Documento PDF"), paperLink(d)) },
+      { id: "sh-tm", label: "Teams" /* i18n-exempt: nome proprio */, hint: t("Copia il PDF e apre Teams"), action: () => shareDoc("teams", [d.id], d.title ?? t("Documento PDF"), paperLink(d)) },
+      { id: "sh-gm", label: "Gmail" /* i18n-exempt: nome proprio */, hint: t("Copia il PDF e apre Gmail"), action: () => shareDoc("gmail", [d.id], d.title ?? t("Documento PDF"), paperLink(d)) },
+      { id: "sh-ol", label: "Outlook" /* i18n-exempt: nome proprio */, hint: t("Outlook desktop: PDF allegato direttamente"), action: () => shareDoc("outlook", [d.id], d.title ?? t("Documento PDF"), paperLink(d)) },
+      { id: "sh-pr", label: t("Stampa"), icon: I.print, disabled: printing, action: () => printOne(d) },
+      { id: "sh-rv", label: t("Mostra nella cartella"), icon: I.reveal, action: () => revealDoc(d) },
+      { id: "sh-cp", label: t("Copia percorso"), icon: I.copy, hint: t("Copia il percorso del file PDF"), action: () => copyPath(d) },
     ];
     const citeKids: RadialItem[] = [
-      { id: "ci-apa", label: "Copia APA", action: () => copyCite(d, "apa") },
-      { id: "ci-ieee", label: "Copia IEEE", action: () => copyCite(d, "ieee") },
-      { id: "ci-bib", label: "Copia BibTeX", action: () => copyCite(d, "bibtex") },
-      { id: "ci-key", label: "Copia citekey", hint: d.citekey ?? undefined, action: () => copyCite(d, "citekey") },
-      { id: "ci-tex", label: "Copia \\cite{…}", hint: "Pronto per LaTeX", action: () => copyCite(d, "latex") },
-      { id: "ci-pan", label: "Copia [@…]", hint: "Pronto per Pandoc/Quarto", action: () => copyCite(d, "pandoc") },
-      { id: "ci-ref", label: "Riferimenti e citazioni", hint: "Bibliografia del paper e chi lo cita nella tua libreria", action: () => openCitations(d) },
+      { id: "ci-apa", label: t("Copia APA"), action: () => copyCite(d, "apa") },
+      { id: "ci-ieee", label: t("Copia IEEE"), action: () => copyCite(d, "ieee") },
+      { id: "ci-bib", label: t("Copia BibTeX"), action: () => copyCite(d, "bibtex") },
+      { id: "ci-key", label: t("Copia citekey"), hint: d.citekey ?? undefined, action: () => copyCite(d, "citekey") },
+      { id: "ci-tex", label: t("Copia \\cite{…}"), hint: t("Pronto per LaTeX"), action: () => copyCite(d, "latex") },
+      { id: "ci-pan", label: t("Copia [@…]"), hint: t("Pronto per Pandoc/Quarto"), action: () => copyCite(d, "pandoc") },
+      { id: "ci-ref", label: t("Riferimenti e citazioni"), hint: t("Bibliografia del paper e chi lo cita nella tua libreria"), action: () => openCitations(d) },
     ];
     citeKids.push({
       id: "ci-exp",
-      label: "Esplora citazioni (online)",
+      label: t("Esplora citazioni (online)"),
       hint: d.doi
-        ? "Snowball su OpenAlex: citazioni da e verso questo paper, aggiungile alla libreria"
-        : "Snowball su OpenAlex — senza DOI il paper si aggancia per titolo (corrispondenza rigorosa)",
+        ? t("Snowball su OpenAlex: citazioni da e verso questo paper, aggiungile alla libreria")
+        : t("Snowball su OpenAlex — senza DOI il paper si aggancia per titolo (corrispondenza rigorosa)"),
       disabled: !d.doi && !(d.title ?? "").trim(),
       action: () => openExplore(d),
     });
     const aiKids: RadialItem[] = [
       {
         id: "ai-sum",
-        label: d.has_summary ? "Riassunto ✓ (rigenera)" : "Riassumi",
+        label: d.has_summary ? t("Riassunto ✓ (rigenera)") : t("Riassumi"),
         checked: d.has_summary,
-        hint: d.has_summary ? "Già presente: cliccando lo rigeneri e sovrascrivi" : "Riassunto in italiano con l'AI locale",
+        hint: d.has_summary ? t("Già presente: cliccando lo rigeneri e sovrascrivi") : t("Riassunto in italiano con l'AI locale"),
         disabled: !aiStat?.enabled || aiBusyAny,
         action: () => summarizeDoc(d),
       },
       {
         id: "ai-tag",
-        label: d.tags.length ? "Tag automatici (ha già tag)" : "Tag automatici",
+        label: d.tags.length ? t("Tag automatici (ha già tag)") : t("Tag automatici"),
         checked: d.tags.length > 0,
-        hint: d.tags.length ? `Ha già ${d.tags.length} tag: la chiamata può aggiungerne altri` : "Suggerisce e assegna tag tematici",
+        hint: d.tags.length ? t("Ha già {n} tag: la chiamata può aggiungerne altri", { n: d.tags.length }) : t("Suggerisce e assegna tag tematici"),
         disabled: !aiStat?.enabled || aiBusyAny,
         action: () => autotagDoc(d),
       },
-      { id: "ai-ask", label: "Chiedi al documento", hint: "Domande in linguaggio naturale su questo PDF", disabled: !aiStat?.enabled, action: () => askAboutDoc(d) },
-      { id: "ai-rel", label: "Correlati", icon: I.near, hint: "I documenti più vicini per significato (indice semantico)", action: () => setFilter({ kind: "related", id: d.id, label: d.title ?? "documento" }) },
-      { id: "ai-path", label: "Percorso di lettura", icon: I.map, hint: "Cosa leggere prima per capirlo: fondamenti citati + vicini precedenti (senza LLM)", action: () => openReadingPath(d) },
+      { id: "ai-ask", label: t("Chiedi al documento"), hint: t("Domande in linguaggio naturale su questo PDF"), disabled: !aiStat?.enabled, action: () => askAboutDoc(d) },
+      { id: "ai-rel", label: t("Correlati"), icon: I.near, hint: t("I documenti più vicini per significato (indice semantico)"), action: () => setFilter({ kind: "related", id: d.id, label: d.title ?? t("documento") }) },
+      { id: "ai-path", label: t("Percorso di lettura"), icon: I.map, hint: t("Cosa leggere prima per capirlo: fondamenti citati + vicini precedenti (senza LLM)"), action: () => openReadingPath(d) },
     ];
     const orgKids: RadialItem[] = [
-      { id: "or-find", label: "Recupera metadati…", icon: I.metafind, hint: "Cerca online la scheda giusta (Crossref, arXiv, OpenAlex) e scegli tu quale applicare", action: () => (metaFindId = d.id) },
-      { id: "or-meta", label: "Modifica metadati", icon: I.edit, action: () => (editingId = d.id) },
-      { id: "or-tag", label: "Tag…", icon: I.tag, hint: "Assegna o togli tag", action: () => (tagPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
-      { id: "or-coll", label: "Raccolte…", icon: I.folder, hint: "Aggiungi a una raccolta", action: () => (collPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
+      { id: "or-find", label: t("Recupera metadati…"), icon: I.metafind, hint: t("Cerca online la scheda giusta (Crossref, arXiv, OpenAlex) e scegli tu quale applicare"), action: () => (metaFindId = d.id) },
+      { id: "or-meta", label: t("Modifica metadati"), icon: I.edit, action: () => (editingId = d.id) },
+      { id: "or-tag", label: t("Tag…"), icon: I.tag, hint: t("Assegna o togli tag"), action: () => (tagPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
+      { id: "or-coll", label: t("Raccolte…"), icon: I.folder, hint: t("Aggiungi a una raccolta"), action: () => (collPanel = { doc: d, x: radial?.x ?? 300, y: radial?.y ?? 200 }) },
     ];
     if (filter.kind === "collection")
-      orgKids.push({ id: "or-rm", label: `Togli da «${filter.label ?? "raccolta"}»`, danger: true, action: () => removeDocFromCurrentCollection(d) });
+      orgKids.push({ id: "or-rm", label: t("Togli da «{dove}»", { dove: filter.label ?? t("raccolta") }), danger: true, action: () => removeDocFromCurrentCollection(d) });
     if (!d.has_file)
-      orgKids.push({ id: "or-pdf", label: "Allega PDF…", hint: "Questa voce è solo un riferimento: trova un PDF Open Access o allegane uno da un link", action: () => (refPanel = { doc: d, url: "", busy: false }) });
+      orgKids.push({ id: "or-pdf", label: t("Allega PDF…"), hint: t("Questa voce è solo un riferimento: trova un PDF Open Access o allegane uno da un link"), action: () => (refPanel = { doc: d, url: "", busy: false }) });
     const items: RadialItem[] = [
-      { id: "d-open", label: "Apri", icon: I.open, hint: "Leggi nel visore integrato", action: () => openDocument(d) },
-      { id: "d-copyt", label: "Copia titolo", icon: I.copy, hint: "Copia il titolo del paper", disabled: !(d.title ?? "").trim(), action: () => copyTitle(d) },
-      { id: "d-fav", label: "Preferito", icon: I.star, checked: d.favorite, hint: d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti", action: () => toggleFavorite(d) },
-      { id: "d-read", label: "Letto", icon: I.check, checked: d.is_read, hint: d.is_read ? "Segna come da leggere" : "Segna come letto", action: () => toggleRead(d) },
-      { id: "d-cite", label: "Cita", icon: I.quote, hint: "Copia citazioni, riferimenti, esplora", children: citeKids },
-      { id: "d-ai", label: "AI", icon: I.ai, hint: aiStat?.enabled ? "Riassunto, tag, domande, correlati" : "Correlati (per il resto attiva l'AI locale)", children: aiKids },
-      { id: "d-org", label: "Organizza", icon: I.folder, hint: "Metadati, tag, raccolte", children: orgKids },
-      { id: "d-code", label: "Codice & repo", icon: I.code, hint: "Repository GitHub citati + modelli e dataset Hugging Face", action: () => openHf(d) },
-      { id: "d-share", label: "Condividi", icon: I.share, hint: "Invia, stampa, mostra file", children: shareKids },
-      { id: "d-del", label: "Elimina", icon: I.trash, danger: true, hint: "Sposta nel cestino (recuperabile)", action: () => trashSelected([d.id]) },
+      { id: "d-open", label: t("Apri"), icon: I.open, hint: t("Leggi nel visore integrato"), action: () => openDocument(d) },
+      { id: "d-copyt", label: t("Copia titolo"), icon: I.copy, hint: t("Copia il titolo del paper"), disabled: !(d.title ?? "").trim(), action: () => copyTitle(d) },
+      { id: "d-fav", label: t("Preferito"), icon: I.star, checked: d.favorite, hint: d.favorite ? t("Togli dai preferiti") : t("Aggiungi ai preferiti"), action: () => toggleFavorite(d) },
+      { id: "d-read", label: t("Letto"), icon: I.check, checked: d.is_read, hint: d.is_read ? t("Segna come da leggere") : t("Segna come letto"), action: () => toggleRead(d) },
+      { id: "d-cite", label: t("Cita"), icon: I.quote, hint: t("Copia citazioni, riferimenti, esplora"), children: citeKids },
+      { id: "d-ai", label: "AI" /* i18n-exempt: sigla identica in inglese */, icon: I.ai, hint: aiStat?.enabled ? t("Riassunto, tag, domande, correlati") : t("Correlati (per il resto attiva l'AI locale)"), children: aiKids },
+      { id: "d-org", label: t("Organizza"), icon: I.folder, hint: t("Metadati, tag, raccolte"), children: orgKids },
+      { id: "d-code", label: t("Codice & repo"), icon: I.code, hint: t("Repository GitHub citati + modelli e dataset Hugging Face"), action: () => openHf(d) },
+      { id: "d-share", label: t("Condividi"), icon: I.share, hint: t("Invia, stampa, mostra file"), children: shareKids },
+      { id: "d-del", label: t("Elimina"), icon: I.trash, danger: true, hint: t("Sposta nel cestino (recuperabile)"), action: () => trashSelected([d.id]) },
     ];
     // Reference-only entry: finding its PDF is THE next step — a first-class petal.
     if (!d.has_file)
       items.splice(1, 0, {
         id: "d-findpdf",
-        label: "Trova PDF…",
+        label: t("Trova PDF…"),
         icon: I.imp,
-        hint: "Mostra i candidati trovati online (arXiv, OpenAlex, Semantic Scholar, Crossref, per identificativo e per titolo): scegli tu quale scaricare e allegare",
+        hint: t("Mostra i candidati trovati online (arXiv, OpenAlex, Semantic Scholar, Crossref, per identificativo e per titolo): scegli tu quale scaricare e allegare"),
         disabled: !!pdfBatch,
         action: () => (pdfFindId = d.id),
       });
@@ -3612,20 +3808,22 @@
   function buildSelectionRadial(): RadialItem[] {
     const ids = [...selected];
     const one = ids.length === 1 ? displayed.find((d) => d.id === ids[0]) : undefined;
-    const label = one?.title ?? `${ids.length} documenti PDF`;
+    const label = one?.title ?? t("{n} documenti PDF", { n: ids.length });
     const link = one ? paperLink(one) : null;
-    const shareKids: RadialItem[] = (["whatsapp", "teams", "gmail", "outlook"] as ShareTarget[]).map((t) => ({
-      id: "ssh-" + t,
-      label: t === "whatsapp" ? "WhatsApp" : t === "teams" ? "Teams" : t === "gmail" ? "Gmail" : "Outlook",
-      action: () => shareDoc(t, ids, label, link),
+    // `tgt`, non `t`: il parametro non deve ombreggiare la funzione di traduzione.
+    const shareKids: RadialItem[] = (["whatsapp", "teams", "gmail", "outlook"] as ShareTarget[]).map((tgt) => ({
+      id: "ssh-" + tgt,
+      /* i18n-exempt: nomi propri */
+      label: tgt === "whatsapp" ? "WhatsApp" : tgt === "teams" ? "Teams" : tgt === "gmail" ? "Gmail" : "Outlook",
+      action: () => shareDoc(tgt, ids, label, link),
     }));
-    const tagKids: RadialItem[] = tags.map((t) => ({ id: "st-" + t.id, label: t.name, action: () => bulkAddTag(t) }));
+    const tagKids: RadialItem[] = tags.map((tg) => ({ id: "st-" + tg.id, label: tg.name, action: () => bulkAddTag(tg) }));
     const collKids: RadialItem[] = collections
       .filter((c) => !c.is_smart)
       .map((c) => ({ id: "sc-" + c.id, label: c.name, action: () => bulkAddCollection(c) }));
     const items: RadialItem[] = [
-      { id: "s-print", label: "Stampa", icon: I.print, disabled: printing, hint: "Un unico lavoro di stampa", action: () => printSelected() },
-      { id: "s-share", label: "Condividi", icon: I.share, children: shareKids },
+      { id: "s-print", label: t("Stampa"), icon: I.print, disabled: printing, hint: t("Un unico lavoro di stampa"), action: () => printSelected() },
+      { id: "s-share", label: t("Condividi"), icon: I.share, children: shareKids },
     ];
     // Batch OA-PDF finder over the selected reference-only entries.
     const noPdf = ids
@@ -3634,41 +3832,41 @@
     if (noPdf.length)
       items.push({
         id: "s-findpdf",
-        label: `Trova PDF (${noPdf.length} riferiment${noPdf.length === 1 ? "o" : "i"})`,
+        label: tp(noPdf.length, "Trova PDF (1 riferimento)", "Trova PDF ({n} riferimenti)"),
         icon: I.imp,
-        hint: "Cerca e allega la copia Open Access per le voci selezionate senza file (arXiv, Unpaywall, OpenAlex, Semantic Scholar)",
+        hint: t("Cerca e allega la copia Open Access per le voci selezionate senza file (arXiv, Unpaywall, OpenAlex, Semantic Scholar)"),
         disabled: !!pdfBatch,
         action: () => batchFindPdf(noPdf),
       });
     // Gate on the LIVE saved state (aiStat), not the Settings-form variable: the
     // form state can lag what's persisted and silently hide these items.
     if (aiStat?.enabled) {
-      items.push({ id: "s-sum", label: "Riassumi (AI)", icon: I.ai, disabled: aiBusyAny, hint: "Un riassunto per ogni selezionato", action: () => runBatchAi("summary") });
-      items.push({ id: "s-tags", label: "Tag automatici (AI)", icon: I.tag, disabled: aiBusyAny, action: () => runBatchAi("tags") });
+      items.push({ id: "s-sum", label: t("Riassumi (AI)"), icon: I.ai, disabled: aiBusyAny, hint: t("Un riassunto per ogni selezionato"), action: () => runBatchAi("summary") });
+      items.push({ id: "s-tags", label: t("Tag automatici (AI)"), icon: I.tag, disabled: aiBusyAny, action: () => runBatchAi("tags") });
       if (ids.length >= 2 && ids.length <= 3)
-        items.push({ id: "s-cmp", label: "Confronta (AI)", icon: I.near, disabled: aiBusyAny || wikiBusy, hint: "Tabella: obiettivo, metodo, dati, risultati, limiti — e cosa aggiunge ciascuno", action: () => runCompare() });
+        items.push({ id: "s-cmp", label: t("Confronta (AI)"), icon: I.near, disabled: aiBusyAny || wikiBusy, hint: t("Tabella: obiettivo, metodo, dati, risultati, limiti — e cosa aggiunge ciascuno"), action: () => runCompare() });
       if (ids.length >= 2)
-        items.push({ id: "s-rev", label: "Rassegna (AI)", icon: I.quote, disabled: aiBusyAny || wikiBusy, hint: "Mini related-work per temi (2-10 paper); salvabile come appunto con backlink [[@citekey]]", action: () => runReview() });
-      items.push({ id: "s-res", label: "Tabella risultati (AI)", icon: I.grid, disabled: aiBusyAny || wikiBusy, hint: "Raccogli metriche e numeri dei paper in un'unica tabella (CSV/Excel)", action: () => runHarvest() });
-      items.push({ id: "s-wiki", label: "Pagina wiki (AI)", icon: I.open, disabled: aiBusyAny || wikiBusy, hint: "Una pagina della Wiki con esattamente questi documenti come fonti (max 10)", action: () => (wikiFromSel = { ids: [...selected].slice(0, 10), concept: "" }) });
+        items.push({ id: "s-rev", label: t("Rassegna (AI)"), icon: I.quote, disabled: aiBusyAny || wikiBusy, hint: t("Mini related-work per temi (2-10 paper); salvabile come appunto con backlink [[@citekey]]"), action: () => runReview() });
+      items.push({ id: "s-res", label: t("Tabella risultati (AI)"), icon: I.grid, disabled: aiBusyAny || wikiBusy, hint: t("Raccogli metriche e numeri dei paper in un'unica tabella (CSV/Excel)"), action: () => runHarvest() });
+      items.push({ id: "s-wiki", label: t("Pagina wiki (AI)"), icon: I.open, disabled: aiBusyAny || wikiBusy, hint: t("Una pagina della Wiki con esattamente questi documenti come fonti (max 10)"), action: () => (wikiFromSel = { ids: [...selected].slice(0, 10), concept: "" }) });
     }
-    if (tagKids.length) items.push({ id: "s-tag", label: "Aggiungi tag", icon: I.tag, children: tagKids });
-    if (collKids.length) items.push({ id: "s-coll", label: "In raccolta", icon: I.folder, children: collKids });
+    if (tagKids.length) items.push({ id: "s-tag", label: t("Aggiungi tag"), icon: I.tag, children: tagKids });
+    if (collKids.length) items.push({ id: "s-coll", label: t("In raccolta"), icon: I.folder, children: collKids });
     items.push({
       id: "s-cite",
-      label: "Cita",
+      label: t("Cita"),
       icon: I.quote,
-      hint: "Copia le citazioni della selezione per LaTeX/Pandoc",
+      hint: t("Copia le citazioni della selezione per LaTeX/Pandoc"),
       children: [
-        { id: "sci-tex", label: "Copia \\cite{…}", hint: "Un solo \\cite con tutte le chiavi", action: () => copyCiteMulti(ids, "latex") },
-        { id: "sci-bib", label: "Copia BibTeX", hint: "Le voci .bib di tutti i selezionati", action: () => copyCiteMulti(ids, "bibtex") },
-        { id: "sci-pan", label: "Copia [@…] (Pandoc)", action: () => copyCiteMulti(ids, "pandoc") },
-        { id: "sci-key", label: "Copia citekey", action: () => copyCiteMulti(ids, "citekey") },
+        { id: "sci-tex", label: t("Copia \\cite{…}"), hint: t("Un solo \\cite con tutte le chiavi"), action: () => copyCiteMulti(ids, "latex") },
+        { id: "sci-bib", label: t("Copia BibTeX"), hint: t("Le voci .bib di tutti i selezionati"), action: () => copyCiteMulti(ids, "bibtex") },
+        { id: "sci-pan", label: t("Copia [@…] (Pandoc)"), action: () => copyCiteMulti(ids, "pandoc") },
+        { id: "sci-key", label: t("Copia citekey"), action: () => copyCiteMulti(ids, "citekey") },
       ],
     });
-    items.push({ id: "s-exp", label: "Esporta citazioni", icon: I.exp, hint: "Salva un file .bib/.ris/.json", action: () => exportLibrary(ids) });
-    items.push({ id: "s-none", label: "Deseleziona", icon: I.x, action: () => (selected = []) });
-    items.push({ id: "s-del", label: "Elimina", icon: I.trash, danger: true, action: () => trashSelected(ids) });
+    items.push({ id: "s-exp", label: t("Esporta citazioni"), icon: I.exp, hint: t("Salva un file .bib/.ris/.json"), action: () => exportLibrary(ids) });
+    items.push({ id: "s-none", label: t("Deseleziona"), icon: I.x, action: () => (selected = []) });
+    items.push({ id: "s-del", label: t("Elimina"), icon: I.trash, danger: true, action: () => trashSelected(ids) });
     return items;
   }
 
@@ -3677,9 +3875,9 @@
     return [
       {
         id: "g-home",
-        label: "I miei paper",
+        label: t("I miei paper"),
         icon: I.grid,
-        hint: "Torna alla griglia dei paper (tutta la libreria)",
+        hint: t("Torna alla griglia dei paper (tutta la libreria)"),
         action: () => {
           setFilter({ kind: "all" });
           view = "grid";
@@ -3687,38 +3885,38 @@
       },
       {
         id: "g-imp",
-        label: "Importa",
+        label: t("Importa"),
         icon: I.imp,
-        hint: "PDF, BibTeX, identificatori, URL",
+        hint: t("PDF, BibTeX, identificatori, URL"),
         children: [
-          { id: "gi-pdf", label: "PDF dal disco…", action: () => importViaDialog() },
-          { id: "gi-bib", label: "Da bibliografia o progetto…", hint: "Zotero/Mendeley/EndNote (.bib/.ris/CSL-JSON) o uno .zip Overleaf: crea le schede, scarica i PDF open-access, tag e raccolta", action: () => importRefManagerDialog() },
-          { id: "gi-tex", label: "Progetto LaTeX (.zip)…", hint: "I tuoi paper: PDF + bibliografia", action: () => importLatexDialog() },
-          { id: "gi-id", label: "Per identificatore…", hint: "DOI / arXiv / ISBN / PMID", action: () => (idModal = true) },
-          { id: "gi-url", label: "Da URL…", hint: "Scarica un PDF da un link", action: () => openUrlModal() },
-          { id: "gi-watch", label: "Cartella sorvegliata…", hint: "Importa automaticamente i PDF che aggiungi", action: () => pickWatchedFolder() },
+          { id: "gi-pdf", label: t("PDF dal disco…"), action: () => importViaDialog() },
+          { id: "gi-bib", label: t("Da bibliografia o progetto…"), hint: t("Zotero/Mendeley/EndNote (.bib/.ris/CSL-JSON) o uno .zip Overleaf: crea le schede, scarica i PDF open-access, tag e raccolta"), action: () => importRefManagerDialog() },
+          { id: "gi-tex", label: t("Progetto LaTeX (.zip)…"), hint: t("I tuoi paper: PDF + bibliografia"), action: () => importLatexDialog() },
+          { id: "gi-id", label: t("Per identificatore…"), hint: "DOI / arXiv / ISBN / PMID" /* i18n-exempt: sigle identiche in inglese */, action: () => (idModal = true) },
+          { id: "gi-url", label: t("Da URL…"), hint: t("Scarica un PDF da un link"), action: () => openUrlModal() },
+          { id: "gi-watch", label: t("Cartella sorvegliata…"), hint: t("Importa automaticamente i PDF che aggiungi"), action: () => pickWatchedFolder() },
         ],
       },
       {
         id: "g-view",
-        label: "Vista",
+        label: t("Vista"),
         icon: I.eye,
-        hint: "Griglia, lista, costellazione, ordinamento",
+        hint: t("Griglia, lista, costellazione, ordinamento"),
         children: [
-          { id: "gv-grid", label: "Griglia", icon: I.grid, checked: view === "grid", action: () => (view = "grid") },
-          { id: "gv-list", label: "Lista", icon: I.list, checked: view === "list", action: () => (view = "list") },
+          { id: "gv-grid", label: t("Griglia"), icon: I.grid, checked: view === "grid", action: () => (view = "grid") },
+          { id: "gv-list", label: t("Lista"), icon: I.list, checked: view === "list", action: () => (view = "list") },
           {
             id: "gv-map",
-            label: filter.kind === "collection" && filter.id != null ? "Costellazione della raccolta" : "Costellazione",
+            label: filter.kind === "collection" && filter.id != null ? t("Costellazione della raccolta") : t("Costellazione"),
             icon: I.map,
             checked: view === "map",
             hint:
               filter.kind === "collection" && filter.id != null
-                ? "La mappa dei soli paper di questa raccolta (dalla barra in alto torni a tutta la libreria)"
-                : "Mappa semantica della libreria",
+                ? t("La mappa dei soli paper di questa raccolta (dalla barra in alto torni a tutta la libreria)")
+                : t("Mappa semantica della libreria"),
             action: () => {
               if (filter.kind === "collection" && filter.id != null) {
-                openGraphForCollection(filter.id, filter.label ?? "raccolta");
+                openGraphForCollection(filter.id, filter.label ?? t("raccolta"));
               } else {
                 graphScope = null;
                 graph = null;
@@ -3730,140 +3928,141 @@
           ...(filter.kind === "collection" && filter.id != null
             ? [{
                 id: "gv-map-all",
-                label: "Costellazione di tutta la libreria",
+                label: t("Costellazione di tutta la libreria"),
                 icon: I.map,
                 checked: view === "map" && graphScope == null,
-                hint: "La mappa completa, ignorando il filtro attivo",
+                hint: t("La mappa completa, ignorando il filtro attivo"),
                 action: () => { graphScope = null; graph = null; view = "map"; void loadGraph(true); },
               }]
             : []),
-          { id: "gv-side", label: "Barra laterale", checked: !sidebarHidden, hint: "Mostra/nascondi (Ctrl+B)", action: () => (sidebarHidden = !sidebarHidden) },
+          { id: "gv-side", label: t("Barra laterale"), checked: !sidebarHidden, hint: t("Mostra/nascondi (Ctrl+B)"), action: () => (sidebarHidden = !sidebarHidden) },
           ...SORT_KEYS.map((k) => ({
             id: "gs-" + k,
-            label: "Ordina: " + SORT_LABELS[k],
+            label: t("Ordina: {criterio}", { criterio: t(SORT_LABELS[k]) }),
             checked: !!sortDirOf(k),
-            badge: sortDirOf(k) ? (sortDirOf(k) === "asc" ? "↑" : "↓") : undefined,
-            hint: "Un tocco attiva, un altro inverte, un terzo toglie",
+            badge: sortDirOf(k) ? (sortDirOf(k) === "asc" ? "↑" : "↓") : undefined /* i18n-exempt: frecce, non testo */,
+            hint: t("Un tocco attiva, un altro inverte, un terzo toglie"),
             action: () => cycleSort(k),
           })),
         ],
       },
       {
         id: "g-resume",
-        label: "Riprendi lettura",
+        label: t("Riprendi lettura"),
         icon: I.bookmark,
-        hint: "Torna all'ultimo PDF, al punto in cui eri",
+        hint: t("Torna all'ultimo PDF, al punto in cui eri"),
         disabled: !lastReadDoc,
         action: () => resumeLastRead(),
       },
-      { id: "g-ask", label: "Chiedi alla libreria", icon: I.ask, hint: "Risposte con citazioni dai tuoi PDF (AI locale)", action: () => { setFilter({ kind: "ask" }); loadRagStatus(); } },
-      { id: "g-wiki", label: "Wiki della libreria", icon: I.open, hint: "La tua enciclopedia privata, generata dai tuoi paper", action: () => openWikiView() },
-      { id: "g-disc", label: "Cerca online", icon: I.globe, hint: "arXiv, OpenAlex, ADS e altre fonti", action: () => setFilter({ kind: "discover" }) },
+      { id: "g-ask", label: t("Chiedi alla libreria"), icon: I.ask, hint: t("Risposte con citazioni dai tuoi PDF (AI locale)"), action: () => { setFilter({ kind: "ask" }); loadRagStatus(); } },
+      { id: "g-wiki", label: t("Wiki della libreria"), icon: I.open, hint: t("La tua enciclopedia privata, generata dai tuoi paper"), action: () => openWikiView() },
+      { id: "g-disc", label: t("Cerca online"), icon: I.globe, hint: t("arXiv, OpenAlex, ADS e altre fonti"), action: () => setFilter({ kind: "discover" }) },
       {
         id: "g-notes",
-        label: "Appunti",
+        label: t("Appunti"),
         icon: I.note,
-        hint: "I tuoi appunti in Markdown (file .md) con [[collegamenti]]",
+        hint: t("I tuoi appunti in Markdown (file .md) con [[collegamenti]]"),
         action: () => openNotesView(),
       },
       {
         id: "g-projects",
-        label: "Progetti (LaTeX)",
+        label: t("Progetti (LaTeX)"),
         icon: I.code,
-        hint: "Scrivi in LaTeX con citazioni dalla libreria; compila con Tectonic/latexmk",
+        hint: t("Scrivi in LaTeX con citazioni dalla libreria; compila con Tectonic/latexmk"),
         action: () => setFilter({ kind: "projects" }),
       },
       {
         id: "g-archivio",
-        label: "Archivio",
+        label: t("Archivio"),
         icon: I.folder,
-        hint: "Raccolte e sotto-raccolte in vista sinottica: organizza i paper trascinandoli",
+        hint: t("Raccolte e sotto-raccolte in vista sinottica: organizza i paper trascinandoli"),
         action: () => setFilter({ kind: "archivio" }),
       },
-      { id: "g-redis", label: "Riscopri", icon: I.compass, hint: "Un documento dimenticato, pescato per te", action: () => rediscover() },
+      { id: "g-redis", label: t("Riscopri"), icon: I.compass, hint: t("Un documento dimenticato, pescato per te"), action: () => rediscover() },
       {
         id: "g-novita",
-        label: "Novità",
+        label: t("Novità"),
         icon: I.bell,
-        hint: "Nuovi paper sui temi che segui (ricerche salvate), raccolti a ogni avvio",
-        badge: novitaN > 0 ? (novitaN > 99 ? "99+" : String(novitaN)) : undefined,
+        hint: t("Nuovi paper sui temi che segui (ricerche salvate), raccolti a ogni avvio"),
+        badge: novitaN > 0 ? (novitaN > 99 ? "99+" : String(novitaN)) : undefined /* i18n-exempt: conteggio */,
         action: () => openNovita(),
       },
       {
         id: "g-exp",
-        label: "Esporta",
+        label: t("Esporta"),
         icon: I.exp,
         children: [
-          { id: "ge-cit", label: "Citazioni (BibTeX/RIS/CSL)…", disabled: displayed.length === 0, action: () => exportLibrary() },
-          { id: "ge-obs", label: "In Obsidian (Markdown)", disabled: exportingObsidian || displayed.length === 0, action: () => runObsidianExport() },
+          { id: "ge-cit", label: t("Citazioni (BibTeX/RIS/CSL)…"), disabled: displayed.length === 0, action: () => exportLibrary() },
+          { id: "ge-obs", label: t("In Obsidian (Markdown)"), disabled: exportingObsidian || displayed.length === 0, action: () => runObsidianExport() },
         ],
       },
       {
         id: "g-tools",
-        label: "Cura della libreria",
+        label: t("Cura della libreria"),
         icon: I.heal,
-        hint: "Salute, gap di citazioni, duplicati e manutenzione",
+        hint: t("Salute, gap di citazioni, duplicati e manutenzione"),
         children: [
-          { id: "gc-health", label: "Salute libreria", hint: "File mancanti, PDF senza testo, metadati incompleti…", action: () => openCare("salute") },
-          { id: "gc-meta", label: "Recupera metadati mancanti", hint: needsMeta ? `${needsMeta} documenti incompleti — arXiv dal nome file, DOI e titolo dal PDF` : "Nessun documento incompleto al momento", disabled: enriching || needsMeta === 0, action: () => enrichMeta() },
-          { id: "gc-findpdf", label: "Trova PDF dei riferimenti", hint: "Cerca copie Open Access (arXiv, Unpaywall, OpenAlex, Semantic Scholar) per TUTTE le voci senza file e le allega", disabled: !!pdfBatch, action: () => findPdfAllRefs() },
-          { id: "gc-gaps", label: "Gap di citazioni", hint: "I DOI più citati dai tuoi paper che ancora non possiedi", action: () => openCare("gap") },
-          { id: "gc-dup", label: "Duplicati", hint: "Trova e unisci le copie dello stesso lavoro", action: () => openCare("duplicati") },
-          { id: "gt-thumb", label: "Rigenera anteprime", hint: "Ricrea le copertine dal PDF ad alta risoluzione", disabled: rebuildingThumbs, action: () => rebuildThumbs() },
+          { id: "gc-health", label: t("Salute libreria"), hint: t("File mancanti, PDF senza testo, metadati incompleti…"), action: () => openCare("salute") },
+          { id: "gc-meta", label: t("Recupera metadati mancanti"), hint: needsMeta ? tp(needsMeta, "1 documento incompleto — arXiv dal nome file, DOI e titolo dal PDF", "{n} documenti incompleti — arXiv dal nome file, DOI e titolo dal PDF") : t("Nessun documento incompleto al momento"), disabled: enriching || needsMeta === 0, action: () => enrichMeta() },
+          { id: "gc-findpdf", label: t("Trova PDF dei riferimenti"), hint: t("Cerca copie Open Access (arXiv, Unpaywall, OpenAlex, Semantic Scholar) per TUTTE le voci senza file e le allega"), disabled: !!pdfBatch, action: () => findPdfAllRefs() },
+          { id: "gc-gaps", label: t("Gap di citazioni"), hint: t("I DOI più citati dai tuoi paper che ancora non possiedi"), action: () => openCare("gap") },
+          { id: "gc-dup", label: t("Duplicati"), hint: t("Trova e unisci le copie dello stesso lavoro"), action: () => openCare("duplicati") },
+          { id: "gt-thumb", label: t("Rigenera anteprime"), hint: t("Ricrea le copertine dal PDF ad alta risoluzione"), disabled: rebuildingThumbs, action: () => rebuildThumbs() },
         ],
       },
-      { id: "g-emb", label: "Indice semantico", icon: I.layers, hint: `${emb.embedded}/${emb.total} indicizzati — abilita ricerca per significato, Correlati e Costellazione`, disabled: generating || emb.embedded >= emb.total || emb.total === 0, action: () => generateIndex() },
+      { id: "g-emb", label: t("Indice semantico"), icon: I.layers, hint: t("{fatti}/{totale} indicizzati — abilita ricerca per significato, Correlati e Costellazione", { fatti: emb.embedded, totale: emb.total }), disabled: generating || emb.embedded >= emb.total || emb.total === 0, action: () => generateIndex() },
       ...(aiStat?.enabled
         ? [{
             id: "g-aimem",
-            label: "Memoria AI",
+            label: t("Memoria AI"),
             icon: I.ai,
-            hint: "Libera la GPU (scarica i modelli) o ferma del tutto l'AI locale",
+            hint: t("Libera la GPU (scarica i modelli) o ferma del tutto l'AI locale"),
             children: [
-              { id: "am-free", label: "Libera GPU — scarica i modelli", hint: "Scarica i modelli dalla VRAM; il server e l'AI restano attivi (si ricaricano al bisogno)", disabled: !aiStat?.reachable, action: () => freeGpuMemory() },
-              { id: "am-stop", label: "Ferma AI — server e spegni", hint: "Scarica i modelli, ferma il server locale e disattiva l'AI", action: () => stopAiFully() },
+              { id: "am-free", label: t("Libera GPU — scarica i modelli"), hint: t("Scarica i modelli dalla VRAM; il server e l'AI restano attivi (si ricaricano al bisogno)"), disabled: !aiStat?.reachable, action: () => freeGpuMemory() },
+              { id: "am-stop", label: t("Ferma AI — server e spegni"), hint: t("Scarica i modelli, ferma il server locale e disattiva l'AI"), action: () => stopAiFully() },
             ],
           }]
         : [{
             id: "g-aion",
-            label: "Attiva AI",
+            label: t("Attiva AI"),
             icon: I.ai,
-            hint: "Riaccendi l'AI locale (riassunti, tag automatici, domande, wiki…)",
+            hint: t("Riaccendi l'AI locale (riassunti, tag automatici, domande, wiki…)"),
             action: () => quickEnableAi(),
           }]),
-      { id: "g-backup", label: "Backup libreria", icon: I.backup, hint: "Copia completa della libreria (PDF + database) in una cartella", action: () => doBackup() },
-      { id: "g-trash", label: "Cestino", icon: I.trash, hint: "I documenti eliminati (ripristinabili)", action: () => setFilter({ kind: "trash" }) },
-      { id: "g-term", label: "Terminale", icon: I.term, hint: "PowerShell integrato nella cartella dei PDF", action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
-      { id: "g-plancia", label: "Plancia", icon: I.pulse, hint: "La sala macchine: cosa sta lavorando adesso, in tempo reale (finestra separata)", action: () => void openPlancia() },
+      { id: "g-backup", label: t("Backup libreria"), icon: I.backup, hint: t("Copia completa della libreria (PDF + database) in una cartella"), action: () => doBackup() },
+      { id: "g-trash", label: t("Cestino"), icon: I.trash, hint: t("I documenti eliminati (ripristinabili)"), action: () => setFilter({ kind: "trash" }) },
+      { id: "g-term", label: t("Terminale"), icon: I.term, hint: t("PowerShell integrato nella cartella dei PDF"), action: () => { terminalOpened = true; setFilter({ kind: "terminal" }); } },
+      { id: "g-plancia", label: t("Plancia"), icon: I.pulse, hint: t("La sala macchine: cosa sta lavorando adesso, in tempo reale (finestra separata)"), action: () => void openPlancia() },
       {
         id: "g-help",
-        label: "Guida",
+        label: t("Guida"),
         icon: I.help,
-        hint: "La guida di Scriptorium: si sposta e resta aperta (anche in primo piano) mentre lavori",
+        hint: t("La guida di Scriptorium: si sposta e resta aperta (anche in primo piano) mentre lavori"),
         action: () => openHelp(),
       },
       {
         id: "g-theme",
-        label: "Aspetto",
+        label: t("Aspetto"),
         icon: I.theme,
-        hint: "11 temi, chiari e scuri",
-        children: THEMES.map((t) => ({
-          id: "th-" + t.value,
-          label: t.label,
-          badge: t.dark ? "●" : "○",
-          checked: theme === t.value,
-          action: () => (theme = t.value),
+        hint: t("11 temi, chiari e scuri"),
+        // `th`, non `t`: il parametro non deve ombreggiare la funzione di traduzione.
+        children: THEMES.map((th) => ({
+          id: "th-" + th.value,
+          label: t(th.label),
+          badge: th.dark ? "●" : "○" /* i18n-exempt: pallini, non testo */,
+          checked: theme === th.value,
+          action: () => (theme = th.value),
         })),
       },
       {
         id: "g-sys",
-        label: "Sistema",
+        label: t("Sistema"),
         icon: I.gear,
         children: [
-          { id: "gy-set", label: "Impostazioni", icon: I.gear, action: () => openSettings() },
-          { id: "gy-upd", label: "Controlla aggiornamenti", hint: "L'unico momento in cui l'app cerca aggiornamenti: se ce n'è uno ti mostro le novità e decidi tu se installarlo", action: () => void checkUpdatesNow(true) },
-          { id: "gy-coach", label: "Rivedi il benvenuto", hint: "Ripropone il messaggio di primo avvio (tasto destro, palette, guida)", action: () => { try { localStorage.removeItem("scriptorium-coach-seen"); } catch { /* ignore */ } showCoach = true; } },
-          { id: "gy-about", label: "Informazioni", action: () => (aboutModal = true) },
+          { id: "gy-set", label: t("Impostazioni"), icon: I.gear, action: () => openSettings() },
+          { id: "gy-upd", label: t("Controlla aggiornamenti"), hint: t("L'unico momento in cui l'app cerca aggiornamenti: se ce n'è uno ti mostro le novità e decidi tu se installarlo"), action: () => void checkUpdatesNow(true) },
+          { id: "gy-coach", label: t("Rivedi il benvenuto"), hint: t("Ripropone il messaggio di primo avvio (tasto destro, palette, guida)"), action: () => { try { localStorage.removeItem("scriptorium-coach-seen"); } catch { /* ignore */ } showCoach = true; } },
+          { id: "gy-about", label: t("Informazioni"), action: () => (aboutModal = true) },
         ],
       },
     ];
@@ -3938,46 +4137,60 @@
             id: "act-" + it.id,
             title: trail ? `${trail} · ${it.label}` : it.label,
             hint: it.hint,
-            section: "Azioni",
+            section: t("Azioni"),
+            // Le parole per cui la voce è cercabile: l'`hint` è già tradotto al
+            // punto di dichiarazione (radiale), quindi la ricerca segue la
+            // lingua senza bisogno di un secondo elenco di sinonimi.
             keywords: it.hint,
             run: it.action,
           });
       }
     };
     walk(buildGlobalRadial(), "");
-    if (selected.length > 1) walk(buildSelectionRadial(), `Selezione (${selected.length})`);
+    if (selected.length > 1) walk(buildSelectionRadial(), t("Selezione ({n})", { n: selected.length }));
     // Anche le azioni sul documento a fuoco: «Trova PDF…», «Recupera metadati…»,
     // «Riferimenti e citazioni»… vivevano SOLO dietro il tasto destro, mentre la
     // guida prometteva che tutto fosse digitabile qui.
-    if (panelDoc) walk(buildDocRadial(panelDoc), panelDoc.title ?? "Documento");
+    if (panelDoc) walk(buildDocRadial(panelDoc), panelDoc.title ?? t("Documento"));
     // Navigation
-    const nav: [string, string, () => void][] = [
-      ["Tutti", "tutta la libreria", () => setFilter({ kind: "all" })],
-      ["Preferiti", "", () => setFilter({ kind: "favorite" })],
-      ["Da leggere", "", () => setFilter({ kind: "unread" })],
-      ["Con codice (GitHub)", "", () => setFilter({ kind: "github" })],
-      ["Peer-reviewed", "", () => setFilter({ kind: "peerreviewed" })],
-      ...(facets.own ? [["Il mio lavoro", "", () => setFilter({ kind: "mywork" })] as [string, string, () => void]] : []),
-      ["Cestino", "", () => setFilter({ kind: "trash" })],
+    // Il primo campo è uno SLUG stabile, non l'etichetta: l'id della voce è la
+    // chiave dei «recenti» della palette salvati in localStorage. Costruirlo
+    // dall'etichetta italiana significherebbe che, tradotta l'interfaccia, i
+    // recenti non risolvono più e vengono scartati in silenzio — e cambiando
+    // lingua si azzererebbero ogni volta.
+    type NavEntry = [slug: string, label: string, hint: string, run: () => void];
+    const nav: NavEntry[] = [
+      ["all", t("Tutti"), t("tutta la libreria"), () => setFilter({ kind: "all" })],
+      ["favorite", t("Preferiti"), "", () => setFilter({ kind: "favorite" })],
+      ["unread", t("Da leggere"), "", () => setFilter({ kind: "unread" })],
+      ["github", t("Con codice (GitHub)"), "", () => setFilter({ kind: "github" })],
+      ["peerreviewed", t("Peer-reviewed"), "", () => setFilter({ kind: "peerreviewed" })],
+      ...(facets.own ? [["mywork", t("Il mio lavoro"), "", () => setFilter({ kind: "mywork" })] as NavEntry] : []),
+      ["trash", t("Cestino"), "", () => setFilter({ kind: "trash" })],
     ];
-    for (const [label, hint, run] of nav) out.push({ id: "nav-" + label, title: label, hint, section: "Vai a", run: () => { leaveReader(); run(); } });
+    for (const [slug, label, hint, run] of nav) out.push({ id: "nav-" + slug, title: label, hint, section: t("Vai a"), run: () => { leaveReader(); run(); } });
     for (const c of collections)
-      out.push({ id: "nav-c" + c.id, title: `Raccolta: ${c.name}`, section: "Vai a", run: () => { leaveReader(); setFilter({ kind: "collection", id: c.id, label: c.name }); } });
-    for (const t of tags)
-      out.push({ id: "nav-t" + t.id, title: `Tag: ${t.name}`, hint: `${t.count} documenti`, section: "Vai a", run: () => { leaveReader(); toggleTagFilter(t.id); } });
+      out.push({ id: "nav-c" + c.id, title: t("Raccolta: {nome}", { nome: c.name }), section: t("Vai a"), run: () => { leaveReader(); setFilter({ kind: "collection", id: c.id, label: c.name }); } });
+    // `tag`, non `t`: la variabile del ciclo ombreggerebbe la funzione di traduzione.
+    for (const tag of tags)
+      out.push({ id: "nav-t" + tag.id, title: t("Tag: {nome}", { nome: tag.name }), hint: tp(tag.count, "1 documento", "{n} documenti"), section: t("Vai a"), run: () => { leaveReader(); toggleTagFilter(tag.id); } });
     for (const s of savedSearches)
-      out.push({ id: "nav-s" + s.id, title: `Ricerca salvata: ${s.name}`, hint: "rilancia e mostra le novità", section: "Vai a", run: () => { leaveReader(); runSaved(s); } });
+      out.push({ id: "nav-s" + s.id, title: t("Ricerca salvata: {nome}", { nome: s.name }), hint: t("rilancia e mostra le novità"), section: t("Vai a"), run: () => { leaveReader(); runSaved(s); } });
     // Appunti, pagine wiki e progetti LaTeX: raggiungibili per nome, come i documenti.
+    // I `keywords` non si vedono a schermo: sono i sinonimi con cui la voce si
+    // lascia trovare. In inglese vanno riscritti come INSIEME di sinonimi
+    // inglesi (non parola per parola), tenendo i token già neutri (md, tex,
+    // latex, overleaf, wiki, faq…).
     for (const n of notesList.slice(0, 300))
-      out.push({ id: "note-" + n.slug, title: `Appunto: ${n.title}`, hint: n.excerpt || undefined, section: "Appunti", keywords: "appunto nota md", run: () => { leaveReader(); void openNoteHit(n.slug); } });
+      out.push({ id: "note-" + n.slug, title: t("Appunto: {titolo}", { titolo: n.title }), hint: n.excerpt || undefined, section: t("Appunti"), keywords: t("appunto nota md"), run: () => { leaveReader(); void openNoteHit(n.slug); } });
     for (const w of wikiPages.slice(0, 300))
-      out.push({ id: "wiki-" + w.slug, title: `Wiki: ${w.title}`, section: "Wiki", keywords: "wiki pagina concetto", run: () => { leaveReader(); openWikiView(); void openWikiPage(w.slug); } });
+      out.push({ id: "wiki-" + w.slug, title: t("Wiki: {titolo}", { titolo: w.title }), section: t("Wiki"), keywords: t("wiki pagina concetto"), run: () => { leaveReader(); openWikiView(); void openWikiPage(w.slug); } });
     for (const p of palProjects.slice(0, 100))
       out.push({
         id: "proj-" + p.slug,
-        title: `Progetto LaTeX: ${p.name}`,
-        section: "Progetti",
-        keywords: "latex progetto tex overleaf",
+        title: t("Progetto LaTeX: {nome}", { nome: p.name }),
+        section: t("Progetti"),
+        keywords: t("latex progetto tex overleaf"),
         // null → tick → slug: forza il cambiamento della prop anche quando si
         // richiede lo stesso progetto due volte (nel frattempo l'utente può
         // essere passato a mano su un altro).
@@ -3990,28 +4203,30 @@
         },
       });
     // La guida, scheda per scheda.
+    // Il primo campo è il valore di `HelpTab` (codice, non testo): non si traduce.
     const helpTabs: [HelpTab, string][] = [
-      ["inizia", "Inizia qui"],
-      ["libreria", "Libreria"],
-      ["lettura", "Lettura"],
-      ["scrittura", "Scrittura"],
-      ["scoperta", "Scoperta"],
-      ["ai", "AI & dati"],
-      ["faq", "FAQ — Come faccio a…"],
+      ["inizia", t("Inizia qui")],
+      ["libreria", t("Libreria")],
+      ["lettura", t("Lettura")],
+      ["scrittura", t("Scrittura")],
+      ["scoperta", t("Scoperta")],
+      ["ai", t("AI & dati")],
+      ["faq", t("FAQ — Come faccio a…")],
     ];
     for (const [tab, label] of helpTabs)
-      out.push({ id: "help-" + tab, title: `Guida: ${label}`, section: "Guida", keywords: "aiuto help manuale documentazione faq", run: () => { openHelp(); helpTab = tab; } });
-    for (const t of THEMES)
-      out.push({ id: "th-" + t.value, title: `Tema: ${t.label}`, hint: t.dark ? "scuro" : "chiaro", section: "Aspetto", keywords: "tema aspetto colori", run: () => (theme = t.value) });
+      out.push({ id: "help-" + tab, title: t("Guida: {scheda}", { scheda: label }), section: t("Guida"), keywords: t("aiuto help manuale documentazione faq"), run: () => { openHelp(); helpTab = tab; } });
+    // `th`, non `t`: la variabile del ciclo ombreggerebbe la funzione di traduzione.
+    for (const th of THEMES)
+      out.push({ id: "th-" + th.value, title: t("Tema: {nome}", { nome: t(th.label) }), hint: th.dark ? t("scuro") : t("chiaro"), section: t("Aspetto"), keywords: t("tema aspetto colori"), run: () => (theme = th.value) });
     // Documents (open directly) — not in the trash view, where `docs` holds deleted items
     const pool = filter.kind === "trash" ? [] : displayed.length ? displayed : docs;
     for (const d of pool.slice(0, 400))
       out.push({
         id: "doc-" + d.id,
-        title: d.title ?? "Senza titolo",
+        title: d.title ?? t("Senza titolo"),
         hint: [d.authors[0], d.year].filter(Boolean).join(" · "),
-        section: "Documenti",
-        keywords: d.authors.join(" ") + " " + (d.citekey ?? ""),
+        section: t("Documenti"),
+        keywords: d.authors.join(" ") + " " + (d.citekey ?? ""), /* i18n-exempt: dati dell'utente (autori, citekey), non testo d'interfaccia */
         run: () => openDocument(d),
       });
     return out;
@@ -4137,7 +4352,7 @@
       graph = await similarityGraph(graphK, graphMinSim, graphScope?.id ?? null);
     } catch (e) {
       graphError = true;
-      status = "Mappa semantica: " + e;
+      status = t("Mappa semantica: {err}", { err: String(e) });
     } finally {
       graphLoading = false;
     }
@@ -4175,24 +4390,24 @@
     ghostBusy = true;
     status =
       relation === "citations"
-        ? "Cerco citazioni collegate…"
+        ? t("Cerco citazioni collegate…")
         : relation === "similar"
-          ? "Cerco paper simili…"
-          : "Cerco altri lavori dell'autore…";
+          ? t("Cerco paper simili…")
+          : t("Cerco altri lavori dell'autore…");
     try {
       let results: SearchResult[] = [];
       if (relation === "citations") {
-        if (!d.doi && !(d.title ?? "").trim()) throw "Serve un DOI o almeno un titolo per le citazioni";
+        if (!d.doi && !(d.title ?? "").trim()) throw t("Serve un DOI o almeno un titolo per le citazioni");
         const cn = await exploreCitations({ doi: d.doi, title: d.title });
-        if (cn.seed_unresolved) throw "OpenAlex non riconosce questo paper (né per DOI né per titolo)";
+        if (cn.seed_unresolved) throw t("OpenAlex non riconosce questo paper (né per DOI né per titolo)");
         results = [...cn.references, ...cn.citations];
       } else if (relation === "similar") {
-        if (!(d.title ?? "").trim()) throw "Questo paper non ha un titolo da cercare";
+        if (!(d.title ?? "").trim()) throw t("Questo paper non ha un titolo da cercare");
         results = await discoverSearch(d.title!, "openalex", { author: null, yearFrom: null, yearTo: null, oaOnly: false, sort: "relevance" });
         results = results.filter((r) => !d!.doi || (r.doi ?? "") !== d!.doi); // not the seed itself
       } else {
         const author = d.authors[0];
-        if (!author) throw "Questo paper non ha autori registrati";
+        if (!author) throw t("Questo paper non ha autori registrati");
         results = await discoverSearch(author, "openalex", { author, yearFrom: null, yearTo: null, oaOnly: false, sort: "relevance" });
       }
       const existing = new Set(mapGhosts.map((g) => g.key));
@@ -4218,10 +4433,14 @@
       }
       mapGhosts = [...mapGhosts, ...fresh];
       status = fresh.length
-        ? `${fresh.length} ${fresh.length === 1 ? "stella fantasma trovata" : "stelle fantasma trovate"} — tratteggiate attorno al paper`
-        : "Nessun nuovo risultato per questa relazione";
+        ? tp(
+            fresh.length,
+            "1 stella fantasma trovata — tratteggiata attorno al paper",
+            "{n} stelle fantasma trovate — tratteggiate attorno al paper",
+          )
+        : t("Nessun nuovo risultato per questa relazione");
     } catch (e) {
-      status = "Esplorazione non riuscita: " + e;
+      status = t("Esplorazione non riuscita: {err}", { err: String(e) });
     } finally {
       ghostBusy = false;
     }
@@ -4236,10 +4455,10 @@
     ghostBusy = true;
     status =
       relation === "citations"
-        ? "Cerco citazioni collegate…"
+        ? t("Cerco citazioni collegate…")
         : relation === "similar"
-          ? "Cerco paper simili…"
-          : "Cerco altri lavori dell'autore…";
+          ? t("Cerco paper simili…")
+          : t("Cerco altri lavori dell'autore…");
     try {
       let results: SearchResult[] = [];
       if (relation === "citations") {
@@ -4250,15 +4469,15 @@
           doi: r0.doi,
           title: r0.title,
         });
-        if (cn.seed_unresolved) throw "OpenAlex non riconosce questa scoperta";
+        if (cn.seed_unresolved) throw t("OpenAlex non riconosce questa scoperta");
         results = [...cn.references, ...cn.citations];
       } else if (relation === "similar") {
-        if (!(r0.title ?? "").trim()) throw "Questa scoperta non ha un titolo da cercare";
+        if (!(r0.title ?? "").trim()) throw t("Questa scoperta non ha un titolo da cercare");
         results = await discoverSearch(r0.title!, "openalex", { author: null, yearFrom: null, yearTo: null, oaOnly: false, sort: "relevance" });
         results = results.filter((x) => !r0.doi || (x.doi ?? "") !== r0.doi); // not the ghost itself
       } else {
         const author = r0.authors?.[0];
-        if (!author) throw "Questa scoperta non ha autori registrati";
+        if (!author) throw t("Questa scoperta non ha autori registrati");
         results = await discoverSearch(author, "openalex", { author, yearFrom: null, yearTo: null, oaOnly: false, sort: "relevance" });
       }
       const existing = new Set(mapGhosts.map((x) => x.key));
@@ -4284,10 +4503,12 @@
       }
       mapGhosts = [...mapGhosts, ...fresh];
       status = fresh.length
-        ? `${fresh.length} nuove scoperte, in catena da «${g.title.slice(0, 48)}»`
-        : "Nessun nuovo risultato da questa scoperta";
+        ? tp(fresh.length, "1 nuova scoperta, in catena da «{da}»", "{n} nuove scoperte, in catena da «{da}»", {
+            da: g.title.slice(0, 48),
+          })
+        : t("Nessun nuovo risultato da questa scoperta");
     } catch (e) {
-      status = "Esplorazione non riuscita: " + e;
+      status = t("Esplorazione non riuscita: {err}", { err: String(e) });
     } finally {
       ghostBusy = false;
     }
@@ -4296,14 +4517,14 @@
   async function addGhostToLibrary(key: string) {
     const g = mapGhosts.find((x) => x.key === key);
     if (!g || g.added || g.inLibrary) return;
-    status = "Aggiungo alla libreria…";
+    status = t("Aggiungo alla libreria…");
     try {
       await discoverAdd(g.result);
       mapGhosts = mapGhosts.map((x) => (x.key === key ? { ...x, added: true } : x));
-      status = "Aggiunto alla libreria ✓ — entrerà nel grafo al prossimo aggiornamento dell'indice";
+      status = t("Aggiunto alla libreria ✓ — entrerà nel grafo al prossimo aggiornamento dell'indice");
       loadDocs();
     } catch (e) {
-      status = "Aggiunta non riuscita: " + e;
+      status = t("Aggiunta non riuscita: {err}", { err: String(e) });
     }
   }
 
@@ -4331,7 +4552,7 @@
       pool = filter.kind === "trash" ? recentDocs : docs;
     }
     if (!pool.length) {
-      status = "La libreria è vuota: importa qualche PDF prima";
+      status = t("La libreria è vuota: importa qualche PDF prima");
       return;
     }
     const weights = pool.map((d) => {
@@ -4431,7 +4652,7 @@
     pos: { x: number; y: number },
   ) {
     if (!d || !part.content.trim()) {
-      status = "Niente da mandare agli Appunti";
+      status = t("Niente da mandare agli Appunti");
       return;
     }
     // If the open note has an unsaved edit, get it onto disk BEFORE any append, so
@@ -4441,7 +4662,7 @@
     if (noteView && !noteSaved) {
       await flushNote();
       if (!noteSaved) {
-        status = "Salvataggio dell'appunto aperto non riuscito — riprova prima di mandarci del testo";
+        status = t("Salvataggio dell'appunto aperto non riuscito — riprova prima di mandarci del testo");
         return;
       }
     }
@@ -4500,13 +4721,13 @@
     try {
       notesList = await listNotes();
     } catch (e) {
-      status = "Errore nel caricare gli appunti: " + e;
+      status = t("Errore nel caricare gli appunti: {err}", { err: String(e) });
     }
   }
   async function openNote(slug: string) {
     await flushNote(); // persist the note we're leaving
     if (noteView && !noteSaved) {
-      status = "Salvataggio non riuscito: riprova prima di cambiare appunto";
+      status = t("Salvataggio non riuscito: riprova prima di cambiare appunto");
       return; // don't overwrite the still-unsaved edits with another note
     }
     try {
@@ -4515,14 +4736,14 @@
       noteMode = "preview";
       noteSaved = true;
     } catch (e) {
-      status = "Errore nell'aprire l'appunto: " + e;
+      status = t("Errore nell'aprire l'appunto: {err}", { err: String(e) });
     }
   }
   async function newNote() {
     const title = noteNewTitle.trim();
     await flushNote();
     if (noteView && !noteSaved) {
-      status = "Salvataggio non riuscito: riprova prima di creare un appunto";
+      status = t("Salvataggio non riuscito: riprova prima di creare un appunto");
       return;
     }
     try {
@@ -4532,7 +4753,7 @@
       await openNote(slug);
       noteMode = "edit"; // jump straight into writing
     } catch (e) {
-      status = "Errore nel creare l'appunto: " + e;
+      status = t("Errore nel creare l'appunto: {err}", { err: String(e) });
     }
   }
   function onNoteInput() {
@@ -4652,11 +4873,11 @@
     blocks: string[], skipped: number, total: number,
   ) {
     if (noteView?.slug !== targetSlug) {
-      status = "Immagine non inserita: hai cambiato appunto durante la lettura";
+      status = t("Immagine non inserita: hai cambiato appunto durante la lettura");
       return;
     }
     if (!blocks.length) {
-      status = skipped ? "Nessuna immagine inserita (troppo grande o illeggibile)" : "Niente da inserire";
+      status = skipped ? t("Nessuna immagine inserita (troppo grande o illeggibile)") : t("Niente da inserire");
       return;
     }
     const snippet = "\n\n" + blocks.join("\n\n") + "\n\n";
@@ -4675,8 +4896,15 @@
       noteDraft = noteDraft.slice(0, a) + snippet + noteDraft.slice(b);
       onNoteInput();
     }
-    const done = blocks.length === 1 && total === 1 ? "Immagine inserita ✓" : `${blocks.length} immagini inserite ✓`;
-    status = skipped ? `${done} · ${skipped} saltate (troppo grandi o illeggibili)` : done;
+    const done =
+      blocks.length === 1 && total === 1
+        ? t("Immagine inserita ✓")
+        : t("{n} immagini inserite ✓", { n: blocks.length });
+    status = skipped
+      ? [done, tp(skipped, "1 saltata (troppo grande o illeggibile)", "{n} saltate (troppo grandi o illeggibili)")].join(
+          SEP,
+        )
+      : done;
   }
   /** Insert one or more image *files* (paste, or HTML5 drop) at the cursor. The
    *  bytes go to the vault's assets/ folder; the note gets a short reference. */
@@ -4796,20 +5024,20 @@
     if (!noteView) return;
     await flushNote(); // export the latest on-disk copy
     if (!noteSaved) {
-      status = "Salvataggio non riuscito: riprova prima di esportare";
+      status = t("Salvataggio non riuscito: riprova prima di esportare");
       return;
     }
     const ext = fmt === "html" ? "html" : "tex";
     const path = await save({
       defaultPath: `${noteView.slug}.${ext}`,
-      filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+      filters: [{ name: ext.toUpperCase() /* i18n-exempt: sigla del formato */, extensions: [ext] }],
     });
     if (!path) return;
     try {
       await exportNote(noteView.slug, fmt, path);
-      status = fmt === "html" ? "Appunto esportato in HTML ✓" : "Appunto esportato in LaTeX ✓ (con le figure)";
+      status = fmt === "html" ? t("Appunto esportato in HTML ✓") : t("Appunto esportato in LaTeX ✓ (con le figure)");
     } catch (e) {
-      status = "Esportazione non riuscita: " + e;
+      status = t("Esportazione non riuscita: {err}", { err: String(e) });
     }
   }
   /** Export the note as a plain .md copy (the note IS Markdown on disk: this just
@@ -4818,19 +5046,19 @@
     if (!noteView) return;
     await flushNote(); // export the latest content
     if (!noteSaved) {
-      status = "Salvataggio non riuscito: riprova prima di esportare";
+      status = t("Salvataggio non riuscito: riprova prima di esportare");
       return;
     }
     const path = await save({
       defaultPath: `${noteView.slug}.md`,
-      filters: [{ name: "Markdown", extensions: ["md"] }],
+      filters: [{ name: t("Markdown"), extensions: ["md"] }],
     });
     if (!path) return;
     try {
       await writeTextFile(path, noteDraft);
-      status = "Appunto esportato in Markdown ✓";
+      status = t("Appunto esportato in Markdown ✓");
     } catch (e) {
-      status = "Esportazione non riuscita: " + e;
+      status = t("Esportazione non riuscita: {err}", { err: String(e) });
     }
   }
   /** Export the note to PDF: render it to a self-contained HTML page, then open the
@@ -4839,15 +5067,15 @@
     if (!noteView) return;
     await flushNote();
     if (!noteSaved) {
-      status = "Salvataggio non riuscito: riprova prima di esportare";
+      status = t("Salvataggio non riuscito: riprova prima di esportare");
       return;
     }
     try {
       const html = await noteExportHtml(noteView.slug);
       await printHtml(html);
-      status = "Apri la stampa: scegli «Salva come PDF» per esportare";
+      status = t("Apri la stampa: scegli «Salva come PDF» per esportare");
     } catch (e) {
-      status = "Esportazione in PDF non riuscita: " + e;
+      status = t("Esportazione in PDF non riuscita: {err}", { err: String(e) });
     }
   }
   /** Persist the current note. Single-flight (concurrent callers await the same
@@ -4869,7 +5097,7 @@
       try {
         meta = await saveNote(slug, snapshot);
       } catch (e) {
-        status = "Errore nel salvare l'appunto: " + e;
+        status = t("Errore nel salvare l'appunto: {err}", { err: String(e) });
         return; // leave noteSaved=false → callers know the save failed
       }
       if (noteView?.slug !== slug) return; // switched away mid-save; the new note handles itself
@@ -4907,22 +5135,23 @@
   async function commitRename() {
     if (!noteRenaming || !noteView) return;
     const target = noteView.slug; // the note we're renaming
-    const t = noteRenameValue.trim();
+    // `nuovo`, non `t`: qui sotto serve la funzione di traduzione.
+    const nuovo = noteRenameValue.trim();
     noteRenaming = false;
-    if (!t || t === noteView.title) return;
+    if (!nuovo || nuovo === noteView.title) return;
     await flushNote(); // persist body edits so the rename reads the latest content
     if (!noteSaved) {
-      status = "Salvataggio non riuscito: riprova prima di rinominare";
+      status = t("Salvataggio non riuscito: riprova prima di rinominare");
       return;
     }
     try {
-      const newSlug = await renameNote(target, t);
+      const newSlug = await renameNote(target, nuovo);
       await loadNotes();
       // Follow the rename only if we're still viewing that same note.
       if (noteView?.slug === target) await openNote(newSlug);
-      status = "Appunto rinominato ✓";
+      status = t("Appunto rinominato ✓");
     } catch (e) {
-      status = "Errore rinomina: " + e;
+      status = t("Errore rinomina: {err}", { err: String(e) });
     }
   }
   /** Format a note's epoch-ms timestamp for the info line. */
@@ -4932,7 +5161,7 @@
   async function removeNote(slug: string) {
     if (noteView && noteView.slug !== slug) await flushNote(); // persist a different open note first
     const n = notesList.find((x) => x.slug === slug);
-    if (!(await confirmAsk(`Eliminare l'appunto «${n?.title ?? slug}»?`))) return;
+    if (!(await confirmAsk(t("Eliminare l'appunto «{titolo}»?", { titolo: n?.title ?? slug })))) return;
     try {
       await deleteNote(slug);
       if (noteView?.slug === slug) {
@@ -4941,7 +5170,7 @@
       }
       await loadNotes();
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     }
   }
   /** Focus (and select) an input as soon as it mounts — for the rename field. */
@@ -4975,7 +5204,7 @@
     try {
       wikiPages = await wikiList();
     } catch (e) {
-      status = "Wiki: " + e;
+      status = t("Wiki: {err}", { err: String(e) });
     }
   }
   function openWikiView() {
@@ -4986,7 +5215,7 @@
     try {
       wikiPage = await wikiGet(slug);
     } catch (e) {
-      status = "Wiki: " + e;
+      status = t("Wiki: {err}", { err: String(e) });
     }
   }
   async function runWikiGenerate(concept: string, tagId: number | null = null) {
@@ -4998,9 +5227,9 @@
       wikiNewConcept = "";
       await loadWikiList();
       await openWikiPage(slug);
-      status = `Pagina wiki «${c}» generata ✓`;
+      status = t("Pagina wiki «{concetto}» generata ✓", { concetto: c });
     } catch (e) {
-      status = "Wiki: " + e;
+      status = t("Wiki: {err}", { err: String(e) });
     } finally {
       wikiBusy = false;
       wikiProg = null;
@@ -5009,21 +5238,22 @@
   /** Generate/refresh one page per tag (≥2 documents make a meaningful page). */
   async function wikiGenerateFromTags() {
     if (wikiBusy) return;
-    const worth = tags.filter((t) => t.count >= 2);
+    const worth = tags.filter((x) => x.count >= 2);
     if (!worth.length) {
-      status = "Nessun tag con almeno 2 documenti: assegna qualche tag prima";
+      status = t("Nessun tag con almeno 2 documenti: assegna qualche tag prima");
       return;
     }
     wikiBusy = true;
     try {
-      for (const t of worth) {
-        const slug = await wikiGenerate(t.name, t.id);
+      // `tag`, non `t`: la variabile del ciclo ombreggerebbe la traduzione.
+      for (const tag of worth) {
+        const slug = await wikiGenerate(tag.name, tag.id);
         await loadWikiList();
         if (!wikiPage) await openWikiPage(slug);
       }
-      status = `Wiki aggiornata: ${worth.length} pagine ✓`;
+      status = tp(worth.length, "Wiki aggiornata: 1 pagina ✓", "Wiki aggiornata: {n} pagine ✓");
     } catch (e) {
-      status = "Wiki: " + e;
+      status = t("Wiki: {err}", { err: String(e) });
     } finally {
       wikiBusy = false;
       wikiProg = null;
@@ -5043,9 +5273,14 @@
       openWikiView();
       await loadWikiList();
       await openWikiPage(slug);
-      status = `Pagina wiki «${c}» generata dalle ${ids.length} fonti scelte ✓`;
+      status = tp(
+        ids.length,
+        "Pagina wiki «{concetto}» generata da 1 fonte scelta ✓",
+        "Pagina wiki «{concetto}» generata dalle {n} fonti scelte ✓",
+        { concetto: c },
+      );
     } catch (e) {
-      status = "Wiki: " + e;
+      status = t("Wiki: {err}", { err: String(e) });
     } finally {
       wikiBusy = false;
       wikiProg = null;
@@ -5053,13 +5288,13 @@
   }
 
   async function removeWikiPage(slug: string) {
-    if (!(await confirmAsk("Eliminare questa pagina wiki? I documenti non vengono toccati.", "Elimina"))) return;
+    if (!(await confirmAsk(t("Eliminare questa pagina wiki? I documenti non vengono toccati."), t("Elimina")))) return;
     try {
       await wikiDelete(slug);
       if (wikiPage?.slug === slug) wikiPage = null;
       await loadWikiList();
     } catch (e) {
-      status = "" + e;
+      status = "" + e; /* i18n-exempt: nessun testo nostro, solo l'errore */
     }
   }
   async function stopWiki() {
@@ -5103,23 +5338,37 @@
   }
 
   // ---- Sintesi sulla selezione (confronto / rassegna / tabella risultati) ----
-  let aiDoc = $state<(AiDocResult & { kind: string; title: string }) | null>(null);
+  // `kind` è un VALORE, non un'etichetta: decide il nome del file d'export e un
+  // ramo del markup. Prima conteneva le parole italiane «Confronto»/«Rassegna»,
+  // e avvolgerle in t() avrebbe fatto scegliere il ramo sbagliato in silenzio —
+  // nessun errore, solo il comportamento sbagliato. Il titolo mostrato è a parte.
+  let aiDoc = $state<
+    (AiDocResult & { kind: "compare" | "review"; title: string; noteTitle: string }) | null
+  >(null);
   let resultsGrid = $state<string[][] | null>(null);
   let pathModal = $state<{ doc: DocumentItem; steps: PathStep[] } | null>(null);
 
   async function runCompare() {
     const ids = selected.slice(0, 3);
     if (ids.length < 2) {
-      status = "Seleziona 2 o 3 documenti da confrontare";
+      status = t("Seleziona 2 o 3 documenti da confrontare");
       return;
     }
     if (wikiBusy) return;
     wikiBusy = true;
     try {
       const r = await compareDocuments(ids);
-      aiDoc = { ...r, kind: "Confronto", title: `Confronto di ${ids.length} paper` };
+      // `title` faceva DUE mestieri: titolo del modale (interfaccia, da tradurre)
+      // e nome dell'appunto creato da «→ Appunti» (dato su disco, da non
+      // tradurre). Servono due campi, non uno.
+      aiDoc = {
+        ...r,
+        kind: "compare",
+        title: t("Confronto di {n} paper", { n: ids.length }),
+        noteTitle: `Confronto di ${ids.length} paper`, /* i18n-exempt: nome di un appunto sul disco */
+      };
     } catch (e) {
-      status = "Confronto: " + e;
+      status = t("Confronto: {err}", { err: String(e) });
     } finally {
       wikiBusy = false;
       wikiProg = null;
@@ -5128,20 +5377,25 @@
   async function runReview() {
     const picked = selected.length ? selected : [];
     if (picked.length < 2) {
-      status = "Seleziona da 2 a 10 paper per una rassegna";
+      status = t("Seleziona da 2 a 10 paper per una rassegna");
       return;
     }
     const ids = picked.slice(0, 10);
     if (picked.length > 10) {
-      status = `Rassegna sui primi 10 di ${picked.length} paper selezionati (il massimo)`;
+      status = t("Rassegna sui primi 10 di {n} paper selezionati (il massimo)", { n: picked.length });
     }
     if (wikiBusy) return;
     wikiBusy = true;
     try {
       const r = await generateReview(ids);
-      aiDoc = { ...r, kind: "Rassegna", title: `Rassegna di ${ids.length} paper` };
+      aiDoc = {
+        ...r,
+        kind: "review",
+        title: t("Rassegna di {n} paper", { n: ids.length }),
+        noteTitle: `Rassegna di ${ids.length} paper`, /* i18n-exempt: nome di un appunto sul disco */
+      };
     } catch (e) {
-      status = "Rassegna: " + e;
+      status = t("Rassegna: {err}", { err: String(e) });
     } finally {
       wikiBusy = false;
       wikiProg = null;
@@ -5158,7 +5412,7 @@
     const today = new Date().toISOString().slice(0, 10);
     let slug: string | null = null;
     try {
-      slug = await createNote(`${aiDoc.title} — ${today}`);
+      slug = await createNote(`${aiDoc.noteTitle} — ${today}`); /* i18n-exempt: nome dell'appunto sul disco */
       await appendToNote(slug, body); // seeded "# title" + the synthesis with backlinks
     } catch (e) {
       // Roll back the just-created (content-less) note so nothing dangles.
@@ -5169,7 +5423,7 @@
           /* best-effort */
         }
       }
-      status = "Errore nel salvare l'appunto: " + e;
+      status = t("Errore nel salvare l'appunto: {err}", { err: String(e) });
       return;
     }
     aiDoc = null;
@@ -5179,12 +5433,12 @@
     } catch {
       /* the note is saved; just couldn't auto-open it */
     }
-    status = "Salvato negli Appunti ✓";
+    status = t("Salvato negli Appunti ✓");
   }
   async function runHarvest() {
     const ids = selected.slice(0, 8);
     if (!ids.length) {
-      status = "Seleziona i documenti da cui raccogliere i risultati";
+      status = t("Seleziona i documenti da cui raccogliere i risultati");
       return;
     }
     if (wikiBusy) return;
@@ -5192,7 +5446,7 @@
     try {
       resultsGrid = await harvestResults(ids);
     } catch (e) {
-      status = "Risultati: " + e;
+      status = t("Risultati: {err}", { err: String(e) });
     } finally {
       wikiBusy = false;
       wikiProg = null;
@@ -5211,16 +5465,21 @@
     }
     try {
       await navigator.clipboard.writeText(text);
-      status = fmt === "md" ? "Markdown copiato" : fmt === "latex" ? "Copiato con \\cite{…}" : "Copiato con [@citekey]";
+      status =
+        fmt === "md"
+          ? t("Markdown copiato")
+          : fmt === "latex"
+            ? t("Copiato con \\cite{…}")
+            : t("Copiato con [@citekey]");
     } catch {
-      status = "Impossibile copiare";
+      status = t("Impossibile copiare");
     }
   }
   async function saveAiDoc() {
     if (!aiDoc) return;
     const path = await save({
-      defaultPath: aiDoc.kind === "Rassegna" ? "rassegna.md" : "confronto.md",
-      filters: [{ name: "Markdown", extensions: ["md"] }],
+      defaultPath: aiDoc.kind === "review" ? "rassegna.md" : "confronto.md", /* i18n-exempt: nome di file su disco */
+      filters: [{ name: t("Markdown"), extensions: ["md"] }],
     });
     if (!path) return;
     try {
@@ -5228,9 +5487,9 @@
         .map((s) => `[${s.n}] ${s.title}${s.year ? ` (${s.year})` : ""}${s.citekey ? ` — @${s.citekey}` : ""}`)
         .join("\n");
       await writeTextFile(path, `${aiDoc.md}\n\n---\n### Fonti\n${sources}\n`);
-      status = "Salvato ✓";
+      status = t("Salvato ✓");
     } catch (e) {
-      status = "Errore salvataggio: " + e;
+      status = t("Errore salvataggio: {err}", { err: String(e) });
     }
   }
   /** [n] links inside the synthesis open the source document. */
@@ -5259,14 +5518,14 @@
     if (!resultsGrid) return;
     const path = await save({
       defaultPath: `risultati.${fmt}`,
-      filters: [{ name: fmt.toUpperCase(), extensions: [fmt] }],
+      filters: [{ name: fmt.toUpperCase() /* i18n-exempt: sigla del formato */, extensions: [fmt] }],
     });
     if (!path) return;
     try {
       await exportTable(resultsGrid, fmt, path);
-      status = "Tabella esportata ✓";
+      status = t("Tabella esportata ✓");
     } catch (e) {
-      status = "Errore export: " + e;
+      status = t("Errore export: {err}", { err: String(e) });
     }
   }
 
@@ -5275,19 +5534,19 @@
     try {
       pathModal = { doc: d, steps: await readingPath(d.id) };
     } catch (e) {
-      status = "Percorso di lettura: " + e;
+      status = t("Percorso di lettura: {err}", { err: String(e) });
     }
   }
   async function addPathStep(step: PathStep) {
     if (!step.doi) return;
     try {
       await addByIdentifiers([step.doi]);
-      status = "Riferimento aggiunto alla libreria ✓ (usa «Allega PDF…» o Trova PDF per il file)";
+      status = t("Riferimento aggiunto alla libreria ✓ (usa «Allega PDF…» o Trova PDF per il file)");
       await loadDocs();
       await loadSidebar();
       if (pathModal) pathModal = { doc: pathModal.doc, steps: await readingPath(pathModal.doc.id) };
     } catch (e) {
-      status = "Errore: " + e;
+      status = t("Errore: {err}", { err: String(e) });
     }
   }
 
@@ -5318,6 +5577,11 @@
     statusTimer = setTimeout(() => (status = ""), looksErr ? 25000 : 7000);
   });
 
+  // I `value` NON si traducono: sono il tipo `SearchMode` che viaggia verso il
+  // backend. `label` e `desc` restano in italiano perché sono chiavi di
+  // traduzione: la tabella è una costante valutata una volta sola, quindi si
+  // traducono al punto d'uso con `t(m.label)`.
+  /* i18n-exempt: `value` = SearchMode, protocollo col backend */
   const MODES: { value: SearchMode; label: string; desc: string }[] = [
     {
       value: "hybrid",
@@ -5353,15 +5617,15 @@
     {label}
     {#if hasKey[name] && !keyEditing[name]}
       <div class="airow">
-        <span class="keyset">✓ impostata</span>
-        <button class="ghost small" onclick={() => { keyEditing[name] = true; keyInput[name] = ""; }}>Sostituisci</button>
-        <button class="ghost small" onclick={() => clearKey(name)}>Rimuovi</button>
+        <span class="keyset">{t("✓ impostata")}</span>
+        <button class="ghost small" onclick={() => { keyEditing[name] = true; keyInput[name] = ""; }}>{t("Sostituisci")}</button>
+        <button class="ghost small" onclick={() => clearKey(name)}>{t("Rimuovi")}</button>
       </div>
     {:else}
       <div class="airow">
-        <input type="text" bind:value={keyInput[name]} placeholder="incolla la chiave e premi Salva…" onkeydown={(e) => e.key === "Enter" && saveKey(name)} />
-        <button class="ghost small" onclick={() => saveKey(name)}>Salva</button>
-        {#if hasKey[name]}<button class="ghost small" onclick={() => (keyEditing[name] = false)}>Annulla</button>{/if}
+        <input type="text" bind:value={keyInput[name]} placeholder={t("incolla la chiave e premi Salva…")} onkeydown={(e) => e.key === "Enter" && saveKey(name)} />
+        <button class="ghost small" onclick={() => saveKey(name)}>{t("Salva")}</button>
+        {#if hasKey[name]}<button class="ghost small" onclick={() => (keyEditing[name] = false)}>{t("Annulla")}</button>{/if}
       </div>
     {/if}
     <span class="sethint">{hint}</span>
@@ -5369,16 +5633,17 @@
 {/snippet}
 
 {#snippet pubBadge(status: string | null, link: string | null)}
+  <!-- i18n-exempt: «peer-reviewed» e «preprint» si scrivono identici in inglese -->
   {#if status === "published"}
-    <span class="pubbadge pub" title="Articolo peer-reviewed (pubblicato)">peer-reviewed</span>
+    <span class="pubbadge pub" title={t("Articolo peer-reviewed (pubblicato)")}>peer-reviewed</span>
   {:else if status === "preprint"}
-    <span class="pubbadge pre" title="Preprint — nessuna versione peer-reviewed nota">preprint</span>
+    <span class="pubbadge pre" title={t("Preprint — nessuna versione peer-reviewed nota")}>preprint</span>
   {:else if status === "preprint_reviewed"}
-    <span class="pubbadge pre" title="Preprint">preprint</span>
+    <span class="pubbadge pre" title={t("Preprint")}>preprint</span>
     {#if link}
-      <button class="pubbadge pub link" title="La versione peer-reviewed esiste — apri (DOI)" onclick={(e) => { e.stopPropagation(); openInBrowser(link); }}>peer-reviewed ↗</button>
+      <button class="pubbadge pub link" title={t("La versione peer-reviewed esiste — apri (DOI)")} onclick={(e) => { e.stopPropagation(); openInBrowser(link); }}>peer-reviewed ↗</button>
     {:else}
-      <span class="pubbadge pub" title="La versione peer-reviewed esiste">peer-reviewed</span>
+      <span class="pubbadge pub" title={t("La versione peer-reviewed esiste")}>peer-reviewed</span>
     {/if}
   {/if}
 {/snippet}
@@ -5386,20 +5651,22 @@
 <div class="app" class:drag={dragOver}>
   <header>
     <div class="brand">
-      <button class="railtoggle" title="Mostra/nascondi la barra laterale (Ctrl+B)" aria-label="Barra laterale" onclick={(e) => { e.stopPropagation(); sidebarHidden = !sidebarHidden; }}>
+      <button class="railtoggle" title={t("Mostra/nascondi la barra laterale (Ctrl+B)")} aria-label={t("Barra laterale")} onclick={(e) => { e.stopPropagation(); sidebarHidden = !sidebarHidden; }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h18a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM9 4v16" /></svg>
       </button>
+      <!-- i18n-exempt: nome proprio del programma -->
       <h1>Scriptorium</h1>
-      <span class="count" title="Documenti mostrati (o nel filtro attivo)">{tagFilter.length || query.trim() ? displayed.length : docs.length}</span>
+      <span class="count" title={t("Documenti mostrati (o nel filtro attivo)")}>{tagFilter.length || query.trim() ? displayed.length : docs.length}</span>
       {#if aiStat?.enabled}
         <button
           class="aichip"
           class:active={aiStat.reachable && aiStat.model_available}
           class:warn={aiStat.reachable && !aiStat.model_available}
-          title={aiStat.detail}
+          title={te(aiStat.detail)}
           onclick={openSettings}
-          aria-label={aiStat.detail}
+          aria-label={te(aiStat.detail)}
         >
+          <!-- i18n-exempt: sigla identica in inglese -->
           <span class="aidot"></span>AI
         </button>
       {:else}
@@ -5408,10 +5675,11 @@
              in sight — the #1 "the AI won't activate" confusion). -->
         <button
           class="aichip off"
-          title="AI locale disattivata — clic per riattivarla (riassunti, tag automatici, domande…)"
+          title={t("AI locale disattivata — clic per riattivarla (riassunti, tag automatici, domande…)")}
           onclick={quickEnableAi}
-          aria-label="AI locale disattivata — clic per riattivarla"
+          aria-label={t("AI locale disattivata — clic per riattivarla")}
         >
+          <!-- i18n-exempt: sigla, già in inglese -->
           <span class="aidot"></span>AI off
         </button>
       {/if}
@@ -5419,8 +5687,8 @@
         class="aichip idxchip"
         class:active={emb.total > 0 && emb.embedded >= emb.total}
         class:busy={!!embedProgress && embedProgress.phase !== "done" && embedProgress.phase !== "cancelled"}
-        title="Indice semantico: abilita ricerca per significato, correlati e costellazione"
-        aria-label="Indice semantico"
+        title={t("Indice semantico: abilita ricerca per significato, correlati e costellazione")}
+        aria-label={t("Indice semantico")}
         onclick={(e) => { e.stopPropagation(); indexPop = !indexPop; sortPop = false; toolMenu = null; }}
       >
         <span class="aidot"></span>◈ {emb.embedded}/{emb.total}
@@ -5429,9 +5697,9 @@
         <button
           class="aichip active"
           title={pendingUpdate
-            ? `È disponibile Scriptorium ${updateLatest} — clic per vedere le novità e installare`
-            : `È disponibile Scriptorium ${updateLatest} — apri GitHub`}
-          aria-label={`Nuova versione ${updateLatest} disponibile`}
+            ? t("È disponibile Scriptorium {nuova} — clic per vedere le novità e installare", { nuova: updateLatest })
+            : t("È disponibile Scriptorium {nuova} — apri GitHub", { nuova: updateLatest })}
+          aria-label={t("Nuova versione {nuova} disponibile", { nuova: updateLatest })}
           onclick={() => (pendingUpdate ? (updateModal = true) : openInBrowser(updateUrl))}
         >
           <span class="aidot"></span>↑ {updateLatest}
@@ -5442,21 +5710,21 @@
       <input
         class="search"
         type="search"
-        placeholder="Cerca per testo o significato…  ( / )"
-        title="Cerca nei tuoi PDF — scorciatoia: /"
+        placeholder={t("Cerca per testo o significato…  ( / )")}
+        title={t("Cerca nei tuoi PDF — scorciatoia: /")}
         bind:value={query}
         bind:this={searchEl}
       />
       <select
         class="searchmode"
         bind:value={mode}
-        title="Come cercare: Tutto (testo + significato), Testo (parole esatte) o Semantica (per significato)"
+        title={t("Come cercare: Tutto (testo + significato), Testo (parole esatte) o Semantica (per significato)")}
       >
         {#each MODES as m (m.value)}
-          <option value={m.value}>{m.label}</option>
+          <option value={m.value}>{t(m.label)}</option>
         {/each}
       </select>
-      {#if searching}<span class="searchspin">cerco…</span>{/if}
+      {#if searching}<span class="searchspin">{t("cerco…")}</span>{/if}
     </div>
     {#if needsMeta > 0}
       <button
@@ -5465,7 +5733,9 @@
         disabled={enriching}
         title={"Recupera titolo, autori, anno, rivista, abstract e riferimenti dei documenti incompleti:\narXiv dall'id nel nome del file (anche scansioni), poi DOI e titolo dal PDF (Crossref/arXiv).\nSolo abbinamenti sicuri; i restanti si confermano a mano (tasto destro → Organizza → Recupera metadati)."}
       >
-        {enriching ? (metaScan ? `recupero… ${metaScan.done}/${metaScan.total}` : "recupero…") : `✦ ${needsMeta} senza metadati`}
+        {enriching
+          ? (metaScan ? t("recupero… {fatti}/{totale}", { fatti: metaScan.done, totale: metaScan.total }) : t("recupero…"))
+          : t("✦ {n} senza metadati", { n: needsMeta })}
       </button>
     {/if}
     {#if needsPdf > 0}
@@ -5473,17 +5743,19 @@
         class="ambient"
         onclick={findPdfAllRefs}
         disabled={!!pdfBatch}
-        title="Cerca online la copia Open Access delle voci senza PDF (arXiv, Unpaywall, OpenAlex, Semantic Scholar). Scarica solo quando la corrispondenza col titolo è certa. Richiede la ricerca online attiva."
+        title={t("Cerca online la copia Open Access delle voci senza PDF (arXiv, Unpaywall, OpenAlex, Semantic Scholar). Scarica solo quando la corrispondenza col titolo è certa. Richiede la ricerca online attiva.")}
       >
-        {pdfBatch ? `cerco PDF… ${pdfBatch.done}/${pdfBatch.total}` : `✦ ${needsPdf} senza PDF`}
+        {pdfBatch
+          ? t("cerco PDF… {fatti}/{totale}", { fatti: pdfBatch.done, totale: pdfBatch.total })
+          : t("✦ {n} senza PDF", { n: needsPdf })}
       </button>
     {/if}
-    <button class="iconbtn" title="Palette comandi — ogni azione, digitando (Ctrl+K)" aria-label="Palette comandi" onclick={(e) => { e.stopPropagation(); paletteOpen = true; }}>
+    <button class="iconbtn" title={t("Palette comandi — ogni azione, digitando (Ctrl+K)")} aria-label={t("Palette comandi")} onclick={(e) => { e.stopPropagation(); paletteOpen = true; }}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3" /></svg>
     </button>
   </header>
 
-  <nav class="toolbar" aria-label="Strumenti">
+  <nav class="toolbar" aria-label={t("Strumenti")}>
     {#each buildGlobalRadial() as g (g.id)}
       {#if TOOL_SEP.has(g.id)}<span class="tsep" aria-hidden="true"></span>{/if}
       <button
@@ -5507,7 +5779,7 @@
   </nav>
 
   {#if embedProgress && embedProgress.phase !== "done" && embedProgress.phase !== "cancelled"}
-    <div class="headprog" title={embedProgress.phase === "model" ? "Carico il modello bge-m3…" : `Indicizzo ${embedProgress.done}/${embedProgress.total}`}>
+    <div class="headprog" title={embedProgress.phase === "model" ? t("Carico il modello bge-m3…") : t("Indicizzo {fatti}/{totale}", { fatti: embedProgress.done, totale: embedProgress.total })}>
       <div class="fill" style="width:{embedProgress.total ? (embedProgress.done / embedProgress.total) * 100 : 8}%"></div>
     </div>
   {/if}
@@ -5515,45 +5787,45 @@
   {#if filter.kind !== "trash" && filter.kind !== "discover" && filter.kind !== "duplicates" && filter.kind !== "terminal" && filter.kind !== "ask" && filter.kind !== "wiki"}
     <div class="strip">
       <div class="stripleft">
-        <div class="seg" role="group" aria-label="Vista">
-          <button class="segbtn" class:active={view === "grid"} onclick={() => (view = "grid")} title="Griglia (copertine)" aria-label="Vista a griglia">
+        <div class="seg" role="group" aria-label={t("Vista")}>
+          <button class="segbtn" class:active={view === "grid"} onclick={() => (view = "grid")} title={t("Griglia (copertine)")} aria-label={t("Vista a griglia")}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z" /></svg>
           </button>
-          <button class="segbtn" class:active={view === "list"} onclick={() => (view = "list")} title="Lista (colonne ordinabili)" aria-label="Vista a lista">
+          <button class="segbtn" class:active={view === "list"} onclick={() => (view = "list")} title={t("Lista (colonne ordinabili)")} aria-label={t("Vista a lista")}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
           </button>
-          <button class="segbtn" class:active={view === "map"} onclick={() => (view = "map")} title="Costellazione: la libreria come mappa semantica" aria-label="Vista a costellazione">
+          <button class="segbtn" class:active={view === "map"} onclick={() => (view = "map")} title={t("Costellazione: la libreria come mappa semantica")} aria-label={t("Vista a costellazione")}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 4a2 2 0 1 0 .01 0M5 16a2 2 0 1 0 .01 0M19 16a2 2 0 1 0 .01 0M10.8 9.6L6.6 14.6M13.2 9.6l4.2 5" /></svg>
           </button>
         </div>
         {#if view === "grid"}
-          <div class="gridzoom" title="Dimensione delle copertine nella griglia">
-            <button class="zbtn" onclick={() => (gridSize = Math.max(120, gridSize - 30))} aria-label="Copertine più piccole" title="Più piccole">−</button>
-            <input class="zrange" type="range" min="120" max="360" step="10" bind:value={gridSize} aria-label="Dimensione copertine" />
-            <button class="zbtn" onclick={() => (gridSize = Math.min(360, gridSize + 30))} aria-label="Copertine più grandi" title="Più grandi">+</button>
+          <div class="gridzoom" title={t("Dimensione delle copertine nella griglia")}>
+            <button class="zbtn" onclick={() => (gridSize = Math.max(120, gridSize - 30))} aria-label={t("Copertine più piccole")} title={t("Più piccole")}>−</button>
+            <input class="zrange" type="range" min="120" max="360" step="10" bind:value={gridSize} aria-label={t("Dimensione copertine")} />
+            <button class="zbtn" onclick={() => (gridSize = Math.min(360, gridSize + 30))} aria-label={t("Copertine più grandi")} title={t("Più grandi")}>+</button>
           </div>
         {/if}
       </div>
       <div class="stripright">
         {#if displayed.length && view !== "map"}
-          <button class="chipbtn" onclick={toggleSelectAll} title="Seleziona o deseleziona tutti i documenti mostrati (per le azioni multiple)">{allSelected ? "Deseleziona tutti" : "Seleziona tutti"}</button>
-          <button class="chipbtn" class:on={sortChain.length > 0} onclick={(e) => { e.stopPropagation(); sortPop = !sortPop; indexPop = false; toolMenu = null; }} title="Ordina i documenti (più criteri combinabili)">
-            Ordina{#if sortChain.length}: {SORT_LABELS[sortChain[0].key]} {sortArrow(sortChain[0].key)}{#if sortChain.length > 1} +{sortChain.length - 1}{/if}{/if} ▾
+          <button class="chipbtn" onclick={toggleSelectAll} title={t("Seleziona o deseleziona tutti i documenti mostrati (per le azioni multiple)")}>{allSelected ? t("Deseleziona tutti") : t("Seleziona tutti")}</button>
+          <button class="chipbtn" class:on={sortChain.length > 0} onclick={(e) => { e.stopPropagation(); sortPop = !sortPop; indexPop = false; toolMenu = null; }} title={t("Ordina i documenti (più criteri combinabili)")}>
+            {#if !sortChain.length}{t("Ordina")}{:else if sortChain.length === 1}{t("Ordina: {criterio} {freccia}", { criterio: t(SORT_LABELS[sortChain[0].key]), freccia: sortArrow(sortChain[0].key) })}{:else}{t("Ordina: {criterio} {freccia} +{altri}", { criterio: t(SORT_LABELS[sortChain[0].key]), freccia: sortArrow(sortChain[0].key), altri: sortChain.length - 1 })}{/if} ▾
           </button>
         {/if}
       </div>
       {#if sortPop}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="pop sortpop" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === "Escape") sortPop = false; e.stopPropagation(); }} role="menu" tabindex="-1">
-          <div class="poptitle">Ordina per <span class="popnote">un tocco attiva · un altro inverte · un terzo toglie</span></div>
+          <div class="poptitle">{t("Ordina per")} <span class="popnote">{t("un tocco attiva · un altro inverte · un terzo toglie")}</span></div>
           <div class="popchips">
             {#each SORT_KEYS as k (k)}
-              <button class="sortchip" class:on={sortDirOf(k)} onclick={() => cycleSort(k)} title={`Ordina per ${SORT_LABELS[k].toLowerCase()}`}>
-                {SORT_LABELS[k]}{#if sortDirOf(k)}<span class="sar">{sortArrow(k)}</span>{#if sortChain.length > 1}<span class="srank">{sortRank(k)}</span>{/if}{/if}
+              <button class="sortchip" class:on={sortDirOf(k)} onclick={() => cycleSort(k)} title={t("Ordina per {criterio}", { criterio: t(SORT_LABELS[k]).toLowerCase() })}>
+                {t(SORT_LABELS[k])}{#if sortDirOf(k)}<span class="sar">{sortArrow(k)}</span>{#if sortChain.length > 1}<span class="srank">{sortRank(k)}</span>{/if}{/if}
               </button>
             {/each}
           </div>
-          {#if sortChain.length}<button class="sortclear" onclick={clearSort} title="Azzera l'ordinamento">azzera</button>{/if}
+          {#if sortChain.length}<button class="sortclear" onclick={clearSort} title={t("Azzera l'ordinamento")}>{t("azzera")}</button>{/if}
         </div>
       {/if}
     </div>
@@ -5562,13 +5834,13 @@
   {#if indexPop}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="pop indexpop" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === "Escape") indexPop = false; e.stopPropagation(); }} role="dialog" tabindex="-1">
-      <div class="poptitle">Indice semantico</div>
-      <p class="popbody">Abilita la ricerca per significato, i «Correlati» e la Costellazione. {emb.embedded}/{emb.total} documenti indicizzati.</p>
+      <div class="poptitle">{t("Indice semantico")}</div>
+      <p class="popbody">{t("Abilita la ricerca per significato, i «Correlati» e la Costellazione. {fatti}/{totale} documenti indicizzati.", { fatti: emb.embedded, totale: emb.total })}</p>
       {#if embedProgress && embedProgress.phase !== "done" && embedProgress.phase !== "cancelled"}
         <div class="poprow">
-          <span class="hint">{embedProgress.phase === "model" ? "Carico modello bge-m3…" : `Indicizzo ${embedProgress.done}/${embedProgress.total}`}</span>
+          <span class="hint">{embedProgress.phase === "model" ? t("Carico modello bge-m3…") : t("Indicizzo {fatti}/{totale}", { fatti: embedProgress.done, totale: embedProgress.total })}</span>
           <div class="bar"><div class="fill" style="width:{embedProgress.total ? (embedProgress.done / embedProgress.total) * 100 : 8}%"></div></div>
-          <button class="ghost small" onclick={stopIndex} title="Ferma l'indicizzazione (i documenti già indicizzati restano salvati)">Stop</button>
+          <button class="ghost small" onclick={stopIndex} title={t("Ferma l'indicizzazione (i documenti già indicizzati restano salvati)")}>{t("Stop")}</button>
         </div>
       {:else}
         <div class="poprow">
@@ -5576,9 +5848,9 @@
             class="ghost small"
             onclick={generateIndex}
             disabled={generating || emb.embedded >= emb.total || emb.total === 0}
-            title="Calcola gli embedding mancanti (la prima volta scarica il modello ~2.3GB)"
+            title={t("Calcola gli embedding mancanti (la prima volta scarica il modello ~2.3GB)")}
           >
-            {generating ? "…" : emb.embedded >= emb.total && emb.total > 0 ? "Aggiornato ✓" : "Genera"}
+            {generating ? "…" : emb.embedded >= emb.total && emb.total > 0 ? t("Aggiornato ✓") : t("Genera")}
           </button>
         </div>
       {/if}
@@ -5587,128 +5859,131 @@
 
   <div class="body">
     <aside class="sidebar" class:collapsed={sidebarHidden} inert={sidebarHidden}>
-      <button class="navitem" class:active={filter.kind === "all"} onclick={() => setFilter({ kind: "all" })} title="Mostra tutti i documenti (rimuovi i filtri)">
-        Tutti{#if facets.all}<span class="navcount">{facets.all}</span>{/if}
+      <button class="navitem" class:active={filter.kind === "all"} onclick={() => setFilter({ kind: "all" })} title={t("Mostra tutti i documenti (rimuovi i filtri)")}>
+        {t("Tutti")}{#if facets.all}<span class="navcount">{facets.all}</span>{/if}
       </button>
-      <button class="navitem" class:active={filter.kind === "favorite"} onclick={() => setFilter({ kind: "favorite" })} title="Solo i documenti contrassegnati come preferiti">
-        Preferiti{#if facets.favorite}<span class="navcount">{facets.favorite}</span>{/if}
+      <button class="navitem" class:active={filter.kind === "favorite"} onclick={() => setFilter({ kind: "favorite" })} title={t("Solo i documenti contrassegnati come preferiti")}>
+        {t("Preferiti")}{#if facets.favorite}<span class="navcount">{facets.favorite}</span>{/if}
       </button>
-      <button class="navitem" class:active={filter.kind === "unread"} onclick={() => setFilter({ kind: "unread" })} title="Solo i documenti non ancora segnati come letti">
-        Da leggere{#if facets.unread}<span class="navcount">{facets.unread}</span>{/if}
+      <button class="navitem" class:active={filter.kind === "unread"} onclick={() => setFilter({ kind: "unread" })} title={t("Solo i documenti non ancora segnati come letti")}>
+        {t("Da leggere")}{#if facets.unread}<span class="navcount">{facets.unread}</span>{/if}
       </button>
-      <button class="navitem" class:active={filter.kind === "github"} onclick={() => setFilter({ kind: "github" })} title="Solo i documenti che citano un repository GitHub (codice disponibile)">
-        Con codice (GitHub){#if facets.github}<span class="navcount">{facets.github}</span>{/if}
+      <button class="navitem" class:active={filter.kind === "github"} onclick={() => setFilter({ kind: "github" })} title={t("Solo i documenti che citano un repository GitHub (codice disponibile)")}>
+        {t("Con codice (GitHub)")}{#if facets.github}<span class="navcount">{facets.github}</span>{/if}
       </button>
-      <button class="navitem" class:active={filter.kind === "peerreviewed"} onclick={() => setFilter({ kind: "peerreviewed" })} title="Solo gli articoli peer-reviewed (pubblicati), esclusi i preprint">
-        Peer-reviewed{#if facets.peerreviewed}<span class="navcount">{facets.peerreviewed}</span>{/if}
+      <button class="navitem" class:active={filter.kind === "peerreviewed"} onclick={() => setFilter({ kind: "peerreviewed" })} title={t("Solo gli articoli peer-reviewed (pubblicati), esclusi i preprint")}>
+        {t("Peer-reviewed")}{#if facets.peerreviewed}<span class="navcount">{facets.peerreviewed}</span>{/if}
       </button>
       {#if facets.own}
-        <button class="navitem" class:active={filter.kind === "mywork"} onclick={() => setFilter({ kind: "mywork" })} title="I tuoi lavori, importati da progetti LaTeX (.zip)">
-          Il mio lavoro<span class="navcount">{facets.own}</span>
+        <button class="navitem" class:active={filter.kind === "mywork"} onclick={() => setFilter({ kind: "mywork" })} title={t("I tuoi lavori, importati da progetti LaTeX (.zip)")}>
+          {t("Il mio lavoro")}<span class="navcount">{facets.own}</span>
         </button>
       {/if}
 
       <div class="sec tagsec">
-        <button class="seclabel" onclick={() => (tagsCollapsed = !tagsCollapsed)} title="Comprimi o espandi i tag">
+        <button class="seclabel" onclick={() => (tagsCollapsed = !tagsCollapsed)} title={t("Comprimi o espandi i tag")}>
           <span class="chev" class:open={!tagsCollapsed}>▸</span>
-          Tag
+          {t("Tag")}
           <span class="seccount">{tags.length}</span>
         </button>
         <span class="secbtns">
           {#if tags.length > 1}
-            <button class="secaction" onclick={() => (tagSort = tagSort === "asc" ? "desc" : "asc")} title="Ordina i tag in ordine alfabetico (A→Z / Z→A)">{tagSort === "asc" ? "A→Z" : "Z→A"}</button>
+            <button class="secaction" onclick={() => (tagSort = tagSort === "asc" ? "desc" : "asc")} title={t("Ordina i tag in ordine alfabetico (A→Z / Z→A)")}>{tagSort === "asc" ? "A→Z" : "Z→A"}</button>
           {/if}
-          {#if tagFilter.length}<button class="secaction" onclick={clearTags} title="Azzera il filtro per tag">azzera</button>{/if}
+          {#if tagFilter.length}<button class="secaction" onclick={clearTags} title={t("Azzera il filtro per tag")}>{t("azzera")}</button>{/if}
         </span>
       </div>
       {#if !tagsCollapsed}
         <div class="taglist">
-          {#each displayedTags as t (t.id)}
+          <!-- la variabile del ciclo si chiama `tag`, non `t`: `t` è la funzione di traduzione -->
+          {#each displayedTags as tag (tag.id)}
             <div class="navrow">
-              <button class="navitem" class:active={tagFilter.includes(t.id)} onclick={() => toggleTagFilter(t.id)} title={`Filtra per il tag "${t.name}" (${t.count} paper) — puoi selezionarne più di uno`}>
-                <span class="dot" style="background:{t.color ?? '#888'}"></span>{t.name}
-                <span class="navcount">{t.count}</span>
-                {#if tagFilter.includes(t.id)}<span class="navcheck">✓</span>{/if}
+              <button class="navitem" class:active={tagFilter.includes(tag.id)} onclick={() => toggleTagFilter(tag.id)} title={tp(tag.count, "Filtra per il tag «{nome}» (1 paper) — puoi selezionarne più di uno", "Filtra per il tag «{nome}» ({n} paper) — puoi selezionarne più di uno", { nome: tag.name })}>
+                <span class="dot" style="background:{tag.color ?? '#888'}"></span>{tag.name}
+                <span class="navcount">{tag.count}</span>
+                {#if tagFilter.includes(tag.id)}<span class="navcheck">✓</span>{/if}
               </button>
-              <button class="x edit" title="Rinomina o cambia colore" aria-label={`Modifica il tag ${t.name}`} onclick={(e) => { e.stopPropagation(); tagEdit = { id: t.id, name: t.name, color: t.color ?? PALETTE[0], x: (e.currentTarget as HTMLElement).getBoundingClientRect().left, y: (e.currentTarget as HTMLElement).getBoundingClientRect().bottom + 4 }; }}>✎</button>
-              <button class="x" title="Elimina questo tag (lo rimuove da tutti i documenti)" onclick={() => removeTag(t)}>×</button>
+              <button class="x edit" title={t("Rinomina o cambia colore")} aria-label={t("Modifica il tag {nome}", { nome: tag.name })} onclick={(e) => { e.stopPropagation(); tagEdit = { id: tag.id, name: tag.name, color: tag.color ?? PALETTE[0], x: (e.currentTarget as HTMLElement).getBoundingClientRect().left, y: (e.currentTarget as HTMLElement).getBoundingClientRect().bottom + 4 }; }}>✎</button>
+              <button class="x" title={t("Elimina questo tag (lo rimuove da tutti i documenti)")} onclick={() => removeTag(tag)}>×</button>
             </div>
           {/each}
         </div>
       {/if}
 
       <div class="sec secrow">
-        <span>Raccolte</span>
+        <span>{t("Raccolte")}</span>
         <button
           class="seclink"
-          title="Archivio: raccolte e sotto-raccolte ad albero, trascinamento, suggerimenti"
+          title={t("Archivio: raccolte e sotto-raccolte ad albero, trascinamento, suggerimenti")}
           onclick={() => setFilter({ kind: "archivio" })}
-        >gestisci →</button>
+        >{t("gestisci →")}</button>
       </div>
       {#each collections as c (c.id)}
         <div class="navrow">
-          <button class="navitem" class:active={filter.kind === "collection" && filter.id === c.id} onclick={() => setFilter({ kind: "collection", id: c.id, label: c.name })} title={`Filtra per la raccolta "${c.name}"${c.is_smart ? " (smart: si aggiorna da sola)" : ""}`}>
+          <button class="navitem" class:active={filter.kind === "collection" && filter.id === c.id} onclick={() => setFilter({ kind: "collection", id: c.id, label: c.name })} title={c.is_smart ? t("Filtra per la raccolta «{nome}» (smart: si aggiorna da sola)", { nome: c.name }) : t("Filtra per la raccolta «{nome}»", { nome: c.name })}>
             {c.name}
           </button>
           {#if !c.is_smart}
             <button
               class="x mapx"
-              title={`Costellazione della sola raccolta «${c.name}»`}
-              aria-label={`Costellazione di ${c.name}`}
+              title={t("Costellazione della sola raccolta «{nome}»", { nome: c.name })}
+              aria-label={t("Costellazione di {nome}", { nome: c.name })}
               onclick={() => openGraphForCollection(c.id, c.name)}
             >✳</button>
           {/if}
-          <button class="x" title="Elimina la raccolta (i documenti restano in libreria)" onclick={() => removeColl(c)}>×</button>
+          <button class="x" title={t("Elimina la raccolta (i documenti restano in libreria)")} onclick={() => removeColl(c)}>×</button>
         </div>
       {/each}
 
       <div class="newcoll">
         <input
-          placeholder="Nuova raccolta…"
-          title="Nome della nuova raccolta. Premi Invio o «Crea»"
+          placeholder={t("Nuova raccolta…")}
+          title={t("Nome della nuova raccolta. Premi Invio o «Crea»")}
           bind:value={newCollName}
           onkeydown={(e) => e.key === "Enter" && makeCollection()}
         />
-        <label class="smart" title="Raccolta automatica: si popola da sola in base a una regola, invece di aggiungere i documenti a mano">
+        <label class="smart" title={t("Raccolta automatica: si popola da sola in base a una regola, invece di aggiungere i documenti a mano")}>
+          <!-- i18n-exempt: «smart» è già inglese, usato tale e quale in italiano -->
           <input type="checkbox" bind:checked={newCollSmart} /> smart
         </label>
         {#if newCollSmart}
-          <select bind:value={smartType} title="Regola di appartenenza della raccolta smart">
-            <option value="untagged">Senza tag</option>
-            <option value="year_gte">Anno ≥</option>
-            <option value="tag">Per tag (id)</option>
-            <option value="text">Testo</option>
+          <select bind:value={smartType} title={t("Regola di appartenenza della raccolta smart")}>
+            <!-- i18n-exempt: i `value` sono la regola smart salvata nel database -->
+            <option value="untagged">{t("Senza tag")}</option>
+            <option value="year_gte">{t("Anno ≥")}</option>
+            <option value="tag">{t("Per tag (id)")}</option>
+            <option value="text">{t("Testo")}</option>
           </select>
           {#if smartType !== "untagged"}
-            <input class="sval" placeholder="valore" title="Valore della regola: anno minimo, id del tag, o testo da cercare" bind:value={smartValue} />
+            <input class="sval" placeholder={t("valore")} title={t("Valore della regola: anno minimo, id del tag, o testo da cercare")} bind:value={smartValue} />
           {/if}
         {/if}
-        <button class="ghost small" onclick={makeCollection} title="Crea la raccolta">Crea</button>
+        <button class="ghost small" onclick={makeCollection} title={t("Crea la raccolta")}>{t("Crea")}</button>
       </div>
 
       {#if savedSearches.length}
-        <div class="sec">Ricerche salvate</div>
+        <div class="sec">{t("Ricerche salvate")}</div>
         {#each savedSearches as s (s.id)}
           <div class="navrow">
-            <button class="navitem" onclick={() => runSaved(s)} title={`Rilancia «${s.name}» e mostra le novità — fonte: ${s.source}`}>
+            <button class="navitem" onclick={() => runSaved(s)} title={t("Rilancia «{nome}» e mostra le novità — fonte: {fonte}", { nome: s.name, fonte: s.source })}>
               <span class="dot saveddot"></span>{s.name}
             </button>
-            <button class="x" title="Elimina questa ricerca salvata" onclick={() => removeSaved(s)}>×</button>
+            <button class="x" title={t("Elimina questa ricerca salvata")} onclick={() => removeSaved(s)}>×</button>
           </div>
         {/each}
       {/if}
 
-      <div class="sec">Cartella sorvegliata</div>
+      <div class="sec">{t("Cartella sorvegliata")}</div>
       <div class="watched">
         {#if watchedFolder}
           <span class="wpath" title={watchedFolder}>{baseName(watchedFolder)}</span>
-          <button class="x" title="Smetti di sorvegliare" onclick={clearWatchedFolder}>×</button>
+          <button class="x" title={t("Smetti di sorvegliare")} onclick={clearWatchedFolder}>×</button>
         {:else}
-          <button class="ghost small" onclick={pickWatchedFolder} title="Scegli una cartella: importa subito i PDF già presenti e poi quelli che aggiungerai automaticamente">Scegli cartella…</button>
+          <button class="ghost small" onclick={pickWatchedFolder} title={t("Scegli una cartella: importa subito i PDF già presenti e poi quelli che aggiungerai automaticamente")}>{t("Scegli cartella…")}</button>
         {/if}
       </div>
 
-      <p class="sidehint" title="Chiedi alla libreria, Wiki, Appunti, Cerca online, Novità, Cura della libreria, Cestino, Terminale, Guida, Impostazioni e Informazioni sono ora nella barra strumenti in alto ↑ — tasto destro: menu radiale · Ctrl+K: palette">Gli strumenti sono nella barra in alto ↑</p>
+      <p class="sidehint" title={t("Chiedi alla libreria, Wiki, Appunti, Cerca online, Novità, Cura della libreria, Cestino, Terminale, Guida, Impostazioni e Informazioni sono ora nella barra strumenti in alto ↑ — tasto destro: menu radiale · Ctrl+K: palette")}>{t("Gli strumenti sono nella barra in alto ↑")}</p>
     </aside>
 
     <main class="main">
@@ -5721,22 +5996,22 @@
         <!-- terminal is rendered in the persistent host above -->
       {:else if filter.kind === "trash"}
         <div class="fbanner">
-          <span>Cestino — {docs.length} {docs.length === 1 ? "elemento" : "elementi"}</span>
-          {#if docs.length}<button onclick={emptyTrash} title="Elimina definitivamente tutto il cestino">Svuota cestino</button>{/if}
+          <span>{tp(docs.length, "Cestino — 1 elemento", "Cestino — {n} elementi")}</span>
+          {#if docs.length}<button onclick={emptyTrash} title={t("Elimina definitivamente tutto il cestino")}>{t("Svuota cestino")}</button>{/if}
         </div>
         {#if docs.length === 0}
-          <div class="empty"><p class="big">Cestino vuoto</p></div>
+          <div class="empty"><p class="big">{t("Cestino vuoto")}</p></div>
         {:else}
           <div class="listwrap">
             <table class="list">
               <tbody>
                 {#each docs as d (d.id)}
                   <tr>
-                    <td class="ttl">{d.title ?? "Senza titolo"}</td>
+                    <td class="ttl">{d.title ?? t("Senza titolo")}</td>
                     <td class="dim">{authorLine(d) || "—"}</td>
                     <td class="rowact">
-                      <button class="rowbtn" title="Ripristina nella libreria" onclick={() => restoreFromTrash(d.id)}>Ripristina</button>
-                      <button class="rowbtn del" title="Elimina definitivamente (irreversibile)" onclick={() => purgeFromTrash(d.id)}>✕</button>
+                      <button class="rowbtn" title={t("Ripristina nella libreria")} onclick={() => restoreFromTrash(d.id)}>{t("Ripristina")}</button>
+                      <button class="rowbtn del" title={t("Elimina definitivamente (irreversibile)")} onclick={() => purgeFromTrash(d.id)}>✕</button>
                     </td>
                   </tr>
                 {/each}
@@ -5745,19 +6020,20 @@
           </div>
         {/if}
       {:else if filter.kind === "duplicates"}
-        <div class="fbanner"><span>Duplicati — {dupGroups.length} {dupGroups.length === 1 ? "gruppo" : "gruppi"}</span></div>
+        <div class="fbanner"><span>{tp(dupGroups.length, "Duplicati — 1 gruppo", "Duplicati — {n} gruppi")}</span></div>
         {#if dupGroups.length === 0}
-          <div class="empty"><p class="big">Nessun duplicato</p><p>Nessun doppione per DOI o titolo+anno.</p></div>
+          <div class="empty"><p class="big">{t("Nessun duplicato")}</p><p>{t("Nessun doppione per DOI o titolo+anno.")}</p></div>
         {:else}
           <div class="dupwrap">
             {#each dupGroups as g, gi (gi)}
               <div class="dupgroup">
                 <div class="duphead">
-                  <span>{g.length} copie</span>
-                  <button class="ghost small" onclick={() => doMerge(g)} title="Unisci nel primo: sposta tag/raccolte/annotazioni, gli altri finiscono nel cestino">Unisci</button>
+                  <span>{tp(g.length, "1 copia", "{n} copie")}</span>
+                  <button class="ghost small" onclick={() => doMerge(g)} title={t("Unisci nel primo: sposta tag/raccolte/annotazioni, gli altri finiscono nel cestino")}>{t("Unisci")}</button>
                 </div>
                 {#each g as id, i (id)}
                   <div class="duprow">
+                    <!-- i18n-exempt: «master» si usa identico in inglese -->
                     <span class="badge">{i === 0 ? "master" : "↳"}</span>
                     <span class="dt" title={dupMap[id]?.title ?? ""}>{dupMap[id]?.title ?? "#" + id}</span>
                     <span class="dim">{dupMap[id] ? [dupMap[id].venue, dupMap[id].year].filter(Boolean).join(" · ") : ""}</span>
@@ -5770,62 +6046,66 @@
       {:else if filter.kind === "ask"}
         <div class="askwrap">
           <div class="askhead">
-            <h2 class="askh">Chiedi alla libreria</h2>
-            <p class="askintro">Domande in linguaggio naturale → risposta con citazioni dai tuoi documenti. Tutto in locale (recupero dei passaggi + espansione su citazioni e documenti simili + AI locale).</p>
+            <h2 class="askh">{t("Chiedi alla libreria")}</h2>
+            <p class="askintro">{t("Domande in linguaggio naturale → risposta con citazioni dai tuoi documenti. Tutto in locale (recupero dei passaggi + espansione su citazioni e documenti simili + AI locale).")}</p>
             <div class="askindex">
               {#if ragStatus}
-                <span class="askstat">Indice: <strong>{ragStatus.indexed_docs}/{ragStatus.total_docs}</strong> documenti · {ragStatus.chunks} passaggi</span>
+                <span class="askstat">{t("Indice: {fatti}/{totale} documenti · {passaggi} passaggi", { fatti: ragStatus.indexed_docs, totale: ragStatus.total_docs, passaggi: ragStatus.chunks })}</span>
               {/if}
               {#if ragBuilding}
-                <span class="askstat">Indicizzazione… {ragProg ? `${ragProg.done}/${ragProg.total}` : ""}</span>
-                <button class="ghost small" onclick={doCancelIndex}>Stop</button>
+                <span class="askstat">{ragProg ? t("Indicizzazione… {fatti}/{totale}", { fatti: ragProg.done, totale: ragProg.total }) : t("Indicizzazione…")}</span>
+                <button class="ghost small" onclick={doCancelIndex}>{t("Stop")}</button>
               {:else}
-                <button class="ghost small" onclick={doBuildIndex} title="Crea/aggiorna l'indice dei passaggi (necessario per le risposte)">
-                  {ragStatus && ragStatus.indexed_docs < ragStatus.total_docs ? "Costruisci/aggiorna indice" : "Aggiorna indice"}
+                <button class="ghost small" onclick={doBuildIndex} title={t("Crea/aggiorna l'indice dei passaggi (necessario per le risposte)")}>
+                  {ragStatus && ragStatus.indexed_docs < ragStatus.total_docs ? t("Costruisci/aggiorna indice") : t("Aggiorna indice")}
                 </button>
                 {#if ragStatus && ragStatus.chunks > 0}
-                  <button class="ghost small" onclick={doRebuildIndex} title="Rigenera tutti i passaggi da zero (per ottenere le pagine sui documenti già indicizzati)">Ricostruisci</button>
+                  <button class="ghost small" onclick={doRebuildIndex} title={t("Rigenera tutti i passaggi da zero (per ottenere le pagine sui documenti già indicizzati)")}>{t("Ricostruisci")}</button>
                 {/if}
               {/if}
             </div>
           </div>
           {#if !aiStat?.enabled}
-            <p class="askwarn">Le funzioni AI sono disattivate. Abilitale in <strong>Impostazioni → AI locale</strong> (serve Ollama o LM Studio).</p>
+            <p class="askwarn">{t("Le funzioni AI sono disattivate. Abilitale in")} <strong>{t("Impostazioni → AI locale")}</strong> {t("(serve Ollama o LM Studio).")}</p>
           {:else if !aiStat?.reachable}
-            <p class="askwarn">Provider AI non raggiungibile. Avvia Ollama/LM Studio o controlla le Impostazioni.</p>
+            <p class="askwarn">{t("Provider AI non raggiungibile. Avvia Ollama/LM Studio o controlla le Impostazioni.")}</p>
           {/if}
           {#if askScope}
             <div class="askscope">
-              Ambito: <strong>{askScope.label}</strong>
-              <button class="scopex" title="Cerca in tutta la libreria" onclick={() => (askScope = null)}>✕</button>
+              {t("Ambito:")} <strong>{askScope.label}</strong>
+              <button class="scopex" title={t("Cerca in tutta la libreria")} onclick={() => (askScope = null)}>✕</button>
             </div>
           {/if}
           <div class="askbar">
             <input
               class="askq"
-              placeholder={askScope ? "Domanda su questo documento…" : "Es. cosa dicono i miei paper su…"}
+              placeholder={askScope ? t("Domanda su questo documento…") : t("Es. cosa dicono i miei paper su…")}
               bind:value={askQuestion}
               onkeydown={(e) => e.key === "Enter" && doAsk()}
             />
-            <button class="primary" onclick={doAsk} disabled={asking || !askQuestion.trim()}>{asking ? "…" : "Chiedi"}</button>
+            <button class="primary" onclick={doAsk} disabled={asking || !askQuestion.trim()}>{asking ? "…" : t("Chiedi")}</button>
           </div>
           {#if asking && !askAnswer}
-            <p class="askstat">Sto cercando nei tuoi documenti…</p>
+            <p class="askstat">{t("Sto cercando nei tuoi documenti…")}</p>
           {/if}
           {#if askAnswer}
-            <div class="askanswer">{#each answerParts(askAnswer) as p}{#if p.n !== null}<button class="citechip" title="Apri la fonte" onclick={() => openSourceN(p.n!)}>{p.t}</button>{:else}{p.t}{/if}{/each}{#if asking}<span class="caret">▍</span>{/if}</div>
+            <div class="askanswer">{#each answerParts(askAnswer) as p}{#if p.n !== null}<button class="citechip" title={t("Apri la fonte")} onclick={() => openSourceN(p.n!)}>{p.t}</button>{:else}{p.t}{/if}{/each}{#if asking}<span class="caret">▍</span>{/if}</div>
             {#if askGroups.length}
               <div class="asksrc">
-                <h3>Fonti</h3>
+                <h3>{t("Fonti")}</h3>
                 <ul class="srclist">
                   {#each askGroups as g (g.document_id)}
                     <li>
                       <button class="hflink" onclick={() => openById(g.document_id)}>{g.title}</button>
-                      {#if g.items[0].relation !== "match"}<span class="srcrel">{g.items[0].relation}</span>{/if}
+                      <!-- i18n-exempt: "match" e' un valore di protocollo del Rust, non testo mostrato -->
+                      <!-- l'etichetta mostrata («citazione»/«simile») arriva in italiano dal Rust: si traduce qui -->
+                      {#if g.items[0].relation !== "match"}<span class="srcrel">{te(g.items[0].relation)}</span>{/if}
                       <div class="passages">
                         {#each g.items as s (s.n)}
-                          <span class="passchip" title={`Passaggio usato${s.page != null ? ` (p. ${s.page})` : ""}:\n\n${s.excerpt}`}>
-                            [{s.n}]{#if s.page != null}<span class="ppage"> p. {s.page}</span>{/if}
+                          <span class="passchip" title={s.page != null
+                            ? t("Passaggio usato (p. {pagina}):\n\n{testo}", { pagina: s.page, testo: s.excerpt })
+                            : t("Passaggio usato:\n\n{testo}", { testo: s.excerpt })}>
+                            [{s.n}]{#if s.page != null}<span class="ppage">{" " + t("p. {pagina}", { pagina: s.page })}</span>{/if}
                           </span>
                         {/each}
                       </div>
@@ -5841,38 +6121,41 @@
           <aside class="wikinav">
             <div class="wikinew">
               <input
-                placeholder="Nuova pagina: concetto o tag…"
+                placeholder={t("Nuova pagina: concetto o tag…")}
                 bind:value={wikiNewConcept}
                 onkeydown={(e) => e.key === "Enter" && runWikiGenerate(wikiNewConcept)}
-                title="Scrivi un concetto (o il nome di un tag): la pagina viene sintetizzata dai documenti pertinenti"
+                title={t("Scrivi un concetto (o il nome di un tag): la pagina viene sintetizzata dai documenti pertinenti")}
               />
-              <button class="ghost small" onclick={() => runWikiGenerate(wikiNewConcept)} disabled={wikiBusy || !wikiNewConcept.trim()}>{wikiBusy ? "…" : "Genera"}</button>
+              <button class="ghost small" onclick={() => runWikiGenerate(wikiNewConcept)} disabled={wikiBusy || !wikiNewConcept.trim()}>{wikiBusy ? "…" : t("Genera")}</button>
             </div>
-            <button class="ghost small wikiall" onclick={wikiGenerateFromTags} disabled={wikiBusy} title="Una pagina per ogni tag con almeno 2 documenti (le esistenti vengono rigenerate)">
-              {wikiBusy ? "Genero…" : "Genera/aggiorna dai tag"}
+            <button class="ghost small wikiall" onclick={wikiGenerateFromTags} disabled={wikiBusy} title={t("Una pagina per ogni tag con almeno 2 documenti (le esistenti vengono rigenerate)")}>
+              {wikiBusy ? t("Genero…") : t("Genera/aggiorna dai tag")}
             </button>
             {#if wikiProg}
+              {@const fase = wikiProg.phase === "estrazione"
+                ? t("Leggo le fonti {fatti}/{totale}", { fatti: wikiProg.done + 1, totale: wikiProg.total - 1 })
+                : wikiProg.phase === "sintesi" ? t("Scrivo la pagina…") : t("Controllo le fonti…")}
               <div class="wikiprog">
-                <span class="hint">{wikiProg.phase === "estrazione" ? `Leggo le fonti ${wikiProg.done + 1}/${wikiProg.total - 1}` : wikiProg.phase === "sintesi" ? "Scrivo la pagina…" : "Controllo le fonti…"} — {wikiProg.concept}</span>
+                <span class="hint">{t("{fase} — {concetto}", { fase, concetto: wikiProg.concept })}</span>
                 <div class="bar"><div class="fill" style="width:{wikiProg.total ? (wikiProg.done / wikiProg.total) * 100 : 5}%"></div></div>
-                <button class="ghost small" onclick={stopWiki} title="Ferma al prossimo passaggio">Stop</button>
+                <button class="ghost small" onclick={stopWiki} title={t("Ferma al prossimo passaggio")}>{t("Stop")}</button>
               </div>
             {/if}
             {#if !aiStat?.enabled}
-              <p class="askwarn">Le funzioni AI sono disattivate: abilitale in <strong>Impostazioni → AI locale</strong>.</p>
+              <p class="askwarn">{t("Le funzioni AI sono disattivate: abilitale in")} <strong>{t("Impostazioni → AI locale")}</strong>.</p>
             {/if}
             <div class="wikilist">
               {#each wikiPages as p (p.slug)}
                 <div class="navrow">
-                  <button class="navitem" class:active={wikiPage?.slug === p.slug} onclick={() => openWikiPage(p.slug)} title={`${p.n_sources} fonti · generata ${p.generated_at ?? ""}${p.stale ? " · la libreria è cambiata: rigenera" : ""}`}>
+                  <button class="navitem" class:active={wikiPage?.slug === p.slug} onclick={() => openWikiPage(p.slug)} title={[tp(p.n_sources, "1 fonte", "{n} fonti"), t("generata {quando}", { quando: p.generated_at ?? "" }), ...(p.stale ? [t("la libreria è cambiata: rigenera")] : [])].join(SEP)}>
                     {p.title}
-                    {#if p.stale}<span class="wikistale" title="La libreria è cambiata da quando è stata generata">●</span>{/if}
+                    {#if p.stale}<span class="wikistale" title={t("La libreria è cambiata da quando è stata generata")}>●</span>{/if}
                   </button>
-                  <button class="x" title="Elimina questa pagina" onclick={() => removeWikiPage(p.slug)}>×</button>
+                  <button class="x" title={t("Elimina questa pagina")} onclick={() => removeWikiPage(p.slug)}>×</button>
                 </div>
               {/each}
               {#if !wikiPages.length}
-                <p class="wikiempty">Nessuna pagina ancora. Scrivi un concetto qui sopra, o parti da «Genera dai tag».</p>
+                <p class="wikiempty">{t("Nessuna pagina ancora. Scrivi un concetto qui sopra, o parti da «Genera dai tag».")}</p>
               {/if}
             </div>
           </aside>
@@ -5880,23 +6163,23 @@
             {#if wikiPage}
               <header class="wikihead">
                 <h2 class="wikititle">{wikiPage.title}</h2>
-                <span class="wikimeta">{wikiPage.sources.length} fonti · {wikiPage.model ?? ""}</span>
-                <button class="ghost small" onclick={() => runWikiGenerate(wikiPage!.concept)} disabled={wikiBusy} title="Rigenera la pagina con lo stato attuale della libreria">Rigenera</button>
+                <span class="wikimeta">{[tp(wikiPage.sources.length, "1 fonte", "{n} fonti"), wikiPage.model ?? ""].filter(Boolean).join(SEP)}</span>
+                <button class="ghost small" onclick={() => runWikiGenerate(wikiPage!.concept)} disabled={wikiBusy} title={t("Rigenera la pagina con lo stato attuale della libreria")}>{t("Rigenera")}</button>
               </header>
               <article class="wikihtml" use:wikiLinksAction use:mathRender={wikiPage.html}>
                 <!-- eslint-disable-next-line svelte/no-at-html-tags -- HTML sanificato dal backend (ammonia) -->
                 {@html wikiPage.html}
               </article>
               <div class="wikisources">
-                <h3>Fonti</h3>
+                <h3>{t("Fonti")}</h3>
                 {#each wikiPage.sources as s (s.n)}
                   <div class="wikisrc" class:unused={!s.used}>
-                    <button class="hflink" onclick={() => openById(s.document_id, s.claims.find((c) => c.page != null)?.page ?? null)} title={s.used ? "Apri il PDF" : "Fonte non utilizzata dalla sintesi — apri comunque"}>
-                      [{s.n}] {s.title}{s.year ? ` (${s.year})` : ""}
+                    <button class="hflink" onclick={() => openById(s.document_id, s.claims.find((c) => c.page != null)?.page ?? null)} title={s.used ? t("Apri il PDF") : t("Fonte non utilizzata dalla sintesi — apri comunque")}>
+                      {t("[{n}] {titolo}", { n: s.n, titolo: s.title })}{s.year ? t(" ({anno})", { anno: s.year }) : ""}
                     </button>
                     <span class="wikipages">
                       {#each s.claims.filter((c) => c.page != null) as c, ci (ci)}
-                        <button class="passchip" onclick={() => openById(s.document_id, c.page)} title={c.text}>p. {c.page}</button>
+                        <button class="passchip" onclick={() => openById(s.document_id, c.page)} title={c.text}>{t("p. {pagina}", { pagina: c.page ?? 0 })}</button>
                       {/each}
                     </span>
                   </div>
@@ -5904,9 +6187,10 @@
               </div>
             {:else}
               <div class="empty wikiintro">
-                <p class="big">La tua enciclopedia privata</p>
-                <p>Ogni pagina è scritta dall'AI locale leggendo <strong>solo i tuoi documenti</strong>: le citazioni [n] aprono il PDF alla pagina giusta, i concetti si collegano tra loro, e nulla esce dal tuo computer.</p>
-                <p class="dimtext">Suggerimento: parti da «Genera/aggiorna dai tag» — una pagina per ciascun tema della tua libreria.</p>
+                <p class="big">{t("La tua enciclopedia privata")}</p>
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                <p>{@html t("Ogni pagina è scritta dall'AI locale leggendo <strong>solo i tuoi documenti</strong>: le citazioni [n] aprono il PDF alla pagina giusta, i concetti si collegano tra loro, e nulla esce dal tuo computer.")}</p>
+                <p class="dimtext">{t("Suggerimento: parti da «Genera/aggiorna dai tag» — una pagina per ciascun tema della tua libreria.")}</p>
               </div>
             {/if}
           </section>
@@ -5916,23 +6200,24 @@
           <aside class="wikinav">
             <div class="wikinew">
               <input
-                placeholder="Nuovo appunto: titolo…"
+                placeholder={t("Nuovo appunto: titolo…")}
                 bind:value={noteNewTitle}
                 onkeydown={(e) => e.key === "Enter" && newNote()}
-                title="Crea un nuovo appunto .md"
+                title={t("Crea un nuovo appunto .md")}
               />
-              <button class="ghost small" onclick={newNote} title="Crea l'appunto">Nuovo</button>
+              <button class="ghost small" onclick={newNote} title={t("Crea l'appunto")}>{t("Nuovo")}</button>
             </div>
-            <button class="ghost small wikiall" onclick={revealNotesDir} title="Apri la cartella degli appunti (.md) nel file explorer">
-              Apri cartella appunti
+            <button class="ghost small wikiall" onclick={revealNotesDir} title={t("Apri la cartella degli appunti (.md) nel file explorer")}>
+              {t("Apri cartella appunti")}
             </button>
             {#if notesList.length > 1}
               <div class="notesort">
-                <label class="notesortlbl" for="notesort-sel">Ordina</label>
-                <select id="notesort-sel" class="notesortsel" bind:value={noteSort} title="Ordina l'elenco degli appunti">
-                  <option value="updated">Ultima modifica</option>
-                  <option value="created">Data creazione</option>
-                  <option value="title">Titolo (A→Z)</option>
+                <label class="notesortlbl" for="notesort-sel">{t("Ordina")}</label>
+                <!-- i18n-exempt: i `value` sono la chiave di ordinamento salvata, non testo -->
+                <select id="notesort-sel" class="notesortsel" bind:value={noteSort} title={t("Ordina l'elenco degli appunti")}>
+                  <option value="updated">{t("Ultima modifica")}</option>
+                  <option value="created">{t("Data creazione")}</option>
+                  <option value="title">{t("Titolo (A→Z)")}</option>
                 </select>
               </div>
             {/if}
@@ -5942,13 +6227,13 @@
                   <button class="navitem noteitem" class:active={noteView?.slug === n.slug} onclick={() => openNote(n.slug)} title={n.excerpt || n.title}>
                     <span class="notetitle">{n.title}</span>
                     {#if n.excerpt}<span class="noteexc">{n.excerpt}</span>{/if}
-                    <span class="notedates" title="Ultima modifica · creazione">mod. {fmtNoteDateShort(n.updated_at)} · creato {fmtNoteDateShort(n.created_at)}</span>
+                    <span class="notedates" title={t("Ultima modifica · creazione")}>{t("mod. {modificato} · creato {creato}", { modificato: fmtNoteDateShort(n.updated_at), creato: fmtNoteDateShort(n.created_at) })}</span>
                   </button>
-                  <button class="x" title="Elimina questo appunto" onclick={() => removeNote(n.slug)}>×</button>
+                  <button class="x" title={t("Elimina questo appunto")} onclick={() => removeNote(n.slug)}>×</button>
                 </div>
               {/each}
               {#if !notesList.length}
-                <p class="wikiempty">Nessun appunto. Scrivi un titolo qui sopra e premi «Nuovo». Gli appunti sono file .md su disco: collega con [[Titolo appunto]] oppure [[@citekey]] per un paper.</p>
+                <p class="wikiempty">{t("Nessun appunto. Scrivi un titolo qui sopra e premi «Nuovo». Gli appunti sono file .md su disco: collega con [[Titolo appunto]] oppure [[@citekey]] per un paper.")}</p>
               {/if}
             </div>
           </aside>
@@ -5961,53 +6246,54 @@
                     bind:value={noteRenameValue}
                     onkeydown={(e) => { if (e.key === "Enter") commitRename(); else if (e.key === "Escape") cancelRename(); }}
                     onblur={cancelRename}
-                    title="Nuovo titolo — Invio per confermare, Esc o clic fuori per annullare (rinomina anche il file .md)"
+                    title={t("Nuovo titolo — Invio per confermare, Esc o clic fuori per annullare (rinomina anche il file .md)")}
                     use:focusOnMount
                   />
                 {:else}
-                  <h2 class="wikititle notetitleh" ondblclick={startRename} title="Doppio clic per rinominare">{noteView.title}</h2>
+                  <h2 class="wikititle notetitleh" ondblclick={startRename} title={t("Doppio clic per rinominare")}>{noteView.title}</h2>
                 {/if}
-                <span class="notesaved" class:pending={!noteSaved}>{noteSaved ? "Salvato ✓" : "Salvo…"}</span>
+                <span class="notesaved" class:pending={!noteSaved}>{noteSaved ? t("Salvato ✓") : t("Salvo…")}</span>
               </header>
               <div class="noteactions">
-                <button class="ghost small" disabled={noteRenaming} onclick={startRename} title="Rinomina l'appunto: cambia il titolo e il nome del file">Rinomina</button>
+                <button class="ghost small" disabled={noteRenaming} onclick={startRename} title={t("Rinomina l'appunto: cambia il titolo e il nome del file")}>{t("Rinomina")}</button>
                 <div class="notemodes">
-                  <button class="ghost small" class:on={noteMode === "edit"} onclick={() => (noteMode = "edit")} title="Modifica il Markdown">Modifica</button>
-                  <button class="ghost small" class:on={noteMode === "split"} onclick={() => { noteMode = "split"; renderLivePreview(); }} title="Modifica con anteprima affiancata in tempo reale">Affiancato</button>
-                  <button class="ghost small" class:on={noteMode === "preview"} onclick={() => { noteMode = "preview"; refreshNotePreview(); }} title="Anteprima resa (formule, collegamenti, immagini)">Anteprima</button>
+                  <button class="ghost small" class:on={noteMode === "edit"} onclick={() => (noteMode = "edit")} title={t("Modifica il Markdown")}>{t("Modifica")}</button>
+                  <button class="ghost small" class:on={noteMode === "split"} onclick={() => { noteMode = "split"; renderLivePreview(); }} title={t("Modifica con anteprima affiancata in tempo reale")}>{t("Affiancato")}</button>
+                  <button class="ghost small" class:on={noteMode === "preview"} onclick={() => { noteMode = "preview"; refreshNotePreview(); }} title={t("Anteprima resa (formule, collegamenti, immagini)")}>{t("Anteprima")}</button>
                 </div>
                 <div class="noteexport">
-                  <span class="noteexplbl">Esporta</span>
-                  <button class="ghost small" onclick={exportNoteMd} title="Salva una copia .md dell'appunto (Markdown puro)">MD</button>
-                  <button class="ghost small" onclick={() => exportNoteAs("html")} title="Esporta come pagina HTML autonoma (formule in MathML e immagini incluse)">HTML</button>
-                  <button class="ghost small" onclick={() => exportNoteAs("latex")} title="Esporta come documento LaTeX (.tex con le figure estratte in una cartella)">LaTeX</button>
-                  <button class="ghost small" onclick={exportNotePdf} title="Apre la stampa dell'appunto reso: scegli «Salva come PDF»">PDF</button>
+                  <span class="noteexplbl">{t("Esporta")}</span>
+                  <!-- i18n-exempt: MD/HTML/LaTeX/PDF sono nomi di formato, identici in inglese -->
+                  <button class="ghost small" onclick={exportNoteMd} title={t("Salva una copia .md dell'appunto (Markdown puro)")}>MD</button>
+                  <button class="ghost small" onclick={() => exportNoteAs("html")} title={t("Esporta come pagina HTML autonoma (formule in MathML e immagini incluse)")}>HTML</button>
+                  <button class="ghost small" onclick={() => exportNoteAs("latex")} title={t("Esporta come documento LaTeX (.tex con le figure estratte in una cartella)")}>LaTeX</button>
+                  <button class="ghost small" onclick={exportNotePdf} title={t("Apre la stampa dell'appunto reso: scegli «Salva come PDF»")}>PDF</button>
                 </div>
               </div>
               <div class="noteinfo">
-                <button class="noteinfopath" onclick={revealNotesDir} title={"Apri la cartella — " + noteView.path}>📁 {noteView.path}</button>
-                <span class="noteinfodate" title="Data di creazione del file">creata {fmtNoteDate(noteView.created_at)}</span>
-                <span class="noteinfodate" title="Ultima modifica">· modificata {fmtNoteDate(noteView.updated_at)}</span>
+                <button class="noteinfopath" onclick={revealNotesDir} title={t("Apri la cartella — {percorso}", { percorso: noteView.path })}>📁 {noteView.path}</button>
+                <span class="noteinfodate" title={t("Data di creazione del file")}>{t("creata {quando}", { quando: fmtNoteDate(noteView.created_at) })}</span>
+                <span class="noteinfodate" title={t("Ultima modifica")}>· {t("modificata {quando}", { quando: fmtNoteDate(noteView.updated_at) })}</span>
               </div>
               {#if noteMode === "edit" || noteMode === "split"}
-                <div class="noteedtoolbar" role="toolbar" aria-label="Formattazione">
-                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("# ", true)} title="Titolo (H1)"><b>T</b></button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("## ", true)} title="Sottotitolo (H2)">T₂</button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("### ", true)} title="Titolo minore (H3)">T₃</button>
+                <div class="noteedtoolbar" role="toolbar" aria-label={t("Formattazione")}>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("# ", true)} title={t("Titolo (H1)")}><b>T</b></button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("## ", true)} title={t("Sottotitolo (H2)")}>T₂</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("### ", true)} title={t("Titolo minore (H3)")}>T₃</button>
                   <span class="edsep"></span>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("**", "**", "grassetto")} title="Grassetto"><b>B</b></button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("*", "*", "corsivo")} title="Corsivo"><i>I</i></button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("`", "`", "codice")} title="Codice inline"><code>‹›</code></button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("[", "](https://)", "testo")} title="Collegamento">🔗</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("**", "**", "grassetto")} title={t("Grassetto")}><b>B</b></button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("*", "*", "corsivo")} title={t("Corsivo")}><i>I</i></button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("`", "`", "codice")} title={t("Codice inline")}><code>‹›</code></button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdWrap("[", "](https://)", "testo")} title={t("Collegamento")}>🔗</button>
                   <span class="edsep"></span>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("- ")} title="Elenco puntato">•</button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("1. ")} title="Elenco numerato">1.</button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("> ")} title="Citazione">❝</button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdInsert("\n\n$$\n\n$$\n\n")} title="Blocco formula LaTeX ($$…$$)">∑</button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdInsert("\n\n---\n\n")} title="Separatore orizzontale">―</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("- ")} title={t("Elenco puntato")}>•</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("1. ")} title={t("Elenco numerato")}>1.</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdLinePrefix("> ")} title={t("Citazione")}>❝</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdInsert("\n\n$$\n\n$$\n\n")} title={t("Blocco formula LaTeX ($$…$$)")}>∑</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdInsert("\n\n---\n\n")} title={t("Separatore orizzontale")}>―</button>
                   <span class="edsep"></span>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdMoveBlock(-1)} title="Sposta su il blocco (paragrafo/immagine)">↑</button>
-                  <button onmousedown={keepEditorFocus} onclick={() => mdMoveBlock(1)} title="Sposta giù il blocco (paragrafo/immagine)">↓</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdMoveBlock(-1)} title={t("Sposta su il blocco (paragrafo/immagine)")}>↑</button>
+                  <button onmousedown={keepEditorFocus} onclick={() => mdMoveBlock(1)} title={t("Sposta giù il blocco (paragrafo/immagine)")}>↓</button>
                 </div>
                 <div class="noteedwrap" class:split={noteMode === "split"}>
                   <textarea
@@ -6019,7 +6305,7 @@
                     ondrop={onNoteDrop}
                     ondragover={onNoteDragOver}
                     onpaste={onNotePaste}
-                    placeholder={"Scrivi in Markdown…\n\nTrascina o incolla un'immagine per inserirla. Usa [[Titolo di un altro appunto]] per collegare un appunto, [[@citekey]] o [[Titolo del paper]] per un documento. $$ … $$ per una formula."}
+                    placeholder={t("Scrivi in Markdown…\n\nTrascina o incolla un'immagine per inserirla. Usa [[Titolo di un altro appunto]] per collegare un appunto, [[@citekey]] o [[Titolo del paper]] per un documento. $$ … $$ per una formula.")}
                     spellcheck="false"
                   ></textarea>
                   {#if noteMode === "split"}
@@ -6036,19 +6322,22 @@
                 </article>
                 {#if noteView.backlinks.length}
                   <div class="notebacklinks">
-                    <h3>Collegato da</h3>
+                    <h3>{t("Collegato da")}</h3>
                     {#each noteView.backlinks as b (b.slug)}
-                      <button class="passchip" onclick={() => openNote(b.slug)} title={`Apri «${b.title}»`}>{b.title}</button>
+                      <button class="passchip" onclick={() => openNote(b.slug)} title={t("Apri «{titolo}»", { titolo: b.title })}>{b.title}</button>
                     {/each}
                   </div>
                 {/if}
               {/if}
             {:else}
               <div class="empty wikiintro">
-                <p class="big">I tuoi appunti</p>
-                <p>Appunti in <strong>Markdown</strong>, salvati come <strong>file .md veri</strong> nella cartella degli appunti — restano tuoi, leggibili e modificabili anche da terminale o da qualsiasi editor.</p>
-                <p class="dimtext">Collega con <code>[[Titolo appunto]]</code> o un paper con <code>[[@citekey]]</code> / <code>[[Titolo del paper]]</code>. I backlink compaiono in fondo a ogni appunto.</p>
-                <p class="dimtext">Scrivi <code>$$ … $$</code> per una <strong>formula</strong> (resa in anteprima), usa la barra di formattazione (grassetto, titoli, liste, sposta blocchi), <strong>trascina o incolla immagini</strong> (salvate come file in <code>assets/</code>, nell'appunto resta solo un riferimento breve), ed <strong>esporta</strong> in <strong>HTML</strong>, <strong>LaTeX</strong> o <strong>PDF</strong> con formule e figure incluse.</p>
+                <p class="big">{t("I tuoi appunti")}</p>
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringhe letterali del programma, nessun dato dell'utente -->
+                <p>{@html t("Appunti in <strong>Markdown</strong>, salvati come <strong>file .md veri</strong> nella cartella degli appunti — restano tuoi, leggibili e modificabili anche da terminale o da qualsiasi editor.")}</p>
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringhe letterali del programma, nessun dato dell'utente -->
+                <p class="dimtext">{@html t("Collega con <code>[[Titolo appunto]]</code> o un paper con <code>[[@citekey]]</code> / <code>[[Titolo del paper]]</code>. I backlink compaiono in fondo a ogni appunto.")}</p>
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringhe letterali del programma, nessun dato dell'utente -->
+                <p class="dimtext">{@html t("Scrivi <code>$$ … $$</code> per una <strong>formula</strong> (resa in anteprima), usa la barra di formattazione (grassetto, titoli, liste, sposta blocchi), <strong>trascina o incolla immagini</strong> (salvate come file in <code>assets/</code>, nell'appunto resta solo un riferimento breve), ed <strong>esporta</strong> in <strong>HTML</strong>, <strong>LaTeX</strong> o <strong>PDF</strong> con formule e figure incluse.")}</p>
               </div>
             {/if}
           </section>
@@ -6064,23 +6353,24 @@
       {:else if filter.kind === "novita"}
         <div class="novhead">
           <div class="novtitle">
-            <h2>Novità</h2>
-            <span class="novsub">Nuovi paper sui temi che segui — raccolti a ogni avvio dalle tue ricerche salvate</span>
+            <h2>{t("Novità")}</h2>
+            <span class="novsub">{t("Nuovi paper sui temi che segui — raccolti a ogni avvio dalle tue ricerche salvate")}</span>
           </div>
-          <button class="ghost small" onclick={sweepNovitaNow} disabled={novitaSweeping} title="Cerca subito nuovi paper per tutte le ricerche salvate">
-            {novitaSweeping ? "Cerco…" : "↻ Cerca ora"}
+          <button class="ghost small" onclick={sweepNovitaNow} disabled={novitaSweeping} title={t("Cerca subito nuovi paper per tutte le ricerche salvate")}>
+            {novitaSweeping ? t("Cerco…") : t("↻ Cerca ora")}
           </button>
         </div>
         {#if novitaLoading}
-          <div class="empty"><p>Carico le novità…</p></div>
+          <div class="empty"><p>{t("Carico le novità…")}</p></div>
         {:else if !novitaGroups.length}
           <div class="empty novintro">
-            <p class="big">Nessuna novità al momento</p>
+            <p class="big">{t("Nessuna novità al momento")}</p>
             {#if savedSearches.length}
-              <p>Le tue {savedSearches.length} ricerche salvate vengono ricontrollate a ogni avvio. Quando esce qualcosa di nuovo lo trovi qui, pronto da aggiungere con un click.</p>
-              <p class="dimtext">Puoi forzare il controllo adesso con «↻ Cerca ora».</p>
+              <p>{tp(savedSearches.length, "La tua ricerca salvata viene ricontrollata a ogni avvio. Quando esce qualcosa di nuovo lo trovi qui, pronto da aggiungere con un click.", "Le tue {n} ricerche salvate vengono ricontrollate a ogni avvio. Quando esce qualcosa di nuovo lo trovi qui, pronto da aggiungere con un click.")}</p>
+              <p class="dimtext">{t("Puoi forzare il controllo adesso con «↻ Cerca ora».")}</p>
             {:else}
-              <p>Salva una ricerca da <strong>Cerca online</strong> (★ Salva) per iniziare a monitorare un tema: le novità compariranno qui.</p>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p>{@html t("Salva una ricerca da <strong>Cerca online</strong> (★ Salva) per iniziare a monitorare un tema: le novità compariranno qui.")}</p>
             {/if}
           </div>
         {:else}
@@ -6090,7 +6380,7 @@
                 <header class="novgh">
                   <span class="novgname">{g.watch_name}</span>
                   <span class="novgcount">{g.hits.length}</span>
-                  <button class="hflink small" onclick={() => ignoreAllNovita(g.watch_id)} title="Segna tutte come lette (le rimuove dalle novità)">segna tutte lette</button>
+                  <button class="hflink small" onclick={() => ignoreAllNovita(g.watch_id)} title={t("Segna tutte come lette (le rimuove dalle novità)")}>{t("segna tutte lette")}</button>
                 </header>
                 {#each g.hits as h (h.hit_id)}
                   {@const r = h.result}
@@ -6099,14 +6389,14 @@
                     <div class="novmain">
                       <div class="novtl">
                         {#if r.abstract_text}
-                          <button class="abstoggle" class:open={expandedAbstract === hid} onclick={() => toggleAbstract(hid)} title={expandedAbstract === hid ? "Nascondi abstract" : "Mostra abstract"} aria-label="Mostra/nascondi abstract">▸</button>
+                          <button class="abstoggle" class:open={expandedAbstract === hid} onclick={() => toggleAbstract(hid)} title={expandedAbstract === hid ? t("Nascondi abstract") : t("Mostra abstract")} aria-label={t("Mostra/nascondi abstract")}>▸</button>
                         {/if}
-                        <span class="novt" title={r.title ?? ""}>{r.title ?? "Senza titolo"}</span>
+                        <span class="novt" title={r.title ?? ""}>{r.title ?? t("Senza titolo")}</span>
                         {#if r.pub_status}<span class="badgeinline">{@render pubBadge(r.pub_status, r.url)}</span>{/if}
-                        {#if r.in_library}<span class="nuovo inlibtag" title="Già presente in libreria">in libreria</span>{/if}
+                        {#if r.in_library}<span class="nuovo inlibtag" title={t("Già presente in libreria")}>{t("in libreria")}</span>{/if}
                       </div>
                       <div class="novmeta">
-                        {r.authors.slice(0, 4).join(", ")}{r.authors.length > 4 ? " et al." : ""}{r.year ? ` · ${r.year}` : ""}{r.venue ? ` · ${r.venue}` : ""}
+                        {[r.authors.length > 4 ? t("{autori} et al.", { autori: r.authors.slice(0, 4).join(", ") }) : r.authors.join(", "), r.year, r.venue].filter(Boolean).join(SEP)}
                       </div>
                       {#if expandedAbstract === hid && r.abstract_text}
                         <p class="novabs">{r.abstract_text}</p>
@@ -6114,10 +6404,10 @@
                     </div>
                     <div class="novact">
                       {#if r.in_library}
-                        <button class="ghost small" onclick={() => ignoreNovita(g.watch_id, h.hit_id)} title="Rimuovi dalle novità">Ignora</button>
+                        <button class="ghost small" onclick={() => ignoreNovita(g.watch_id, h.hit_id)} title={t("Rimuovi dalle novità")}>{t("Ignora")}</button>
                       {:else}
-                        <button class="ghost small primary" onclick={() => acceptNovita(g.watch_id, h.hit_id)} disabled={acceptingHit === h.hit_id} title="Aggiungi alla libreria (scarica il PDF se Open Access)">{acceptingHit === h.hit_id ? "…" : "Aggiungi"}</button>
-                        <button class="hflink small" onclick={() => ignoreNovita(g.watch_id, h.hit_id)} title="Rimuovi dalle novità">Ignora</button>
+                        <button class="ghost small primary" onclick={() => acceptNovita(g.watch_id, h.hit_id)} disabled={acceptingHit === h.hit_id} title={t("Aggiungi alla libreria (scarica il PDF se Open Access)")}>{acceptingHit === h.hit_id ? "…" : t("Aggiungi")}</button>
+                        <button class="hflink small" onclick={() => ignoreNovita(g.watch_id, h.hit_id)} title={t("Rimuovi dalle novità")}>{t("Ignora")}</button>
                       {/if}
                     </div>
                   </article>
@@ -6130,8 +6420,9 @@
         <div class="discbar">
           <select
             bind:value={discoverSource}
-            title="Fonte di ricerca"
+            title={t("Fonte di ricerca")}
             onchange={() => { if (!CITES_SOURCES.includes(discoverSource) && discoverSort === "citations") discoverSort = "relevance"; }}>
+            <!-- i18n-exempt: nomi propri delle fonti; i `value` sono il protocollo col backend -->
             <option value="openalex">OpenAlex</option>
             <option value="arxiv">arXiv</option>
             <option value="ads">ADS</option>
@@ -6139,67 +6430,68 @@
             <option value="europepmc">Europe PMC</option>
             <option value="core">CORE</option>
             <option value="doaj">DOAJ</option>
-            <option value="huggingface">HF Papers (ex Papers with Code)</option>
+            <option value="huggingface">{t("HF Papers (ex Papers with Code)")}</option>
           </select>
           <input
             class="discq"
-            placeholder="Cerca paper online…"
+            placeholder={t("Cerca paper online…")}
             bind:value={discoverQuery}
             onkeydown={(e) => e.key === "Enter" && runDiscover()}
           />
           <input
             class="discau"
-            placeholder="autore"
-            title="Filtra per autore (opzionale)"
+            placeholder={t("autore")}
+            title={t("Filtra per autore (opzionale)")}
             bind:value={discoverAuthor}
             onkeydown={(e) => e.key === "Enter" && runDiscover()}
           />
-          <input class="discy" type="number" placeholder="dal" title="Anno minimo" bind:value={discoverYearFrom} />
-          <input class="discy" type="number" placeholder="al" title="Anno massimo" bind:value={discoverYearTo} />
-          <label class="discoa" title="Mostra solo lavori Open Access"><input type="checkbox" bind:checked={discoverOaOnly} /> Solo OA</label>
-          <select bind:value={discoverSort} title="Ordina i risultati">
-            <option value="relevance">Rilevanza</option>
-            <option value="date">Data</option>
-            {#if CITES_SOURCES.includes(discoverSource)}<option value="citations">Citazioni</option>{/if}
+          <input class="discy" type="number" placeholder={t("dal")} title={t("Anno minimo")} bind:value={discoverYearFrom} />
+          <input class="discy" type="number" placeholder={t("al")} title={t("Anno massimo")} bind:value={discoverYearTo} />
+          <label class="discoa" title={t("Mostra solo lavori Open Access")}><input type="checkbox" bind:checked={discoverOaOnly} /> {t("Solo OA")}</label>
+          <!-- i18n-exempt: i `value` sono il criterio d'ordinamento inviato alla fonte -->
+          <select bind:value={discoverSort} title={t("Ordina i risultati")}>
+            <option value="relevance">{t("Rilevanza")}</option>
+            <option value="date">{t("Data")}</option>
+            {#if CITES_SOURCES.includes(discoverSource)}<option value="citations">{t("Citazioni")}</option>{/if}
           </select>
-          <button class="primary" onclick={runDiscover} disabled={discovering}>{discovering ? "…" : "Cerca"}</button>
-          <button class="ghost" onclick={saveCurrentSearch} disabled={savingSearch || (!discoverQuery.trim() && !discoverAuthor.trim())} title="Salva questa ricerca per monitorare le novità sul tema">{savingSearch ? "…" : "★ Salva"}</button>
+          <button class="primary" onclick={runDiscover} disabled={discovering}>{discovering ? "…" : t("Cerca")}</button>
+          <button class="ghost" onclick={saveCurrentSearch} disabled={savingSearch || (!discoverQuery.trim() && !discoverAuthor.trim())} title={t("Salva questa ricerca per monitorare le novità sul tema")}>{savingSearch ? "…" : t("★ Salva")}</button>
         </div>
         {#if discoverResults.length === 0}
           <div class="empty">
-            <p class="big">Cerca paper online</p>
-            <p>Fonti: arXiv (preprint STEM), OpenAlex (tutto), ADS (astrofisica), Semantic Scholar (citazioni), Europe PMC (biomedicina), CORE (full-text OA), DOAJ (riviste OA), HF Papers (paper con codice — il successore di Papers with Code). I PDF si scaricano solo se Open Access; gli altri si aggiungono come riferimento.</p>
+            <p class="big">{t("Cerca paper online")}</p>
+            <p>{t("Fonti: arXiv (preprint STEM), OpenAlex (tutto), ADS (astrofisica), Semantic Scholar (citazioni), Europe PMC (biomedicina), CORE (full-text OA), DOAJ (riviste OA), HF Papers (paper con codice — il successore di Papers with Code). I PDF si scaricano solo se Open Access; gli altri si aggiungono come riferimento.")}</p>
           </div>
         {:else}
           <div class="discfilters">
-            <span class="dflabel">Filtra:</span>
+            <span class="dflabel">{t("Filtra:")}</span>
             <button
               class="dfchip"
               class:on={discCodeOnly}
               onclick={() => (discCodeOnly = !discCodeOnly)}
-              title="Mostra solo i paper che pubblicano anche il codice (repository GitHub rilevato)">
-              {@render githubMark()} Con codice
+              title={t("Mostra solo i paper che pubblicano anche il codice (repository GitHub rilevato)")}>
+              {@render githubMark()} {t("Con codice")}
               <span class="dfcount">{discoverResults.filter((r) => !!r.github_url).length}</span>
             </button>
             <button
               class="dfchip"
               class:on={discPeerOnly}
               onclick={() => { discPeerOnly = !discPeerOnly; if (discPeerOnly) discPreprintOnly = false; }}
-              title="Mostra solo i paper peer-reviewed (esiste una versione pubblicata)">
-              Peer-reviewed
+              title={t("Mostra solo i paper peer-reviewed (esiste una versione pubblicata)")}>
+              {t("Peer-reviewed")}
               <span class="dfcount">{discoverResults.filter(isPeer).length}</span>
             </button>
             <button
               class="dfchip"
               class:on={discPreprintOnly}
               onclick={() => { discPreprintOnly = !discPreprintOnly; if (discPreprintOnly) discPeerOnly = false; }}
-              title="Mostra solo i preprint">
-              Preprint
+              title={t("Mostra solo i preprint")}>
+              {t("Preprint")}
               <span class="dfcount">{discoverResults.filter(isPreprint).length}</span>
             </button>
             {#if discCodeOnly || discPeerOnly || discPreprintOnly}
-              <button class="dfclear" onclick={() => { discCodeOnly = false; discPeerOnly = false; discPreprintOnly = false; }} title="Rimuovi tutti i filtri">✕ azzera</button>
-              <span class="dfshown">{discDisplayed.length} / {discoverResults.length} mostrati</span>
+              <button class="dfclear" onclick={() => { discCodeOnly = false; discPeerOnly = false; discPreprintOnly = false; }} title={t("Rimuovi tutti i filtri")}>{t("✕ azzera")}</button>
+              <span class="dfshown">{t("{mostrati} / {totale} mostrati", { mostrati: discDisplayed.length, totale: discoverResults.length })}</span>
             {/if}
           </div>
           <div class="listwrap">
@@ -6215,15 +6507,15 @@
               <thead>
                 <tr>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <th class="sortable" onclick={() => toggleDiscSort("title")} title="Ordina per titolo">Titolo<span class="ar">{discArrow("title")}</span></th>
-                  <th>Autori</th>
+                  <th class="sortable" onclick={() => toggleDiscSort("title")} title={t("Ordina per titolo")}>{t("Titolo")}<span class="ar">{discArrow("title")}</span></th>
+                  <th>{t("Autori")}</th>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <th class="sortable num" onclick={() => toggleDiscSort("year")} title="Ordina per anno">Anno<span class="ar">{discArrow("year")}</span></th>
+                  <th class="sortable num" onclick={() => toggleDiscSort("year")} title={t("Ordina per anno")}>{t("Anno")}<span class="ar">{discArrow("year")}</span></th>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <th class="sortable" onclick={() => toggleDiscSort("venue")} title="Ordina per rivista">Rivista<span class="ar">{discArrow("venue")}</span></th>
+                  <th class="sortable" onclick={() => toggleDiscSort("venue")} title={t("Ordina per rivista")}>{t("Rivista")}<span class="ar">{discArrow("venue")}</span></th>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <th class="sortable num" onclick={() => toggleDiscSort("citations")} title="Ordina per citazioni">Cit.<span class="ar">{discArrow("citations")}</span></th>
-                  <th aria-label="azioni"></th>
+                  <th class="sortable num" onclick={() => toggleDiscSort("citations")} title={t("Ordina per citazioni")}>{t("Cit.")}<span class="ar">{discArrow("citations")}</span></th>
+                  <th aria-label={t("azioni")}></th>
                 </tr>
               </thead>
               <tbody>
@@ -6232,9 +6524,9 @@
                   <tr>
                     <td class="ttl">
                       {#if r.in_library}
-                        <span class="addbtn inlib" title="Già nella libreria">✓</span>
+                        <span class="addbtn inlib" title={t("Già nella libreria")}>✓</span>
                       {:else}
-                        <button class="addbtn" onclick={() => addResult(r)} disabled={addingExt === r.external_id} title="Aggiungi alla libreria (scarica il PDF se Open Access)" aria-label="Aggiungi alla libreria">{addingExt === r.external_id ? "…" : "+"}</button>
+                        <button class="addbtn" onclick={() => addResult(r)} disabled={addingExt === r.external_id} title={t("Aggiungi alla libreria (scarica il PDF se Open Access)")} aria-label={t("Aggiungi alla libreria")}>{addingExt === r.external_id ? "…" : "+"}</button>
                       {/if}
                       {#if r.abstract_text}
                         <button
@@ -6242,21 +6534,22 @@
                           class:open={expandedAbstract === rid}
                           onclick={() => toggleAbstract(rid)}
                           title={expandedAbstract === rid ? "Nascondi abstract" : "Mostra abstract"}
-                          aria-label="Mostra/nascondi abstract">▸</button>
+                          aria-label={t("Mostra/nascondi abstract")}>▸</button>
                       {/if}
-                      {#if discoverNewIds.has(r.external_id)}<span class="nuovo" title="Nuovo dall'ultima volta che hai eseguito questa ricerca salvata">novità</span>{/if}
-                      <span title={r.title ?? ""}>{r.title ?? "Senza titolo"}</span>
+                      {#if discoverNewIds.has(r.external_id)}<span class="nuovo" title={t("Nuovo dall'ultima volta che hai eseguito questa ricerca salvata")}>{t("novità")}</span>{/if}
+                      <span title={r.title ?? ""}>{r.title ?? t("Senza titolo")}</span>
                       {#if r.pub_status}<span class="badgeinline">{@render pubBadge(r.pub_status, r.url)}</span>{/if}
                     </td>
-                    <td class="dim" title={r.authors.join(", ")}>{r.authors.slice(0, 3).join(", ")}{r.authors.length > 3 ? " et al." : ""}</td>
+                    <td class="dim" title={r.authors.join(", ")}>{r.authors.length > 3 ? t("{autori} et al.", { autori: r.authors.slice(0, 3).join(", ") }) : r.authors.join(", ")}</td>
                     <td class="num dim">{r.year ?? "—"}</td>
                     <td class="dim" title={r.venue ?? ""}>{r.venue || "—"}</td>
                     <td class="num dim">{r.citations || "—"}</td>
                     <td class="rowact">
-                      {#if r.github_url}<button class="ghicon" title="Codice su GitHub: {r.github_url}" aria-label="Repository GitHub" onclick={() => openInBrowser(r.github_url!)}>{@render githubMark()}</button>{/if}
+                      {#if r.github_url}<button class="ghicon" title={t("Codice su GitHub: {url}", { url: r.github_url })} aria-label={t("Repository GitHub")} onclick={() => openInBrowser(r.github_url!)}>{@render githubMark()}</button>{/if}
+                      <!-- i18n-exempt: sigla identica in inglese -->
                       {#if r.oa_pdf_url}<span class="badge2 oa">OA</span>{/if}
                       {#if r.url}
-                        <button class="rowbtn ghost" onclick={() => openInBrowser(r.url!)} title="Apri la pagina del paper nel browser">Apri</button>
+                        <button class="rowbtn ghost" onclick={() => openInBrowser(r.url!)} title={t("Apri la pagina del paper nel browser")}>{t("Apri")}</button>
                       {/if}
                     </td>
                   </tr>
@@ -6269,98 +6562,99 @@
               </tbody>
             </table>
             {#if discDisplayed.length === 0}
-              <p class="dfempty">Nessun risultato con i filtri attivi. <button class="linklike" onclick={() => { discCodeOnly = false; discPeerOnly = false; discPreprintOnly = false; }}>Azzera i filtri</button></p>
+              <p class="dfempty">{t("Nessun risultato con i filtri attivi.")} <button class="linklike" onclick={() => { discCodeOnly = false; discPeerOnly = false; discPreprintOnly = false; }}>{t("Azzera i filtri")}</button></p>
             {/if}
           </div>
         {/if}
       {:else}
         <div class="topbars">
         {#if filter.kind !== "all"}
+          {@const categoria = filter.kind === "related"
+            ? t("Correlati a")
+            : filter.kind === "collection"
+              ? t("Raccolta")
+              : filter.kind === "favorite"
+                ? t("Preferiti")
+                : filter.kind === "author"
+                  ? t("Autore")
+                  : filter.kind === "github"
+                    ? t("Con codice (GitHub)")
+                    : filter.kind === "peerreviewed"
+                      ? t("Peer-reviewed")
+                      : filter.kind === "mywork"
+                        ? t("Il mio lavoro")
+                        : t("Da leggere")}
           <div class="fbanner">
             <span>
-              {filter.kind === "related"
-                ? "Correlati a"
-                : filter.kind === "collection"
-                  ? "Raccolta"
-                  : filter.kind === "favorite"
-                    ? "Preferiti"
-                    : filter.kind === "author"
-                      ? "Autore"
-                      : filter.kind === "github"
-                        ? "Con codice (GitHub)"
-                        : filter.kind === "peerreviewed"
-                          ? "Peer-reviewed"
-                          : filter.kind === "mywork"
-                            ? "Il mio lavoro"
-                            : "Da leggere"}{filter.label ? ": " : ""}<strong>{filter.label ?? ""}</strong>
+              {filter.label ? t("{categoria}: ", { categoria }) : categoria}<strong>{filter.label ?? ""}</strong>
             </span>
-            <button onclick={() => setFilter({ kind: "all" })} title="Rimuovi il filtro e mostra tutto">Mostra tutti</button>
+            <button onclick={() => setFilter({ kind: "all" })} title={t("Rimuovi il filtro e mostra tutto")}>{t("Mostra tutti")}</button>
           </div>
         {/if}
         {#if tagFilter.length}
           <div class="fbanner tagbanner">
             <span class="tagfilter">
-              <span class="tflabel">Filtro tag:</span>
+              <span class="tflabel">{t("Filtro tag:")}</span>
               {#each tagFilter as tid (tid)}
                 {@const tg = tags.find((x) => x.id === tid)}
                 {#if tg}
                   <span class="tfchip" style="background:{(tg.color ?? '#888888')}22; border-color:{tg.color ?? '#888888'}">
                     {tg.name}
-                    <button class="tfx" title="Rimuovi questo tag dal filtro" onclick={() => toggleTagFilter(tid)}>×</button>
+                    <button class="tfx" title={t("Rimuovi questo tag dal filtro")} onclick={() => toggleTagFilter(tid)}>×</button>
                   </span>
                 {/if}
               {/each}
               {#if tagFilter.length > 1}
                 <span class="tfmode">
-                  <button class:active={tagMode === "all"} onclick={() => setTagMode("all")} title="Mostra i documenti che hanno TUTTI i tag selezionati">tutti</button>
-                  <button class:active={tagMode === "any"} onclick={() => setTagMode("any")} title="Mostra i documenti che hanno ALMENO UNO dei tag selezionati">qualsiasi</button>
+                  <button class:active={tagMode === "all"} onclick={() => setTagMode("all")} title={t("Mostra i documenti che hanno TUTTI i tag selezionati")}>{t("tutti")}</button>
+                  <button class:active={tagMode === "any"} onclick={() => setTagMode("any")} title={t("Mostra i documenti che hanno ALMENO UNO dei tag selezionati")}>{t("qualsiasi")}</button>
                 </span>
               {/if}
             </span>
-            <button onclick={clearTags} title="Rimuovi il filtro per tag">Azzera</button>
+            <button onclick={clearTags} title={t("Rimuovi il filtro per tag")}>{t("Azzera")}</button>
           </div>
         {/if}
         {#if selected.length}
-          <div class="floatpill" role="toolbar" aria-label="Azioni sulla selezione">
-            <span class="pillcount">{selected.length} selezionati</span>
-            <button onclick={printSelected} disabled={printing} title="Stampa i documenti selezionati come un unico lavoro di stampa">{printing ? "…" : "Stampa"}</button>
+          <div class="floatpill" role="toolbar" aria-label={t("Azioni sulla selezione")}>
+            <span class="pillcount">{tp(selected.length, "1 selezionato", "{n} selezionati")}</span>
+            <button onclick={printSelected} disabled={printing} title={t("Stampa i documenti selezionati come un unico lavoro di stampa")}>{printing ? "…" : t("Stampa")}</button>
             <ShareMenu
               ids={selected}
               label={selected.length === 1
-                ? (displayed.find((d) => d.id === selected[0])?.title ?? "Documento PDF")
-                : `${selected.length} documenti PDF`}
+                ? (displayed.find((d) => d.id === selected[0])?.title ?? t("Documento PDF"))
+                : t("{n} documenti PDF", { n: selected.length })}
               link={selected.length === 1 ? paperLink(displayed.find((d) => d.id === selected[0])) : null}
               compact
               onstatus={(s) => (status = s)}
             />
             {#if aiStat?.enabled}
-              <button onclick={() => runBatchAi("summary")} disabled={aiBusyAny} title="Genera un riassunto AI per ogni documento selezionato">{aiBatch?.kind === "summary" ? `Riassunto ${aiBatch.done}/${aiBatch.total}…` : "Riassumi (AI)"}</button>
-              <button onclick={() => runBatchAi("tags")} disabled={aiBusyAny} title="Genera tag automatici AI per ogni documento selezionato">{aiBatch?.kind === "tags" ? `Tag ${aiBatch.done}/${aiBatch.total}…` : "Tag automatici (AI)"}</button>
+              <button onclick={() => runBatchAi("summary")} disabled={aiBusyAny} title={t("Genera un riassunto AI per ogni documento selezionato")}>{aiBatch?.kind === "summary" ? t("Riassunto {fatti}/{totale}…", { fatti: aiBatch.done, totale: aiBatch.total }) : t("Riassumi (AI)")}</button>
+              <button onclick={() => runBatchAi("tags")} disabled={aiBusyAny} title={t("Genera tag automatici AI per ogni documento selezionato")}>{aiBatch?.kind === "tags" ? t("Tag {fatti}/{totale}…", { fatti: aiBatch.done, totale: aiBatch.total }) : t("Tag automatici (AI)")}</button>
             {/if}
-            <select title="Aggiungi un tag ai selezionati" onchange={(e) => { const t = tags.find((x) => x.id === +e.currentTarget.value); if (t) bulkAddTag(t); e.currentTarget.value = ""; }}>
-              <option value="">+ Tag…</option>
-              {#each tags as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
+            <select title={t("Aggiungi un tag ai selezionati")} onchange={(e) => { const tg = tags.find((x) => x.id === +e.currentTarget.value); if (tg) bulkAddTag(tg); e.currentTarget.value = ""; }}>
+              <option value="">{t("+ Tag…")}</option>
+              {#each tags as tag (tag.id)}<option value={tag.id}>{tag.name}</option>{/each}
             </select>
-            <select title="Aggiungi i selezionati a una raccolta" onchange={(e) => { const c = collections.find((x) => x.id === +e.currentTarget.value); if (c) bulkAddCollection(c); e.currentTarget.value = ""; }}>
-              <option value="">+ Raccolta…</option>
+            <select title={t("Aggiungi i selezionati a una raccolta")} onchange={(e) => { const c = collections.find((x) => x.id === +e.currentTarget.value); if (c) bulkAddCollection(c); e.currentTarget.value = ""; }}>
+              <option value="">{t("+ Raccolta…")}</option>
               {#each collections.filter((c) => !c.is_smart) as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
             </select>
-            <button class="del" onclick={() => trashSelected(selected)} title="Sposta i selezionati nel cestino">Elimina</button>
+            <button class="del" onclick={() => trashSelected(selected)} title={t("Sposta i selezionati nel cestino")}>{t("Elimina")}</button>
             <button
-              title="Tutte le azioni sulla selezione: Trova PDF, Confronta, Rassegna, Cita, Esporta…"
+              title={t("Tutte le azioni sulla selezione: Trova PDF, Confronta, Rassegna, Cita, Esporta…")}
               onclick={(e) => {
                 const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
                 radial = {
                   x: r.left,
                   y: Math.max(120, r.top - 40),
                   items: buildSelectionRadial(),
-                  title: `${selected.length} selezionati`,
-                  subtitle: "Azioni sulla selezione",
+                  title: tp(selected.length, "1 selezionato", "{n} selezionati"),
+                  subtitle: t("Azioni sulla selezione"),
                   thumb: null,
                 };
               }}
-            >⋯ Altro</button>
-            <button class="pillx" onclick={() => (selected = [])} title="Annulla la selezione" aria-label="Deseleziona">✕</button>
+            >{t("⋯ Altro")}</button>
+            <button class="pillx" onclick={() => (selected = [])} title={t("Annulla la selezione")} aria-label={t("Deseleziona")}>✕</button>
           </div>
         {/if}
         </div>
@@ -6368,18 +6662,18 @@
           <section class="home" class:collapsed={homeCollapsed}>
             <div class="homehead">
               <button class="homefold" onclick={toggleHome} title={homeCollapsed ? "Mostra la home" : "Comprimi la home"} aria-expanded={!homeCollapsed}>
-                <span class="homechev">{homeCollapsed ? "▸" : "▾"}</span> Panoramica
+                <span class="homechev">{homeCollapsed ? "▸" : "▾"}</span> {t("Panoramica")}
               </button>
               {#if !homeCollapsed}
                 <div class="homestats">
-                  <button class="hstat" onclick={() => setFilter({ kind: "unread" })} title="Vai ai documenti da leggere">
-                    <span class="hnum">{unreadCount}</span><span class="hlab">da leggere</span>
+                  <button class="hstat" onclick={() => setFilter({ kind: "unread" })} title={t("Vai ai documenti da leggere")}>
+                    <span class="hnum">{unreadCount}</span><span class="hlab">{t("da leggere")}</span>
                   </button>
-                  <span class="hstat" title="Documenti aperti ma non ancora finiti">
-                    <span class="hnum">{readingCount}</span><span class="hlab">in lettura</span>
+                  <span class="hstat" title={t("Documenti aperti ma non ancora finiti")}>
+                    <span class="hnum">{readingCount}</span><span class="hlab">{t("in lettura")}</span>
                   </span>
-                  <span class="hstat" title="Aggiunti alla libreria questo mese">
-                    <span class="hnum">{addedThisMonth}</span><span class="hlab">questo mese</span>
+                  <span class="hstat" title={t("Aggiunti alla libreria questo mese")}>
+                    <span class="hnum">{addedThisMonth}</span><span class="hlab">{t("questo mese")}</span>
                   </span>
                 </div>
               {/if}
@@ -6388,8 +6682,8 @@
               {@const rd = rediscoverPick}
               <div class="rediscover">
                 <div class="rdlabel">
-                  Riscopri
-                  <button class="rdshuffle" onclick={() => (rediscoverTick += 1)} title="Un altro paper a caso" aria-label="Un altro">↻</button>
+                  {t("Riscopri")}
+                  <button class="rdshuffle" onclick={() => (rediscoverTick += 1)} title={t("Un altro paper a caso")} aria-label={t("Un altro")}>↻</button>
                 </div>
                 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                 <div class="rdcard" role="button" tabindex="0" title={rd.title ?? "Senza titolo"} onclick={() => openDocument(rd)} oncontextmenu={(e) => onContext(e, rd)} onkeydown={(e) => { if (e.key === "Enter") openDocument(rd); }}>
@@ -6397,7 +6691,7 @@
                     {#if thumbs[rd.id]}<img src={thumbs[rd.id]} alt="" />{:else}<div class="thumb-placeholder">PDF</div>{/if}
                   </div>
                   <div class="rdmeta">
-                    <span class="rdtitle">{rd.title ?? "Senza titolo"}</span>
+                    <span class="rdtitle">{rd.title ?? t("Senza titolo")}</span>
                     <span class="rdsub">{[authorLine(rd), rd.year].filter(Boolean).join(" · ")}</span>
                   </div>
                 </div>
@@ -6407,7 +6701,7 @@
         {/if}
         {#if filter.kind === "all" && view !== "map" && !query.trim() && !tagFilter.length && recentDocs.length}
           <section class="recentshelf">
-            <h2 class="shelfh">Continua a leggere</h2>
+            <h2 class="shelfh">{t("Continua a leggere")}</h2>
             <div class="shelf">
               {#each recentDocs as d (d.id)}
                 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -6415,7 +6709,7 @@
                   <div class="shelfthumb">
                     {#if thumbs[d.id]}<img src={thumbs[d.id]} alt="" />{:else}<div class="thumb-placeholder">PDF</div>{/if}
                   </div>
-                  <span class="shelftitle">{d.title ?? "Senza titolo"}</span>
+                  <span class="shelftitle">{d.title ?? t("Senza titolo")}</span>
                 </div>
               {/each}
             </div>
@@ -6423,10 +6717,10 @@
         {/if}
         {#if query.trim() && noteResults.length && view !== "map"}
           <section class="noteresults">
-            <h2 class="shelfh">Appunti ({noteResults.length})</h2>
+            <h2 class="shelfh">{t("Appunti ({n})", { n: noteResults.length })}</h2>
             <div class="notehits">
               {#each noteResults as n (n.slug)}
-                <button class="notehit" onclick={() => openNoteHit(n.slug)} title="Apri l'appunto">
+                <button class="notehit" onclick={() => openNoteHit(n.slug)} title={t("Apri l'appunto")}>
                   <span class="nhtitle">{n.title}</span>
                   {#if n.snippet}<span class="nhsnip">{n.snippet}</span>{/if}
                 </button>
@@ -6436,18 +6730,18 @@
         {/if}
         {#if query.trim() && annoResults.length && view !== "map"}
           <section class="noteresults">
-            <h2 class="shelfh">Evidenziazioni ({annoResults.length})</h2>
+            <h2 class="shelfh">{t("Evidenziazioni ({n})", { n: annoResults.length })}</h2>
             <div class="notehits">
               {#each annoResults as a (a.id)}
                 <button
                   class="notehit anno"
                   style={a.color ? `--annodot:${a.color}` : ""}
                   onclick={() => openById(a.document_id, a.page)}
-                  title="Apri il documento alla pagina {a.page}"
+                  title={t("Apri il documento alla pagina {pagina}", { pagina: a.page })}
                 >
                   <span class="nhtitle">
                     <span class="annodot" aria-hidden="true"></span>
-                    {a.doc_title ?? "Senza titolo"} · p. {a.page}
+                    {t("{titolo} · p. {pagina}", { titolo: a.doc_title ?? t("Senza titolo"), pagina: a.page })}
                   </span>
                   <span class="nhsnip">{a.snippet || a.quote || a.note || ""}</span>
                   {#if a.note && a.quote}<span class="nhnote">✎ {a.note}</span>{/if}
@@ -6458,17 +6752,17 @@
         {/if}
         {#if importErrors.length}
           <div class="imperr">
-            <span><b>{importErrors.length}</b> file non importati o senza testo:</span>
+            <span>{tp(importErrors.length, "1 file non importato o senza testo:", "{n} file non importati o senza testo:")}</span>
             <ul>{#each importErrors.slice(0, 12) as e (e)}<li>{e}</li>{/each}</ul>
-            {#if importErrors.length > 12}<span class="bibhint">…e altri {importErrors.length - 12}</span>{/if}
-            <button class="ghost small" onclick={() => (importErrors = [])}>Ho capito</button>
+            {#if importErrors.length > 12}<span class="bibhint">{t("…e altri {n}", { n: importErrors.length - 12 })}</span>{/if}
+            <button class="ghost small" onclick={() => (importErrors = [])}>{t("Ho capito")}</button>
           </div>
         {/if}
         {#if view === "map"}
           {#if graphScope}
             <div class="scopebar">
-              Costellazione della raccolta <b>{graphScope.name}</b> — vicinanze calcolate solo qui dentro
-              <button class="ghost small" onclick={clearGraphScope}>Torna a tutta la libreria</button>
+              {t("Costellazione della raccolta|davanti al nome della raccolta")} <b>{graphScope.name}</b> {t("— vicinanze calcolate solo qui dentro")}
+              <button class="ghost small" onclick={clearGraphScope}>{t("Torna a tutta la libreria")}</button>
             </div>
           {/if}
           <div class="mapwrap">
@@ -6513,7 +6807,8 @@
               onGhostsClear={() => (mapGhosts = [])}
               resolve={(id) => {
                 const d = displayed.find((x) => x.id === id) ?? docs.find((x) => x.id === id) ?? recentDocs.find((x) => x.id === id);
-                return d ? { authors: d.authors, venue: d.venue, tags: d.tags.map((t) => ({ name: t.name, color: t.color })) } : undefined;
+                // la variabile si chiama `tg`, non `t`: `t` è la funzione di traduzione
+                return d ? { authors: d.authors, venue: d.venue, tags: d.tags.map((tg) => ({ name: tg.name, color: tg.color })) } : undefined;
               }}
             />
           </div>
@@ -6521,33 +6816,35 @@
           <div class="empty">
             {#if query.trim()}
               {#if noteResults.length || annoResults.length}
-                {@const bits = [
-                  noteResults.length ? (noteResults.length === 1 ? "1 appunto" : `${noteResults.length} appunti`) : "",
-                  annoResults.length ? (annoResults.length === 1 ? "1 evidenziazione" : `${annoResults.length} evidenziazioni`) : "",
-                ].filter(Boolean)}
-                <p class="big">Nessun documento</p><p>Ma qui sopra {bits.length === 1 && !bits[0].startsWith("1 ") ? "ci sono" : bits.length > 1 ? "ci sono" : "c'è"} {bits.join(" e ")} che corrispond{bits.length === 1 && bits[0].startsWith("1 ") ? "e" : "ono"}.</p>
+                <p class="big">{t("Nessun documento")}</p>
+                <p>{t("Ma qui sopra ci sono altre corrispondenze:")}</p>
+                <ul class="emptyhits">
+                  {#if noteResults.length}<li>{tp(noteResults.length, "1 appunto", "{n} appunti")}</li>{/if}
+                  {#if annoResults.length}<li>{tp(annoResults.length, "1 evidenziazione", "{n} evidenziazioni")}</li>{/if}
+                </ul>
               {:else}
-                <p class="big">Nessun risultato</p><p>Prova un'altra ricerca o cambia modalità.</p>
+                <p class="big">{t("Nessun risultato")}</p><p>{t("Prova un'altra ricerca o cambia modalità.")}</p>
               {/if}
             {:else if tagFilter.length}
-              <p class="big">Nessun documento con questi tag</p><p>Prova a togliere un tag{tagFilter.length > 1 ? " o passa a «qualsiasi»" : ""}, oppure premi «Azzera».</p>
+              <p class="big">{t("Nessun documento con questi tag")}</p>
+              <p>{tagFilter.length > 1 ? t("Prova a togliere un tag o passa a «qualsiasi», oppure premi «Azzera».") : t("Prova a togliere un tag, oppure premi «Azzera».")}</p>
             {:else if filter.kind !== "all"}
-              <p class="big">Vuoto</p><p>Nessun documento in «{filter.label}».</p>
+              <p class="big">{t("Vuoto")}</p><p>{t("Nessun documento in «{dove}».", { dove: filter.label ?? "" })}</p>
             {:else if docsError}
-              <p class="big">Non riesco a caricare l'elenco</p>
+              <p class="big">{t("Non riesco a caricare l'elenco")}</p>
               <p class="loaderr">{docsError}</p>
               <div class="emptyacts">
-                <button class="primary" onclick={() => loadDocs()}>Riprova</button>
-                <button class="ghost" onclick={() => setFilter({ kind: "all" })}>Torna a tutta la libreria</button>
+                <button class="primary" onclick={() => loadDocs()}>{t("Riprova")}</button>
+                <button class="ghost" onclick={() => setFilter({ kind: "all" })}>{t("Torna a tutta la libreria")}</button>
               </div>
             {:else}
-              <p class="big">La libreria è vuota</p>
-              <p>Trascina qui dei PDF, oppure comincia da una di queste porte:</p>
+              <p class="big">{t("La libreria è vuota")}</p>
+              <p>{t("Trascina qui dei PDF, oppure comincia da una di queste porte:")}</p>
               <div class="emptyacts">
-                <button class="primary" onclick={() => importViaDialog()}>Importa PDF dal disco…</button>
-                <button class="ghost" onclick={() => importRefManagerDialog()}>Da bibliografia o progetto (.bib/.zip)…</button>
-                <button class="ghost" onclick={() => setFilter({ kind: "discover" })}>Cerca paper online…</button>
-                <button class="ghost" onclick={() => openHelp()}>Apri la guida</button>
+                <button class="primary" onclick={() => importViaDialog()}>{t("Importa PDF dal disco…")}</button>
+                <button class="ghost" onclick={() => importRefManagerDialog()}>{t("Da bibliografia o progetto (.bib/.zip)…")}</button>
+                <button class="ghost" onclick={() => setFilter({ kind: "discover" })}>{t("Cerca paper online…")}</button>
+                <button class="ghost" onclick={() => openHelp()}>{t("Apri la guida")}</button>
               </div>
             {/if}
           </div>
@@ -6555,33 +6852,37 @@
           <div class="grid" style="--grid-min: {gridSize}px">
             {#each displayed as d (d.id)}
               <article class="card" class:selcard={selectedSet.has(d.id)} class:kfocus={focusId === d.id} role="button" tabindex="0" onclick={() => focusCard(d)} ondblclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} onkeydown={(e) => { if (e.key === "Enter") openDocument(d); }}>
-                <button class="dots" title="Altre azioni (anche col tasto destro)" onclick={(e) => openCardMenu(e, d)}>⋯</button>
-                <button class="cardsel" class:on={selectedSet.has(d.id)} title="Seleziona per azioni multiple" aria-label="Seleziona" onclick={(e) => { e.stopPropagation(); toggleSelect(d.id); }}>{selectedSet.has(d.id) ? "✓" : ""}</button>
-                <button class="starbtn" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>
+                <button class="dots" title={t("Altre azioni (anche col tasto destro)")} onclick={(e) => openCardMenu(e, d)}>⋯</button>
+                <button class="cardsel" class:on={selectedSet.has(d.id)} title={t("Seleziona per azioni multiple")} aria-label={t("Seleziona")} onclick={(e) => { e.stopPropagation(); toggleSelect(d.id); }}>{selectedSet.has(d.id) ? "✓" : ""}</button>
+                <button class="starbtn" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label={t("Preferito")} onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>
                 <div class="thumb">
-                  {#if thumbs[d.id]}<img src={thumbs[d.id]} alt="" />{:else}<div class="thumb-placeholder" class:refonly={!d.has_file}>{d.has_file ? "PDF" : "Riferimento — senza PDF"}</div>{/if}
+                  {#if thumbs[d.id]}<img src={thumbs[d.id]} alt="" />{:else}<div class="thumb-placeholder" class:refonly={!d.has_file}>{d.has_file ? "PDF" : t("Riferimento — senza PDF")}</div>{/if}
                   {#if readPct(d) !== null}
                     {@const pct = readPct(d)}
-                    <div class="progress" class:done={d.is_read} title={d.is_read ? "Letto" : `Letto al ${pct}%${d.page_count ? ` (pag. ${d.last_page}/${d.page_count})` : ""}`}>
+                    <div class="progress" class:done={d.is_read} title={d.is_read
+                      ? t("Letto")
+                      : d.page_count
+                        ? t("Letto al {pct}% (pag. {p}/{tot})", { pct: pct ?? 0, p: d.last_page ?? 0, tot: d.page_count })
+                        : t("Letto al {pct}%", { pct: pct ?? 0 })}>
                       <div class="pfill" style="width:{pct}%"></div>
                     </div>
                   {/if}
                 </div>
                 <div class="meta">
-                  <h3 title={d.title ?? ""}>{d.title ?? "Senza titolo"}</h3>
-                  {#if authorLine(d)}<p class="authors"><button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button></p>{/if}
+                  <h3 title={d.title ?? ""}>{d.title ?? t("Senza titolo")}</h3>
+                  {#if authorLine(d)}<p class="authors"><button type="button" class="authorlink" title={t("Mostra tutti i lavori di {autore}", { autore: d.authors[0] })} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button></p>{/if}
                   {#if d.year || d.venue}<p class="venue">{[d.venue, d.year].filter(Boolean).join(" · ")}</p>{/if}
-                  {#if d.citekey && !isBare(d)}<button type="button" class="ckey" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}
-                  {#if d.has_summary}<span class="aisum" title="Riassunto AI già presente — lo trovi in «Modifica metadati» (il batch AI salta questo documento)">✦ AI</span>{/if}
-                  {#if annoCounts[d.id]}<span class="annobadge" title="{annoCounts[d.id]} evidenziazioni: cercale da qui, la ricerca guarda anche dentro le tue note sul PDF">✎ {annoCounts[d.id]}</span>{/if}
-                  {#if isBare(d)}<button class="metamiss" title="Cerca online la scheda giusta per QUESTO documento e scegli tu quale applicare" onclick={(e) => { e.stopPropagation(); metaFindId = d.id; }}>ⓘ recupera i metadati…</button>{/if}
+                  {#if d.citekey && !isBare(d)}<button type="button" class="ckey" title={t("Citekey: {citekey} — clic per copiare", { citekey: d.citekey })} aria-label={t("Copia citekey {citekey}", { citekey: d.citekey })} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}
+                  {#if d.has_summary}<span class="aisum" title={t("Riassunto AI già presente — lo trovi in «Modifica metadati» (il batch AI salta questo documento)")}>✦ AI</span>{/if}
+                  {#if annoCounts[d.id]}<span class="annobadge" title={tp(annoCounts[d.id], "1 evidenziazione: cercala da qui, la ricerca guarda anche dentro le tue note sul PDF", "{n} evidenziazioni: cercale da qui, la ricerca guarda anche dentro le tue note sul PDF")}>✎ {annoCounts[d.id]}</span>{/if}
+                  {#if isBare(d)}<button class="metamiss" title={t("Cerca online la scheda giusta per QUESTO documento e scegli tu quale applicare")} onclick={(e) => { e.stopPropagation(); metaFindId = d.id; }}>{t("ⓘ recupera i metadati…")}</button>{/if}
                   {#if d.pub_status}<div class="badgerow">{@render pubBadge(d.pub_status, d.paper_url)}</div>{/if}
                   {#if d.github_url}
-                    <button class="ghchip" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()} codice</button>
+                    <button class="ghchip" title={t("Apri il repository GitHub: {url}", { url: d.github_url })} aria-label={t("Apri repository GitHub")} onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()} {t("codice")}</button>
                   {/if}
                   {#if d.tags.length}
                     <div class="chips">
-                      {#each d.tags as t (t.id)}<span role="button" tabindex="0" class="chip chipsel" class:on={tagFilter.includes(t.id)} style="background:{(t.color ?? '#888')}33; border-color:{t.color ?? '#888'}" title={`Filtra: mostra solo i paper col tag «${t.name}» (clicca altri tag per restringere; ri-clic per togliere)`} onclick={(e) => { e.stopPropagation(); toggleTagFilter(t.id); }} onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); toggleTagFilter(t.id); } }}>{#if tagFilter.includes(t.id)}✓ {/if}{t.name}</span>{/each}
+                      {#each d.tags as tag (tag.id)}<span role="button" tabindex="0" class="chip chipsel" class:on={tagFilter.includes(tag.id)} style="background:{(tag.color ?? '#888')}33; border-color:{tag.color ?? '#888'}" title={t("Filtra: mostra solo i paper col tag «{nome}» (clicca altri tag per restringere; ri-clic per togliere)", { nome: tag.name })} onclick={(e) => { e.stopPropagation(); toggleTagFilter(tag.id); }} onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); toggleTagFilter(tag.id); } }}>{#if tagFilter.includes(tag.id)}✓ {/if}{tag.name}</span>{/each}
                     </div>
                   {/if}
                 </div>
@@ -6605,31 +6906,32 @@
                 <tr>
                   <th></th>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <th class="sortable" onclick={() => cycleSort("title")} title="Ordina per titolo (clicca di nuovo per invertire, ancora per togliere)">Titolo<span class="ar">{sortArrow("title")}</span>{#if sortChain.length > 1 && sortRank("title")}<span class="ar rnk">{sortRank("title")}</span>{/if}</th>
+                  <th class="sortable" onclick={() => cycleSort("title")} title={t("Ordina per titolo (clicca di nuovo per invertire, ancora per togliere)")}>{t("Titolo")}<span class="ar">{sortArrow("title")}</span>{#if sortChain.length > 1 && sortRank("title")}<span class="ar rnk">{sortRank("title")}</span>{/if}</th>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <th class="sortable" onclick={() => cycleSort("author")} title="Ordina per primo autore (clicca di nuovo per invertire, ancora per togliere)">Autori<span class="ar">{sortArrow("author")}</span>{#if sortChain.length > 1 && sortRank("author")}<span class="ar rnk">{sortRank("author")}</span>{/if}</th>
+                  <th class="sortable" onclick={() => cycleSort("author")} title={t("Ordina per primo autore (clicca di nuovo per invertire, ancora per togliere)")}>{t("Autori")}<span class="ar">{sortArrow("author")}</span>{#if sortChain.length > 1 && sortRank("author")}<span class="ar rnk">{sortRank("author")}</span>{/if}</th>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <th class="sortable num" onclick={() => cycleSort("year")} title="Ordina per anno (clicca di nuovo per invertire, ancora per togliere)">Anno<span class="ar">{sortArrow("year")}</span>{#if sortChain.length > 1 && sortRank("year")}<span class="ar rnk">{sortRank("year")}</span>{/if}</th>
+                  <th class="sortable num" onclick={() => cycleSort("year")} title={t("Ordina per anno (clicca di nuovo per invertire, ancora per togliere)")}>{t("Anno")}<span class="ar">{sortArrow("year")}</span>{#if sortChain.length > 1 && sortRank("year")}<span class="ar rnk">{sortRank("year")}</span>{/if}</th>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <th class="sortable" onclick={() => cycleSort("venue")} title="Ordina per rivista (clicca di nuovo per invertire, ancora per togliere)">Rivista<span class="ar">{sortArrow("venue")}</span>{#if sortChain.length > 1 && sortRank("venue")}<span class="ar rnk">{sortRank("venue")}</span>{/if}</th>
-                  <th>Tag</th>
+                  <th class="sortable" onclick={() => cycleSort("venue")} title={t("Ordina per rivista (clicca di nuovo per invertire, ancora per togliere)")}>{t("Rivista")}<span class="ar">{sortArrow("venue")}</span>{#if sortChain.length > 1 && sortRank("venue")}<span class="ar rnk">{sortRank("venue")}</span>{/if}</th>
+                  <th>{t("Tag")}</th>
+                  <!-- i18n-exempt: sigla identica in inglese -->
                   <th>DOI</th>
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-                  <th class="sortable" onclick={() => cycleSort("added")} title="Ordina per data di aggiunta (clicca di nuovo per invertire, ancora per togliere)">Aggiunto<span class="ar">{sortArrow("added")}</span>{#if sortChain.length > 1 && sortRank("added")}<span class="ar rnk">{sortRank("added")}</span>{/if}</th>
+                  <th class="sortable" onclick={() => cycleSort("added")} title={t("Ordina per data di aggiunta (clicca di nuovo per invertire, ancora per togliere)")}>{t("Aggiunto")}<span class="ar">{sortArrow("added")}</span>{#if sortChain.length > 1 && sortRank("added")}<span class="ar rnk">{sortRank("added")}</span>{/if}</th>
                 </tr>
               </thead>
               <tbody>
                 {#each displayed as d (d.id)}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
                   <tr onclick={() => focusCard(d)} ondblclick={() => openDocument(d)} oncontextmenu={(e) => onContext(e, d)} class:selrow={selectedSet.has(d.id)} class:kfocus={focusId === d.id}>
-                    <td class="sel"><input type="checkbox" checked={selectedSet.has(d.id)} onclick={(e) => e.stopPropagation()} onchange={() => toggleSelect(d.id)} title="Seleziona" /></td>
-                    <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label="Preferito" onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? "Senza titolo"}{#if d.github_url}<button class="ghicon" title={`Apri il repository GitHub: ${d.github_url}`} aria-label="Apri repository GitHub" onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if d.citekey && !isBare(d)}<button type="button" class="ckey-inline" title={`Citekey: ${d.citekey} — clic per copiare`} aria-label={`Copia citekey ${d.citekey}`} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}{#if d.has_summary}<span class="aisum inline" title="Riassunto AI già presente (il batch AI salta questo documento)">✦</span>{/if}{#if isBare(d)}<button class="metamiss-inline" title="Recupera i metadati di questo documento (scegli tu la scheda giusta)" onclick={(e) => { e.stopPropagation(); metaFindId = d.id; }}>ⓘ</button>{/if}</td>
-                    <td class="dim" title={authorLine(d)}>{#if authorLine(d)}<button type="button" class="authorlink" title={`Mostra tutti i lavori di ${d.authors[0]}`} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button>{:else}—{/if}</td>
+                    <td class="sel"><input type="checkbox" checked={selectedSet.has(d.id)} onclick={(e) => e.stopPropagation()} onchange={() => toggleSelect(d.id)} title={t("Seleziona")} /></td>
+                    <td class="ttl" title={d.title ?? ""}><button class="starinline" class:on={d.favorite} title={d.favorite ? "Togli dai preferiti" : "Aggiungi ai preferiti"} aria-label={t("Preferito")} onclick={(e) => { e.stopPropagation(); toggleFavorite(d); }}>{d.favorite ? "★" : "☆"}</button>{d.title ?? t("Senza titolo")}{#if d.github_url}<button class="ghicon" title={t("Apri il repository GitHub: {url}", { url: d.github_url })} aria-label={t("Apri repository GitHub")} onclick={(e) => { e.stopPropagation(); openInBrowser(d.github_url!); }}>{@render githubMark()}</button>{/if}{#if d.citekey && !isBare(d)}<button type="button" class="ckey-inline" title={t("Citekey: {citekey} — clic per copiare", { citekey: d.citekey })} aria-label={t("Copia citekey {citekey}", { citekey: d.citekey })} onclick={(e) => { e.stopPropagation(); copyCitekey(d); }}>{d.citekey}</button>{/if}{#if d.has_summary}<span class="aisum inline" title={t("Riassunto AI già presente (il batch AI salta questo documento)")}>✦</span>{/if}{#if isBare(d)}<button class="metamiss-inline" title={t("Recupera i metadati di questo documento (scegli tu la scheda giusta)")} onclick={(e) => { e.stopPropagation(); metaFindId = d.id; }}>ⓘ</button>{/if}</td>
+                    <td class="dim" title={authorLine(d)}>{#if authorLine(d)}<button type="button" class="authorlink" title={t("Mostra tutti i lavori di {autore}", { autore: d.authors[0] })} onclick={(e) => { e.stopPropagation(); showAuthor(d.authors[0]); }}>{authorLine(d)}</button>{:else}—{/if}</td>
                     <td class="num dim">{d.year ?? "—"}</td>
                     <td class="dim" title={d.venue ?? ""}>{d.venue || "—"}{#if d.pub_status}<span class="badgeinline">{@render pubBadge(d.pub_status, d.paper_url)}</span>{/if}</td>
                     <td>
                       <div class="tagcell">
-                        {#each d.tags.slice(0, 2) as t (t.id)}<span role="button" tabindex="0" class="chip chipsel" class:on={tagFilter.includes(t.id)} style="background:{(t.color ?? '#888')}33; border-color:{t.color ?? '#888'}" title={`Filtra: mostra solo i paper col tag «${t.name}» (clicca altri tag per restringere; ri-clic per togliere)`} onclick={(e) => { e.stopPropagation(); toggleTagFilter(t.id); }} onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); toggleTagFilter(t.id); } }}>{#if tagFilter.includes(t.id)}✓ {/if}{t.name}</span>{/each}
+                        {#each d.tags.slice(0, 2) as tag (tag.id)}<span role="button" tabindex="0" class="chip chipsel" class:on={tagFilter.includes(tag.id)} style="background:{(tag.color ?? '#888')}33; border-color:{tag.color ?? '#888'}" title={t("Filtra: mostra solo i paper col tag «{nome}» (clicca altri tag per restringere; ri-clic per togliere)", { nome: tag.name })} onclick={(e) => { e.stopPropagation(); toggleTagFilter(tag.id); }} onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); toggleTagFilter(tag.id); } }}>{#if tagFilter.includes(tag.id)}✓ {/if}{tag.name}</span>{/each}
                         {#if d.tags.length > 2}<span class="more">+{d.tags.length - 2}</span>{/if}
                       </div>
                     </td>
@@ -6670,10 +6972,10 @@
     {/if}
   </div>
 
-  {#if dragOver}<div class="dropmask"><span>{noteEditorActive() ? "Rilascia l'immagine per inserirla nell'appunto (o un PDF per importarlo)" : "Rilascia i PDF per importarli"}</span></div>{/if}
+  {#if dragOver}<div class="dropmask"><span>{noteEditorActive() ? t("Rilascia l'immagine per inserirla nell'appunto (o un PDF per importarlo)") : t("Rilascia i PDF per importarli")}</span></div>{/if}
 
   {#if showCoach}
-    <div class="coach" role="dialog" aria-label="Suggerimento iniziale">
+    <div class="coach" role="dialog" aria-label={t("Suggerimento iniziale")}>
       <div class="coachh">Benvenuto in Scriptorium</div>
       <p class="coachp">Tre modi per arrivare a tutto:</p>
       <ul class="coachlist">
@@ -6765,33 +7067,34 @@
   {#if tagPanel}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="menu flyout" use:clamp={{ x: tagPanel.x, y: tagPanel.y }} onclick={(e) => e.stopPropagation()}>
-      <div class="mtitle">Tag — {tagPanel.doc.title ?? "Senza titolo"}</div>
-      {#each tags as t (t.id)}
+      <div class="mtitle">{t("Tag — {titolo}", { titolo: tagPanel.doc.title ?? t("Senza titolo") })}</div>
+      <!-- la variabile del ciclo si chiama `tag`, non `t`: `t` è la funzione di traduzione -->
+      {#each tags as tag (tag.id)}
         <label class="mtag">
-          <input type="checkbox" checked={tagPanel.doc.tags.some((x) => x.id === t.id)} onchange={() => toggleTag(tagPanel!.doc, t)} />
-          <span class="dot" style="background:{t.color ?? '#888'}"></span>{t.name}
+          <input type="checkbox" checked={tagPanel.doc.tags.some((x) => x.id === tag.id)} onchange={() => toggleTag(tagPanel!.doc, tag)} />
+          <span class="dot" style="background:{tag.color ?? '#888'}"></span>{tag.name}
         </label>
       {/each}
       <div class="mnew">
-        <input placeholder="nuovo tag…" bind:value={newTagName} onkeydown={(e) => e.key === "Enter" && makeTagAndAssign(tagPanel!.doc)} />
+        <input placeholder={t("nuovo tag…")} bind:value={newTagName} onkeydown={(e) => e.key === "Enter" && makeTagAndAssign(tagPanel!.doc)} />
         <button class="ghost small" onclick={() => makeTagAndAssign(tagPanel!.doc)}>+</button>
       </div>
-      <button class="mdone" onclick={() => (tagPanel = null)}>Fatto</button>
+      <button class="mdone" onclick={() => (tagPanel = null)}>{t("Fatto")}</button>
     </div>
   {/if}
 
   {#if collPanel}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="menu flyout" use:clamp={{ x: collPanel.x, y: collPanel.y }} onclick={(e) => e.stopPropagation()}>
-      <div class="mtitle">Aggiungi a — {collPanel.doc.title ?? "Senza titolo"}</div>
+      <div class="mtitle">{t("Aggiungi a — {titolo}", { titolo: collPanel.doc.title ?? t("Senza titolo") })}</div>
       {#if collections.filter((c) => !c.is_smart).length}
         {#each collections.filter((c) => !c.is_smart) as c (c.id)}
           <button class="mcoll" onclick={() => { addDocToCollection(collPanel!.doc, c); collPanel = null; }}>{c.name}</button>
         {/each}
       {:else}
-        <p class="mempty">Nessuna raccolta: creane una dalla barra laterale.</p>
+        <p class="mempty">{t("Nessuna raccolta: creane una dalla barra laterale.")}</p>
       {/if}
-      <button class="mdone" onclick={() => (collPanel = null)}>Chiudi</button>
+      <button class="mdone" onclick={() => (collPanel = null)}>{t("Chiudi")}</button>
     </div>
   {/if}
 
@@ -6806,18 +7109,18 @@
         </article>
         <div class="aidocsrc">
           {#each aiDoc.sources as s (s.n)}
-            <button class="hflink small" onclick={() => openById(s.document_id)} title="Apri il documento">[{s.n}] {s.title}{s.year ? ` (${s.year})` : ""}</button>
+            <button class="hflink small" onclick={() => openById(s.document_id)} title={t("Apri il documento")}>{t("[{n}] {titolo}", { n: s.n, titolo: s.title })}{s.year ? t(" ({anno})", { anno: s.year }) : ""}</button>
           {/each}
         </div>
         <div class="modactions">
-          <button class="ghost small" onclick={() => copyAiDoc("md")}>Copia Markdown</button>
-          {#if aiDoc.kind === "Rassegna"}
-            <button class="ghost small" onclick={() => copyAiDoc("latex")} title={"Le [n] diventano \\cite{citekey}"}>Copia per LaTeX</button>
-            <button class="ghost small" onclick={() => copyAiDoc("pandoc")} title="Le [n] diventano [@citekey]">Copia per Pandoc</button>
+          <button class="ghost small" onclick={() => copyAiDoc("md")}>{t("Copia Markdown")}</button>
+          {#if aiDoc.kind === "review"}
+            <button class="ghost small" onclick={() => copyAiDoc("latex")} title={t("Le [n] diventano \\cite{citekey}")}>{t("Copia per LaTeX")}</button>
+            <button class="ghost small" onclick={() => copyAiDoc("pandoc")} title={t("Le [n] diventano [@citekey]")}>{t("Copia per Pandoc")}</button>
           {/if}
-          <button class="ghost small" onclick={aiDocToNote} title="Crea un appunto .md, con le fonti come backlink [[@citekey]] cliccabili">📝 Salva negli Appunti</button>
-          <button class="ghost small" onclick={saveAiDoc}>Salva .md…</button>
-          <button class="primary" onclick={() => (aiDoc = null)}>Chiudi</button>
+          <button class="ghost small" onclick={aiDocToNote} title={t("Crea un appunto .md, con le fonti come backlink [[@citekey]] cliccabili")}>{t("📝 Salva negli Appunti")}</button>
+          <button class="ghost small" onclick={saveAiDoc}>{t("Salva .md…")}</button>
+          <button class="primary" onclick={() => (aiDoc = null)}>{t("Chiudi")}</button>
         </div>
       </div>
     </div>
@@ -6826,9 +7129,9 @@
   {#if resultsGrid}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) resultsGrid = null; }} role="presentation">
-      <div class="idmodal gridmodal" role="dialog" tabindex="-1" aria-label="Tabella risultati" onclick={(e) => e.stopPropagation()}>
-        <h2>Risultati raccolti dai paper</h2>
-        <p class="dimtext">Valori estratti testualmente dai documenti selezionati (verifica sempre sul PDF: clic sul paper per aprirlo).</p>
+      <div class="idmodal gridmodal" role="dialog" tabindex="-1" aria-label={t("Tabella risultati")} onclick={(e) => e.stopPropagation()}>
+        <h2>{t("Risultati raccolti dai paper")}</h2>
+        <p class="dimtext">{t("Valori estratti testualmente dai documenti selezionati (verifica sempre sul PDF: clic sul paper per aprirlo).")}</p>
         <div class="gridwrap">
           <table class="resgrid">
             <thead><tr>{#each resultsGrid[0] as h, hi (hi)}<th>{h}</th>{/each}</tr></thead>
@@ -6840,10 +7143,11 @@
           </table>
         </div>
         <div class="modactions">
+          <!-- i18n-exempt: CSV/Markdown/Excel sono nomi di formato, identici in inglese -->
           <button class="ghost small" onclick={() => exportResults("csv")}>CSV…</button>
           <button class="ghost small" onclick={() => exportResults("md")}>Markdown…</button>
           <button class="ghost small" onclick={() => exportResults("xlsx")}>Excel…</button>
-          <button class="primary" onclick={() => (resultsGrid = null)}>Chiudi</button>
+          <button class="primary" onclick={() => (resultsGrid = null)}>{t("Chiudi")}</button>
         </div>
       </div>
     </div>
@@ -6852,28 +7156,29 @@
   {#if pathModal}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) pathModal = null; }} role="presentation">
-      <div class="idmodal pathmodal" role="dialog" tabindex="-1" aria-label="Percorso di lettura" onclick={(e) => e.stopPropagation()}>
-        <h2>Percorso di lettura</h2>
-        <p class="dimtext">Per capire «{pathModal.doc.title ?? "questo paper"}», in ordine consigliato: prima i fondamenti che cita, poi i vicini di contenuto già tuoi, infine i riferimenti che ancora non possiedi.</p>
+      <div class="idmodal pathmodal" role="dialog" tabindex="-1" aria-label={t("Percorso di lettura")} onclick={(e) => e.stopPropagation()}>
+        <h2>{t("Percorso di lettura")}</h2>
+        <p class="dimtext">{t("Per capire «{titolo}», in ordine consigliato: prima i fondamenti che cita, poi i vicini di contenuto già tuoi, infine i riferimenti che ancora non possiedi.", { titolo: pathModal.doc.title ?? t("questo paper") })}</p>
         <ol class="pathlist">
           {#each pathModal.steps as step, si (si)}
             <li class="pathstep" class:ext={!step.in_library}>
               <div class="pathmain">
                 {#if step.document_id != null}
-                  <button class="hflink" onclick={() => openById(step.document_id!)} title="Apri il documento">{step.title}{step.year ? ` (${step.year})` : ""}</button>
+                  <button class="hflink" onclick={() => openById(step.document_id!)} title={t("Apri il documento")}>{step.year ? t("{titolo} ({anno})", { titolo: step.title, anno: step.year }) : step.title}</button>
                 {:else}
                   <span class="pathtitle">{step.title}</span>
                   {#if step.doi}
-                    <button class="hflink small" onclick={() => openInBrowser(`https://doi.org/${step.doi}`)} title="Apri il DOI nel browser">DOI ↗</button>
-                    <button class="ghost small" onclick={() => addPathStep(step)} title="Aggiungi come riferimento alla libreria">+ Aggiungi</button>
+                    <button class="hflink small" onclick={() => openInBrowser(`https://doi.org/${step.doi}`)} title={t("Apri il DOI nel browser")}>DOI ↗</button>
+                    <button class="ghost small" onclick={() => addPathStep(step)} title={t("Aggiungi come riferimento alla libreria")}>{t("+ Aggiungi")}</button>
                   {/if}
                 {/if}
               </div>
-              <span class="pathwhy">{step.reason}</span>
+              <!-- `reason` arriva in italiano dal Rust: si traduce qui, al consumatore -->
+              <span class="pathwhy">{te(step.reason)}</span>
             </li>
           {/each}
         </ol>
-        <div class="modactions"><button class="primary" onclick={() => (pathModal = null)}>Chiudi</button></div>
+        <div class="modactions"><button class="primary" onclick={() => (pathModal = null)}>{t("Chiudi")}</button></div>
       </div>
     </div>
   {/if}
@@ -6881,24 +7186,29 @@
   {#if wikiFromSel}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) wikiFromSel = null; }} role="presentation">
-      <div class="idmodal wikiselmodal" role="dialog" tabindex="-1" aria-label="Pagina wiki dalla selezione" onclick={(e) => e.stopPropagation()}>
-        <h2>Pagina wiki dalla selezione</h2>
+      <div class="idmodal wikiselmodal" role="dialog" tabindex="-1" aria-label={t("Pagina wiki dalla selezione")} onclick={(e) => e.stopPropagation()}>
+        <h2>{t("Pagina wiki dalla selezione")}</h2>
         <p class="dimtext">
-          La pagina userà come fonti <strong>esattamente</strong> {wikiFromSel.ids.length === 1 ? "il documento selezionato" : `i ${wikiFromSel.ids.length} documenti selezionati`}
-          {selected.length > 10 ? " (i primi 10)" : ""} — ognuno dovrà comparire nel testo, o essere dichiarato non pertinente.
+          {#if wikiFromSel.ids.length === 1}
+            {t("La pagina userà come fonti esattamente il documento selezionato — dovrà comparire nel testo, o essere dichiarato non pertinente.")}
+          {:else if selected.length > 10}
+            {t("La pagina userà come fonti esattamente i {n} documenti selezionati (i primi 10) — ognuno dovrà comparire nel testo, o essere dichiarato non pertinente.", { n: wikiFromSel.ids.length })}
+          {:else}
+            {t("La pagina userà come fonti esattamente i {n} documenti selezionati — ognuno dovrà comparire nel testo, o essere dichiarato non pertinente.", { n: wikiFromSel.ids.length })}
+          {/if}
         </p>
         <div class="refurl">
           <!-- svelte-ignore a11y_autofocus -->
           <input
-            placeholder="Titolo del concetto (es. «ragionamento negli LLM»)…"
+            placeholder={t("Titolo del concetto (es. «ragionamento negli LLM»)…")}
             bind:value={wikiFromSel.concept}
             autofocus
             onkeydown={(e) => e.key === "Enter" && runWikiFromSelection()}
           />
-          <button class="primary" onclick={runWikiFromSelection} disabled={wikiBusy || !wikiFromSel.concept.trim()}>{wikiBusy ? "…" : "Genera"}</button>
-          <button class="ghost small" onclick={() => (wikiFromSel = null)}>Annulla</button>
+          <button class="primary" onclick={runWikiFromSelection} disabled={wikiBusy || !wikiFromSel.concept.trim()}>{wikiBusy ? "…" : t("Genera")}</button>
+          <button class="ghost small" onclick={() => (wikiFromSel = null)}>{t("Annulla")}</button>
         </div>
-        <p class="refhint">Se esiste già una pagina con lo stesso titolo verrà sostituita. La trovi poi in «Wiki della libreria».</p>
+        <p class="refhint">{t("Se esiste già una pagina con lo stesso titolo verrà sostituita. La trovi poi in «Wiki della libreria».")}</p>
       </div>
     </div>
   {/if}
@@ -6907,30 +7217,32 @@
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget && !refPanel!.busy) refPanel = null; }} role="presentation">
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-      <div class="idmodal refmodal" role="dialog" tabindex="-1" aria-label="Riferimento senza PDF" onclick={(e) => e.stopPropagation()}>
-        <h2>Riferimento senza PDF</h2>
+      <div class="idmodal refmodal" role="dialog" tabindex="-1" aria-label={t("Riferimento senza PDF")} onclick={(e) => e.stopPropagation()}>
+        <h2>{t("Riferimento senza PDF")}</h2>
         <p class="dimtext">
-          «{refPanel.doc.title ?? "Senza titolo"}» è in libreria come <strong>citazione</strong>: non ha ancora un file
-          allegato (quando è stato aggiunto non c'era un PDF Open Access scaricabile).
+          «{refPanel.doc.title ?? t("Senza titolo")}»
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+          {@html t("è in libreria come <strong>citazione</strong>: non ha ancora un file allegato (quando è stato aggiunto non c'era un PDF Open Access scaricabile).")}
         </p>
         <div class="refactions">
-          <button class="primary" onclick={refFindPdf} disabled={refPanel.busy} title="Cerca i candidati online — arXiv, Unpaywall, OpenAlex, Semantic Scholar, Crossref, per identificativo e per titolo — e scegli tu quale scaricare e allegare">
-            {refPanel.busy ? "…" : "Trova PDF…"}
+          <button class="primary" onclick={refFindPdf} disabled={refPanel.busy} title={t("Cerca i candidati online — arXiv, Unpaywall, OpenAlex, Semantic Scholar, Crossref, per identificativo e per titolo — e scegli tu quale scaricare e allegare")}>
+            {refPanel.busy ? "…" : t("Trova PDF…")}
           </button>
-          <button class="ghost" onclick={() => (editingId = refPanel!.doc.id)}>Modifica metadati</button>
-          <button class="ghost" onclick={() => (refPanel = null)}>Chiudi</button>
+          <button class="ghost" onclick={() => (editingId = refPanel!.doc.id)}>{t("Modifica metadati")}</button>
+          <button class="ghost" onclick={() => (refPanel = null)}>{t("Chiudi")}</button>
         </div>
-        <div class="refor">…oppure allega tu un link al PDF:</div>
+        <div class="refor">{t("…oppure allega tu un link al PDF:")}</div>
         <div class="refurl">
           <input
-            placeholder="https://…/file.pdf (vanno bene anche le pagine GitHub /blob/)"
+            placeholder={t("https://…/file.pdf (vanno bene anche le pagine GitHub /blob/)")}
             bind:value={refPanel.url}
             onkeydown={(e) => e.key === "Enter" && refAttach()}
           />
-          <button class="ghost small" onclick={refPaste} title="Incolla il link dagli appunti">📋</button>
-          <button class="ghost small" onclick={refAttach} disabled={refPanel.busy || !refPanel.url.trim()}>{refPanel.busy ? "…" : "Allega"}</button>
+          <button class="ghost small" onclick={refPaste} title={t("Incolla il link dagli appunti")}>📋</button>
+          <button class="ghost small" onclick={refAttach} disabled={refPanel.busy || !refPanel.url.trim()}>{refPanel.busy ? "…" : t("Allega")}</button>
         </div>
-        <p class="refhint">Il file viene scaricato e allegato a <strong>questa</strong> voce — tag, citazioni e metadati restano; nessun duplicato.</p>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+        <p class="refhint">{@html t("Il file viene scaricato e allegato a <strong>questa</strong> voce — tag, citazioni e metadati restano; nessun duplicato.")}</p>
       </div>
     </div>
   {/if}
@@ -6939,23 +7251,23 @@
     {@const sd = spotlight.doc}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) spotlight = null; }} role="presentation">
-      <div class="spotcard" role="dialog" aria-label="Riscopri">
-        <p class="spotkicker">Riscopri</p>
+      <div class="spotcard" role="dialog" aria-label={t("Riscopri")}>
+        <p class="spotkicker">{t("Riscopri")}</p>
         <div class="spotbody">
           <div class="spotthumb">
-            {#if thumbs[sd.id]}<img src={thumbs[sd.id]} alt="" />{:else}<div class="thumb-placeholder" class:refonly={!sd.has_file}>{sd.has_file ? "PDF" : "Riferimento"}</div>{/if}
+            {#if thumbs[sd.id]}<img src={thumbs[sd.id]} alt="" />{:else}<div class="thumb-placeholder" class:refonly={!sd.has_file}>{sd.has_file ? "PDF" /* i18n-exempt: sigla identica in inglese */ : t("Riferimento")}</div>{/if}
           </div>
           <div class="spotmeta">
-            <h2 class="spottitle">{sd.title ?? "Senza titolo"}</h2>
+            <h2 class="spottitle">{sd.title ?? t("Senza titolo")}</h2>
             {#if authorLine(sd)}<p class="spotauthors">{authorLine(sd)}</p>{/if}
             {#if sd.year || sd.venue}<p class="spotvenue">{[sd.venue, sd.year].filter(Boolean).join(" · ")}</p>{/if}
             {#if spotlight.blurb}<p class="spotblurb">{spotlight.blurb}</p>{/if}
           </div>
         </div>
         <div class="spotactions">
-          <button class="primary" onclick={() => { openDocument(sd); spotlight = null; }}>Leggi ora</button>
-          <button class="ghost" onclick={() => rediscover()}>Un altro</button>
-          <button class="ghost" onclick={() => (spotlight = null)}>Chiudi</button>
+          <button class="primary" onclick={() => { openDocument(sd); spotlight = null; }}>{t("Leggi ora")}</button>
+          <button class="ghost" onclick={() => rediscover()}>{t("Un altro")}</button>
+          <button class="ghost" onclick={() => (spotlight = null)}>{t("Chiudi")}</button>
         </div>
       </div>
     </div>
@@ -6963,56 +7275,61 @@
 
   <div class="toasts" aria-live="polite">
     {#if wikiProg && filter.kind !== "wiki"}
+      {@const fase = wikiProg.phase === "estrazione"
+        ? t("leggo le fonti {fatti}/{totale}", { fatti: wikiProg.done + 1, totale: Math.max(wikiProg.total - 1, 1) })
+        : wikiProg.phase === "sintesi" ? t("scrivo…") : t("controllo le fonti…")}
       <div class="toast">
-        <span>{wikiProg.concept}: {wikiProg.phase === "estrazione" ? `leggo le fonti ${wikiProg.done + 1}/${Math.max(wikiProg.total - 1, 1)}` : wikiProg.phase === "sintesi" ? "scrivo…" : "controllo le fonti…"}</span>
+        <span>{t("{concetto}: {fase}", { concetto: wikiProg.concept, fase })}</span>
         <div class="bar"><div class="fill" style="width:{wikiProg.total ? (wikiProg.done / wikiProg.total) * 100 : 6}%"></div></div>
-        <button class="ghost small" onclick={stopWiki} title="Ferma al prossimo passaggio">Stop</button>
+        <button class="ghost small" onclick={stopWiki} title={t("Ferma al prossimo passaggio")}>{t("Stop")}</button>
       </div>
     {/if}
     {#if clipOffer}
       <div class="toast clipoffer">
         <div class="clipbody">
-          <span class="cliptitle">Hai copiato un link a un PDF</span>
+          <span class="cliptitle">{t("Hai copiato un link a un PDF")}</span>
           <span class="clipurl" title={clipOffer}>{clipOffer}</span>
         </div>
-        <button class="ghost small" onclick={clipGrab} disabled={clipBusy}>{clipBusy ? "…" : "Aggancia"}</button>
-        <button class="ghost small clipx" onclick={() => (clipOffer = null)} title="Ignora questo link" aria-label="Ignora">✕</button>
+        <button class="ghost small" onclick={clipGrab} disabled={clipBusy}>{clipBusy ? "…" : t("Aggancia")}</button>
+        <button class="ghost small clipx" onclick={() => (clipOffer = null)} title={t("Ignora questo link")} aria-label={t("Ignora")}>✕</button>
       </div>
     {/if}
     {#if aiBatch}
       <div class="toast">
-        <span>{aiBatch.kind === "summary" ? "Riassunto AI" : "Tag automatici AI"}: {aiBatch.done}/{aiBatch.total}</span>
+        <span>{aiBatch.kind === "summary"
+          ? t("Riassunto AI: {fatti}/{totale}", { fatti: aiBatch.done, totale: aiBatch.total })
+          : t("Tag automatici AI: {fatti}/{totale}", { fatti: aiBatch.done, totale: aiBatch.total })}</span>
         <div class="bar"><div class="fill" style="width:{aiBatch.total ? (aiBatch.done / aiBatch.total) * 100 : 0}%"></div></div>
-        <button class="ghost small" onclick={() => (batchCancel = true)} title="Interrompi l'operazione AI in corso">Stop</button>
+        <button class="ghost small" onclick={() => (batchCancel = true)} title={t("Interrompi l'operazione AI in corso")}>{t("Stop")}</button>
       </div>
     {/if}
     {#if importProg && importProg.done < importProg.total}
       <div class="toast">
-        <span>Import: {importProg.done}/{importProg.total} — {importProg.file}</span>
+        <span>{t("Import: {fatti}/{totale} — {file}", { fatti: importProg.done, totale: importProg.total, file: importProg.file })}</span>
         <div class="bar"><div class="fill" style="width:{importProg.total ? (importProg.done / importProg.total) * 100 : 0}%"></div></div>
       </div>
     {/if}
     {#if metaScan}
       <div class="toast">
-        <span>Metadati: {metaScan.done}/{metaScan.total} — {metaScan.updated} aggiornati</span>
+        <span>{t("Metadati: {fatti}/{totale} — {aggiornati} aggiornati", { fatti: metaScan.done, totale: metaScan.total, aggiornati: metaScan.updated })}</span>
         <div class="bar"><div class="fill" style="width:{metaScan.total ? (metaScan.done / metaScan.total) * 100 : 0}%"></div></div>
-        <button class="ghost small" onclick={() => cancelRecoverMetadata()} title="Interrompi il recupero (quanto già aggiornato resta)">Stop</button>
+        <button class="ghost small" onclick={() => cancelRecoverMetadata()} title={t("Interrompi il recupero (quanto già aggiornato resta)")}>{t("Stop")}</button>
       </div>
     {/if}
     {#if pdfBatch}
       <div class="toast">
-        <span>Trova PDF: {pdfBatch.done}/{pdfBatch.total} — {pdfBatch.found} allegati</span>
+        <span>{t("Trova PDF: {fatti}/{totale} — {allegati} allegati", { fatti: pdfBatch.done, totale: pdfBatch.total, allegati: pdfBatch.found })}</span>
         <div class="bar"><div class="fill" style="width:{pdfBatch.total ? (pdfBatch.done / pdfBatch.total) * 100 : 0}%"></div></div>
-        <button class="ghost small" onclick={() => (pdfBatchCancel = true)} title="Interrompi la ricerca dei PDF (quelli già allegati restano)">Stop</button>
+        <button class="ghost small" onclick={() => (pdfBatchCancel = true)} title={t("Interrompi la ricerca dei PDF (quelli già allegati restano)")}>{t("Stop")}</button>
       </div>
     {/if}
     {#if status}
       <div class="toast" class:toasterr={statusIsError}>
         <span class="toasttxt">{status}</span>
         {#if statusIsError}
-          <button class="toastbtn" title="Copia il messaggio" onclick={() => { void navigator.clipboard.writeText(status); }}>copia</button>
+          <button class="toastbtn" title={t("Copia il messaggio")} onclick={() => { void navigator.clipboard.writeText(status); }}>{t("copia")}</button>
         {/if}
-        <button class="toastbtn" title="Chiudi" aria-label="Chiudi" onclick={() => (status = "")}>✕</button>
+        <button class="toastbtn" title={t("Chiudi")} aria-label={t("Chiudi")} onclick={() => (status = "")}>✕</button>
       </div>
     {/if}
   </div>
@@ -7035,7 +7352,7 @@
       onClose={() => (metaFindId = null)}
       onApplied={async () => {
         metaFindId = null;
-        status = "Metadati applicati ✓";
+        status = t("Metadati applicati ✓");
         await loadDocs();
         await loadSidebar();
         if (careModal && careTab === "salute") openHealth();
@@ -7056,7 +7373,7 @@
         const x = pdfFindId;
         pdfFindId = null;
         refPanel = null;
-        status = "PDF trovato e allegato ✓";
+        status = t("PDF trovato e allegato ✓");
         await loadDocs();
         await loadSidebar();
         const fresh = docs.find((d) => d.id === x);
@@ -7070,16 +7387,16 @@
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) idModal = false; }} role="presentation">
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
       <div class="idmodal" onclick={(e) => e.stopPropagation()}>
-        <h2>Aggiungi per identificatore</h2>
-        <p class="dimtext">Incolla DOI, ID arXiv, ISBN o PMID — uno per riga. Recupero i metadati e creo le voci (senza PDF allegato).</p>
+        <h2>{t("Aggiungi per identificatore")}</h2>
+        <p class="dimtext">{t("Incolla DOI, ID arXiv, ISBN o PMID — uno per riga. Recupero i metadati e creo le voci (senza PDF allegato).")}</p>
         <textarea
           rows="6"
           bind:value={idText}
           placeholder={"10.1038/nature14539\n2301.12345\n9780262033848\npmid:31452104"}
-        ></textarea>
+        ></textarea><!-- i18n-exempt: identificatori d'esempio, non testo -->
         <div class="modactions">
-          <button class="ghost" onclick={() => (idModal = false)}>Annulla</button>
-          <button class="primary" onclick={addIds} disabled={addingIds}>{addingIds ? "…" : "Aggiungi"}</button>
+          <button class="ghost" onclick={() => (idModal = false)}>{t("Annulla")}</button>
+          <button class="primary" onclick={addIds} disabled={addingIds}>{addingIds ? "…" : t("Aggiungi")}</button>
         </div>
       </div>
     </div>
@@ -7090,11 +7407,11 @@
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) urlModal = false; }} role="presentation">
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
       <div class="idmodal" onclick={(e) => e.stopPropagation()}>
-        <h2>Aggancia da URL</h2>
+        <h2>{t("Aggancia da URL")}</h2>
         <p class="dimtext">
-          Incolla il link diretto a un PDF (deve terminare in <code>.pdf</code> o essere servito come PDF): lo scarico
-          e lo aggiungo alla libreria, con i metadati se trovo un DOI. Per farlo con <strong>un clic dal browser</strong>
-          usa il bookmarklet in <button class="linklike" onclick={() => { urlModal = false; settingsModal = true; settingsTab = "connector"; loadConnector(); }}>Impostazioni → Connettore browser</button>.
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+          {@html t("Incolla il link diretto a un PDF (deve terminare in <code>.pdf</code> o essere servito come PDF): lo scarico e lo aggiungo alla libreria, con i metadati se trovo un DOI. Per farlo con <strong>un clic dal browser</strong> usa il bookmarklet in")}
+          <button class="linklike" onclick={() => { urlModal = false; settingsModal = true; settingsTab = "connector"; loadConnector(); }}>{t("Impostazioni → Connettore browser")}</button>.
         </p>
         <div style="display:flex;gap:8px;align-items:center;">
           <input
@@ -7104,11 +7421,11 @@
             placeholder="https://arxiv.org/pdf/2401.12345"
             onkeydown={(e) => { if (e.key === "Enter") doAddFromUrl(); }}
           />
-          <button class="ghost small" onclick={pasteUrlFromClipboard} title="Incolla dagli appunti">📋</button>
+          <button class="ghost small" onclick={pasteUrlFromClipboard} title={t("Incolla dagli appunti")}>📋</button>
         </div>
         <div class="modactions">
-          <button class="ghost" onclick={() => (urlModal = false)}>Annulla</button>
-          <button class="primary" onclick={doAddFromUrl} disabled={urlBusy || !urlInput.trim()}>{urlBusy ? "Scarico…" : "Aggancia"}</button>
+          <button class="ghost" onclick={() => (urlModal = false)}>{t("Annulla")}</button>
+          <button class="primary" onclick={doAddFromUrl} disabled={urlBusy || !urlInput.trim()}>{urlBusy ? t("Scarico…") : t("Aggancia")}</button>
         </div>
       </div>
     </div>
@@ -7120,13 +7437,15 @@
       <div class="idmodal aboutbox" role="dialog" tabindex="-1">
         <div class="abouthead">
           <span class="aboutmark">S</span>
+          <!-- i18n-exempt: nome proprio del programma -->
           <h2>Scriptorium</h2>
-          <p class="aboutver">versione {APP_VERSION} · {APP_YEAR}</p>
+          <p class="aboutver">{t("versione {versione} · {anno}", { versione: APP_VERSION, anno: APP_YEAR })}</p>
         </div>
-        <p class="abouttag">Gestore di PDF e riferimenti, locale e veloce. Tutto resta sul tuo computer; le funzioni di rete e AI sono opzionali e disattivabili.</p>
-        <p class="aboutmeta">Costruito con Tauri · Rust · SvelteKit · SQLite.</p>
+        <p class="abouttag">{t("Gestore di PDF e riferimenti, locale e veloce. Tutto resta sul tuo computer; le funzioni di rete e AI sono opzionali e disattivabili.")}</p>
+        <p class="aboutmeta">{t("Costruito con Tauri · Rust · SvelteKit · SQLite.")}</p>
+        <!-- i18n-exempt: riga di copyright, nome proprio -->
         <p class="aboutcopy">© {APP_YEAR} Scriptorium</p>
-        <div class="modactions"><button class="primary" onclick={() => (aboutModal = false)}>Chiudi</button></div>
+        <div class="modactions"><button class="primary" onclick={() => (aboutModal = false)}>{t("Chiudi")}</button></div>
       </div>
     </div>
   {/if}
@@ -7135,44 +7454,46 @@
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modalback confirmback" onmousedown={(e) => { if (e.target === e.currentTarget) bibOpts = null; }} role="presentation">
       <div class="confirmbox bibbox" role="dialog" tabindex="-1">
-        <h3 class="bibtitle">Importa «{bibOpts.base}»</h3>
+        <h3 class="bibtitle">{t("Importa «{nome}»", { nome: bibOpts.base })}</h3>
         <p class="bibsub">
           {#if bibOpts.isZip}
-            Dall'archivio verrà letta la <b>bibliografia</b> (i file <code>.bib</code>): ogni voce citata diventa una scheda in libreria.
+            <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+            {@html t("Dall'archivio verrà letta la <b>bibliografia</b> (i file <code>.bib</code>): ogni voce citata diventa una scheda in libreria.")}
           {:else}
-            Ogni voce del file diventa una scheda in libreria, con autori, anno, DOI e parole chiave come tag.
+            {t("Ogni voce del file diventa una scheda in libreria, con autori, anno, DOI e parole chiave come tag.")}
           {/if}
         </p>
         <label class="bibrow">
           <input type="checkbox" bind:checked={bibOpts.findPdfs} />
-          <span><b>Cerca i PDF open-access</b> delle voci senza file<br /><span class="bibhint">arXiv, Unpaywall, OpenAlex, Semantic Scholar. Richiede la ricerca online attiva; su bibliografie lunghe richiede qualche minuto.</span></span>
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+          <span>{@html t("<b>Cerca i PDF open-access</b> delle voci senza file")}<br /><span class="bibhint">{t("arXiv, Unpaywall, OpenAlex, Semantic Scholar. Richiede la ricerca online attiva; su bibliografie lunghe richiede qualche minuto.")}</span></span>
         </label>
         <label class="bibrow">
           <input type="checkbox" bind:checked={bibOpts.collection} />
-          <span><b>Raccogli tutto in «{bibOpts.base}»</b><br /><span class="bibhint">Una raccolta dedicata, così le ritrovi insieme nell'Archivio. Alla fine ti ci porto.</span></span>
+          <span><b>{t("Raccogli tutto in «{nome}»", { nome: bibOpts.base })}</b><br /><span class="bibhint">{t("Una raccolta dedicata, così le ritrovi insieme nell'Archivio. Alla fine ti ci porto.")}</span></span>
         </label>
         {#if bibOpts.isZip}
           <label class="bibrow">
             <input type="checkbox" bind:checked={bibOpts.latexProject} />
-            <span><b>Importa anche il progetto LaTeX completo</b><br /><span class="bibhint">Estrae tutto l'archivio (.tex, immagini, classi) in un progetto compilabile in Progetti (LaTeX).</span></span>
+            <span><b>{t("Importa anche il progetto LaTeX completo")}</b><br /><span class="bibhint">{t("Estrae tutto l'archivio (.tex, immagini, classi) in un progetto compilabile in Progetti (LaTeX).")}</span></span>
           </label>
         {:else}
           <div class="bibrow">
             <span style="width:16px"></span>
             <span>
-              <b>Cartella dei PDF esportati</b>
-              {#if bibOpts.pdfDir}<br /><span class="bibhint">{bibOpts.pdfDir}</span>{:else}<br /><span class="bibhint">Serve solo se l'esportazione tiene i PDF a parte (es. Zotero «Esporta file»).</span>{/if}
+              <b>{t("Cartella dei PDF esportati")}</b>
+              {#if bibOpts.pdfDir}<br /><span class="bibhint">{bibOpts.pdfDir}</span>{:else}<br /><span class="bibhint">{t("Serve solo se l'esportazione tiene i PDF a parte (es. Zotero «Esporta file»).")}</span>{/if}
               <br />
               <button class="linklike" onclick={async () => { const d = await open({ directory: true }); if (typeof d === "string" && bibOpts) bibOpts.pdfDir = d; }}>
-                {bibOpts.pdfDir ? "Cambia cartella…" : "Scegli una cartella…"}
+                {bibOpts.pdfDir ? t("Cambia cartella…") : t("Scegli una cartella…")}
               </button>
-              {#if bibOpts.pdfDir}<button class="linklike" onclick={() => { if (bibOpts) bibOpts.pdfDir = null; }}>rimuovi</button>{/if}
+              {#if bibOpts.pdfDir}<button class="linklike" onclick={() => { if (bibOpts) bibOpts.pdfDir = null; }}>{t("rimuovi")}</button>{/if}
             </span>
           </div>
         {/if}
         <div class="modactions">
-          <button class="ghost" onclick={() => (bibOpts = null)}>Annulla</button>
-          <button class="primary" onclick={runBibImport}>Importa</button>
+          <button class="ghost" onclick={() => (bibOpts = null)}>{t("Annulla")}</button>
+          <button class="primary" onclick={runBibImport}>{t("Importa")}</button>
         </div>
       </div>
     </div>
@@ -7184,7 +7505,7 @@
       <div class="confirmbox" role="dialog" tabindex="-1">
         <p class="confirmmsg">{confirmBox.msg}</p>
         <div class="modactions">
-          <button class="ghost" onclick={() => answerConfirm(false)}>Annulla</button>
+          <button class="ghost" onclick={() => answerConfirm(false)}>{t("Annulla")}</button>
           <button class="primary" class:danger={confirmBox.danger} onclick={() => answerConfirm(true)}>{confirmBox.ok}</button>
         </div>
       </div>
@@ -7194,44 +7515,42 @@
   {#if updateModal}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget && updatePhase !== "down") updateModal = false; }} role="presentation">
-      <div class="idmodal updmodal" role="dialog" tabindex="-1" aria-label="Aggiornamento disponibile">
-        <h2>Scriptorium {updateLatest} è disponibile</h2>
-        <p class="dimtext">Hai la {APP_VERSION}. La tua libreria, gli appunti e le impostazioni non vengono toccati.</p>
+      <div class="idmodal updmodal" role="dialog" tabindex="-1" aria-label={t("Aggiornamento disponibile")}>
+        <h2>{t("Scriptorium {versione} è disponibile", { versione: updateLatest ?? "" })}</h2>
+        <p class="dimtext">{t("Hai la {versione}. La tua libreria, gli appunti e le impostazioni non vengono toccati.", { versione: APP_VERSION })}</p>
 
         {#if updateNotes}
           <div class="updnotes">{updateNotes}</div>
         {/if}
 
         {#if updatePhase === "idle"}
-          <p class="updwarn">
-            Finito lo scaricamento, <strong>Scriptorium si chiude</strong> per farsi sostituire e si
-            riapre da solo. Chiudi prima quello che stai facendo altrove.
-          </p>
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+          <p class="updwarn">{@html t("Finito lo scaricamento, <strong>Scriptorium si chiude</strong> per farsi sostituire e si riapre da solo. Chiudi prima quello che stai facendo altrove.")}</p>
         {:else if updatePhase === "down"}
           <div class="updprog">
             <div class="updbar"><div class="updfill" style="width:{updateTot ? Math.min(100, (updateGot / updateTot) * 100) : 12}%"></div></div>
             <span class="dimtext">
               {updateTot
-                ? `Scarico… ${(updateGot / 1048576).toFixed(1)} di ${(updateTot / 1048576).toFixed(1)} MB`
-                : `Scarico… ${(updateGot / 1048576).toFixed(1)} MB`}
+                ? t("Scarico… {fatti} di {totale} MB", { fatti: (updateGot / 1048576).toFixed(1), totale: (updateTot / 1048576).toFixed(1) })
+                : t("Scarico… {fatti} MB", { fatti: (updateGot / 1048576).toFixed(1) })}
             </span>
           </div>
-          <p class="dimtext">Poi parte l'installazione: una finestrella di avanzamento, nessuna domanda — e l'app si chiude da sola.</p>
+          <p class="dimtext">{t("Poi parte l'installazione: una finestrella di avanzamento, nessuna domanda — e l'app si chiude da sola.")}</p>
         {:else if updatePhase === "ready"}
-          <p class="updok">Installato ✓ — riavvia per usare la versione nuova.</p>
+          <p class="updok">{t("Installato ✓ — riavvia per usare la versione nuova.")}</p>
         {/if}
 
         {#if updateErr}<p class="upderr">{updateErr}</p>{/if}
 
         <div class="modactions">
           {#if updatePhase === "idle"}
-            <button class="ghost" onclick={() => (updateModal = false)}>Più tardi</button>
-            <button class="primary" onclick={runUpdate}>Scarica e installa</button>
+            <button class="ghost" onclick={() => (updateModal = false)}>{t("Più tardi")}</button>
+            <button class="primary" onclick={runUpdate}>{t("Scarica e installa")}</button>
           {:else if updatePhase === "down"}
-            <button class="ghost" disabled>In corso…</button>
+            <button class="ghost" disabled>{t("In corso…")}</button>
           {:else}
-            <button class="ghost" onclick={() => (updateModal = false)}>Riavvio io</button>
-            <button class="primary" onclick={restartNow}>Riavvia ora</button>
+            <button class="ghost" onclick={() => (updateModal = false)}>{t("Riavvio io")}</button>
+            <button class="primary" onclick={restartNow}>{t("Riavvia ora")}</button>
           {/if}
         </div>
       </div>
@@ -7241,17 +7560,17 @@
   {#if whatsNewModal}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) whatsNewModal = false; }} role="presentation">
-      <div class="idmodal updmodal" role="dialog" tabindex="-1" aria-label="Novità di questa versione">
-        <h2>{whatsNew.length === 1 ? `Novità della ${whatsNew[0].version}` : "Novità dalle ultime versioni"}</h2>
+      <div class="idmodal updmodal" role="dialog" tabindex="-1" aria-label={t("Novità di questa versione")}>
+        <h2>{whatsNew.length === 1 ? t("Novità della {versione}", { versione: whatsNew[0].version }) : t("Novità dalle ultime versioni")}</h2>
         <div class="newsbody">
-          {#each whatsNew as n (n.version)}
-            <h3 class="newsh">{n.version}{n.title ? ` — ${n.title}` : ""}</h3>
-            <div class="updnotes">{n.body}</div>
+          {#each whatsNew as rel (rel.version)}
+            <h3 class="newsh">{rel.title ? t("{versione} — {titolo}", { versione: rel.version, titolo: rel.title }) : rel.version}</h3>
+            <div class="updnotes">{rel.body}</div>
           {/each}
         </div>
         <div class="modactions">
-          <button class="ghost" onclick={() => { whatsNewModal = false; openHelp(); }}>Apri la guida</button>
-          <button class="primary" onclick={() => (whatsNewModal = false)}>Ho capito</button>
+          <button class="ghost" onclick={() => { whatsNewModal = false; openHelp(); }}>{t("Apri la guida")}</button>
+          <button class="primary" onclick={() => (whatsNewModal = false)}>{t("Ho capito")}</button>
         </div>
       </div>
     </div>
@@ -7261,43 +7580,44 @@
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) citModal = false; }} role="presentation">
       <div class="idmodal hfwide" role="dialog" tabindex="-1">
-        <h2>Riferimenti e citazioni</h2>
+        <h2>{t("Riferimenti e citazioni")}</h2>
         <p class="dimtext" title={citTitle}>{citTitle}</p>
         {#if citLoading}
-          <p class="dimtext">Carico i riferimenti…</p>
+          <p class="dimtext">{t("Carico i riferimenti…")}</p>
         {:else if citData}
           <div class="hfsec ghsec">
-            <h3>Citato nella tua libreria ({citData.cited_by.length})</h3>
+            <h3>{t("Citato nella tua libreria ({n})", { n: citData.cited_by.length })}</h3>
             {#if citData.cited_by.length}
               <ul class="hflist">
                 {#each citData.cited_by as c (c.id)}
-                  <li><button class="hflink" onclick={() => openById(c.id)} title="Apri questo documento">{c.title ?? "Senza titolo"}{c.year ? ` (${c.year})` : ""}</button></li>
+                  <li><button class="hflink" onclick={() => openById(c.id)} title={t("Apri questo documento")}>{c.year ? t("{titolo} ({anno})", { titolo: c.title ?? t("Senza titolo"), anno: c.year }) : (c.title ?? t("Senza titolo"))}</button></li>
                 {/each}
               </ul>
-            {:else}<p class="dimtext">Nessun documento della libreria cita questo paper (servono i metadati/DOI dei tuoi documenti).</p>{/if}
+            {:else}<p class="dimtext">{t("Nessun documento della libreria cita questo paper (servono i metadati/DOI dei tuoi documenti).")}</p>{/if}
           </div>
           <div class="hfsec">
-            <h3>Bibliografia ({citData.references.length})</h3>
+            <h3>{t("Bibliografia ({n})", { n: citData.references.length })}</h3>
             {#if citData.references.length}
               <ul class="hflist reflist">
                 {#each citData.references as r, i (i)}
                   <li class="refrow">
                     {#if r.in_library}
-                      <span class="libdot in" title="Già in libreria"></span>
-                      <button class="hflink" onclick={() => openById(r.in_library!)} title="Nella tua libreria — apri">{r.title ?? r.raw ?? r.ref_doi}</button>
-                      <span class="badge2 inlibref">in libreria</span>
+                      <span class="libdot in" title={t("Già in libreria")}></span>
+                      <button class="hflink" onclick={() => openById(r.in_library!)} title={t("Nella tua libreria — apri")}>{r.title ?? r.raw ?? r.ref_doi}</button>
+                      <span class="badge2 inlibref">{t("in libreria")}</span>
                     {:else}
-                      <span class="libdot" title="Non in libreria"></span>
+                      <span class="libdot" title={t("Non in libreria")}></span>
                       <span class="reftext">{r.raw ?? r.ref_doi ?? "—"}</span>
-                      {#if r.ref_doi}<button class="hflink small" onclick={() => openInBrowser(`https://doi.org/${r.ref_doi}`)} title="Apri il DOI">DOI ↗</button>{/if}
+                      {#if r.ref_doi}<button class="hflink small" onclick={() => openInBrowser(`https://doi.org/${r.ref_doi}`)} title={t("Apri il DOI")}>DOI ↗</button>{/if}
                     {/if}
                   </li>
                 {/each}
               </ul>
-            {:else}<p class="dimtext">Nessun riferimento estratto. Usa <strong>Metadati</strong> (in alto) per recuperarli da Crossref tramite il DOI.</p>{/if}
+            <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+            {:else}<p class="dimtext">{@html t("Nessun riferimento estratto. Usa <strong>Metadati</strong> (in alto) per recuperarli da Crossref tramite il DOI.")}</p>{/if}
           </div>
         {/if}
-        <div class="modactions"><button class="ghost" onclick={() => (citModal = false)}>Chiudi</button></div>
+        <div class="modactions"><button class="ghost" onclick={() => (citModal = false)}>{t("Chiudi")}</button></div>
       </div>
     </div>
   {/if}
@@ -7305,18 +7625,19 @@
   {#snippet neighborRow(r: SearchResult)}
     <li class="exrow">
       <div class="exmain">
-        <span class="extitle" title={r.title ?? ""}><span class="libdot" class:in={r.in_library} title={r.in_library ? "Già in libreria" : "Non in libreria"}></span>{r.title ?? "Senza titolo"}</span>
-        <span class="exmeta">{[r.authors?.[0], r.year, r.venue].filter(Boolean).join(" · ")}{r.citations ? ` · ${r.citations} cit.` : ""}</span>
+        <span class="extitle" title={r.title ?? ""}><span class="libdot" class:in={r.in_library} title={r.in_library ? t("Già in libreria") : t("Non in libreria")}></span>{r.title ?? t("Senza titolo")}</span>
+        <span class="exmeta">{[r.authors?.[0], r.year, r.venue, r.citations ? t("{n} cit.", { n: r.citations }) : ""].filter(Boolean).join(SEP)}</span>
       </div>
       <div class="exacts">
         {#if r.in_library}
-          <span class="badge2 inlibref">in libreria</span>
+          <span class="badge2 inlibref">{t("in libreria")}</span>
         {:else}
-          <button class="hflink small" disabled={addingExt === r.external_id} onclick={() => addNeighbor(r)} title="Aggiungi alla libreria (scarica il PDF se Open Access, altrimenti come riferimento)">{addingExt === r.external_id ? "…" : "+ Aggiungi"}</button>
-          <button class="hflink small" class:on={pdfInputFor === r.external_id} onclick={() => { pdfInputFor = pdfInputFor === r.external_id ? null : r.external_id; pdfUrlInput = ""; }} title="Aggiungi questo paper col PDF che stai guardando nel browser: apri il PDF (↗), copia il suo link e incollalo qui">+ PDF</button>
+          <button class="hflink small" disabled={addingExt === r.external_id} onclick={() => addNeighbor(r)} title={t("Aggiungi alla libreria (scarica il PDF se Open Access, altrimenti come riferimento)")}>{addingExt === r.external_id ? "…" : t("+ Aggiungi")}</button>
+          <!-- i18n-exempt: «+ PDF» è una sigla, identica in inglese -->
+          <button class="hflink small" class:on={pdfInputFor === r.external_id} onclick={() => { pdfInputFor = pdfInputFor === r.external_id ? null : r.external_id; pdfUrlInput = ""; }} title={t("Aggiungi questo paper col PDF che stai guardando nel browser: apri il PDF (↗), copia il suo link e incollalo qui")}>+ PDF</button>
         {/if}
-        <button class="hflink small" onclick={() => navExplore({ openalexId: r.external_id, doi: r.doi, title: r.title }, r.title ?? "documento")} title="Esplora le citazioni di questo paper">Esplora ↗</button>
-        {#if r.url}<button class="hflink small" onclick={() => openInBrowser(r.url!)} title="Apri la pagina del paper">↗</button>{/if}
+        <button class="hflink small" onclick={() => navExplore({ openalexId: r.external_id, doi: r.doi, title: r.title }, r.title ?? t("documento"))} title={t("Esplora le citazioni di questo paper")}>{t("Esplora ↗")}</button>
+        {#if r.url}<button class="hflink small" onclick={() => openInBrowser(r.url!)} title={t("Apri la pagina del paper")}>↗</button>{/if}
       </div>
     </li>
     {#if pdfInputFor === r.external_id}
@@ -7324,14 +7645,15 @@
         <input
           class="expdfinput"
           type="url"
-          placeholder="incolla il link diretto al PDF (https://…)"
+          placeholder={t("incolla il link diretto al PDF (https://…)")}
           bind:value={pdfUrlInput}
           use:pdfFocus
           onkeydown={(e) => { if (e.key === "Enter") addNeighborWithPdf(r); if (e.key === "Escape") { pdfInputFor = null; pdfUrlInput = ""; } }}
         />
-        <button class="hflink small" onclick={pastePdfUrlFromClipboard} title="Incolla dagli appunti">📋</button>
-        <button class="hflink small" disabled={addingExt === r.external_id || !pdfUrlInput.trim()} onclick={() => addNeighborWithPdf(r)} title="Scarica e aggiungi col PDF">{addingExt === r.external_id ? "…" : "OK"}</button>
-        <button class="hflink small" onclick={() => { pdfInputFor = null; pdfUrlInput = ""; }} title="Annulla" aria-label="Annulla">✕</button>
+        <button class="hflink small" onclick={pastePdfUrlFromClipboard} title={t("Incolla dagli appunti")}>📋</button>
+        <!-- i18n-exempt: «OK» identico in inglese -->
+        <button class="hflink small" disabled={addingExt === r.external_id || !pdfUrlInput.trim()} onclick={() => addNeighborWithPdf(r)} title={t("Scarica e aggiungi col PDF")}>{addingExt === r.external_id ? "…" : "OK"}</button>
+        <button class="hflink small" onclick={() => { pdfInputFor = null; pdfUrlInput = ""; }} title={t("Annulla")} aria-label={t("Annulla")}>✕</button>
       </li>
     {/if}
   {/snippet}
@@ -7340,29 +7662,29 @@
     <!-- Stays open on outside click (lots of info to read); close only with the ✕. -->
     <div class="modalback" role="presentation">
       <div class="idmodal exwide exdialog" role="dialog" tabindex="-1">
-        <button class="modal-x" onclick={() => (exploreModal = false)} aria-label="Chiudi" title="Chiudi">✕</button>
+        <button class="modal-x" onclick={() => (exploreModal = false)} aria-label={t("Chiudi")} title={t("Chiudi")}>✕</button>
         <div class="exhead">
-          <h2>Esplora citazioni</h2>
+          <h2>{t("Esplora citazioni")}</h2>
           {#if exploreStack.length}
-            <button class="hflink small exback" onclick={backExplore} title="Torna al paper precedente">← Indietro</button>
+            <button class="hflink small exback" onclick={backExplore} title={t("Torna al paper precedente")}>{t("← Indietro")}</button>
           {/if}
         </div>
-        <p class="dimtext" title={exploreTitle}>{exploreTitle} — da OpenAlex; clicca un nodo (o «Esplora ↗») per spostarti di paper in paper (snowball)</p>
+        <p class="dimtext" title={exploreTitle}>{t("{titolo} — da OpenAlex; clicca un nodo (o «Esplora ↗») per spostarti di paper in paper (snowball)", { titolo: exploreTitle })}</p>
         {#if exploreLoading}
-          <p class="dimtext">Carico la rete di citazioni…</p>
+          <p class="dimtext">{t("Carico la rete di citazioni…")}</p>
         {:else if exploreData}
           {#if exploreData.seed_unresolved}
-            <p class="dimtext">OpenAlex non riconosce questo paper — né per DOI né per titolo (per l'aggancio senza DOI serve un titolo che corrisponda esattamente). Recupera prima i metadati con «✦ senza metadati» o «Recupera metadati…».</p>
+            <p class="dimtext">{t("OpenAlex non riconosce questo paper — né per DOI né per titolo (per l'aggancio senza DOI serve un titolo che corrisponda esattamente). Recupera prima i metadati con «✦ senza metadati» o «Recupera metadati…».")}</p>
           {:else}
             <div class="exbar">
-              <div class="seg" role="group" aria-label="Vista esplorazione">
-                <button class="segbtn wide" class:active={exploreView === "map"} onclick={() => (exploreView = "map")} title="Mappa temporale: riferimenti a sinistra, citazioni a destra">Mappa</button>
-                <button class="segbtn wide" class:active={exploreView === "list"} onclick={() => (exploreView = "list")} title="Liste con tutte le azioni (+ PDF, salva…)">Lista</button>
+              <div class="seg" role="group" aria-label={t("Vista esplorazione")}>
+                <button class="segbtn wide" class:active={exploreView === "map"} onclick={() => (exploreView = "map")} title={t("Mappa temporale: riferimenti a sinistra, citazioni a destra")}>{t("Mappa")}</button>
+                <button class="segbtn wide" class:active={exploreView === "list"} onclick={() => (exploreView = "list")} title={t("Liste con tutte le azioni (+ PDF, salva…)")}>{t("Lista")}</button>
               </div>
               <span class="exlegend">
-                <span class="libdot in"></span>{exploreData.references.filter((r) => r.in_library).length + exploreData.citations.filter((r) => r.in_library).length} in libreria
-                <span class="libdot"></span>{exploreData.references.filter((r) => !r.in_library).length + exploreData.citations.filter((r) => !r.in_library).length} mancanti
-                · nodo più grande = più citato
+                <span class="libdot in"></span>{t("{n} in libreria", { n: exploreData.references.filter((r) => r.in_library).length + exploreData.citations.filter((r) => r.in_library).length })}
+                <span class="libdot"></span>{t("{n} mancanti", { n: exploreData.references.filter((r) => !r.in_library).length + exploreData.citations.filter((r) => !r.in_library).length })}
+                {t("· nodo più grande = più citato")}
               </span>
             </div>
             {#if exploreView === "map"}
@@ -7376,21 +7698,21 @@
             <div class="exgrid">
               <div class="hfsec">
                 <div class="exsechead">
-                  <h3>Riferimenti — cita ({exploreData.references.length})</h3>
-                  {#if exploreData.references.length}<button class="hflink small" onclick={() => saveNeighborList("references")} title="Salva questa lista (con i link ai paper) in un file Markdown">⬇ Salva</button>{/if}
+                  <h3>{t("Riferimenti — cita ({n})", { n: exploreData.references.length })}</h3>
+                  {#if exploreData.references.length}<button class="hflink small" onclick={() => saveNeighborList("references")} title={t("Salva questa lista (con i link ai paper) in un file Markdown")}>{t("⬇ Salva")}</button>{/if}
                 </div>
                 {#if exploreData.references.length}
                   <ul class="hflist exlist">{#each exploreData.references as r (r.external_id)}{@render neighborRow(r)}{/each}</ul>
-                {:else}<p class="dimtext">Nessun riferimento noto a OpenAlex per questo paper.</p>{/if}
+                {:else}<p class="dimtext">{t("Nessun riferimento noto a OpenAlex per questo paper.")}</p>{/if}
               </div>
               <div class="hfsec ghsec">
                 <div class="exsechead">
-                  <h3>Citato da ({exploreData.citations.length})</h3>
-                  {#if exploreData.citations.length}<button class="hflink small" onclick={() => saveNeighborList("citations")} title="Salva questa lista (con i link ai paper) in un file Markdown">⬇ Salva</button>{/if}
+                  <h3>{t("Citato da ({n})", { n: exploreData.citations.length })}</h3>
+                  {#if exploreData.citations.length}<button class="hflink small" onclick={() => saveNeighborList("citations")} title={t("Salva questa lista (con i link ai paper) in un file Markdown")}>{t("⬇ Salva")}</button>{/if}
                 </div>
                 {#if exploreData.citations.length}
                   <ul class="hflist exlist">{#each exploreData.citations as r (r.external_id)}{@render neighborRow(r)}{/each}</ul>
-                {:else}<p class="dimtext">Nessun paper che cita questo (ancora) su OpenAlex.</p>{/if}
+                {:else}<p class="dimtext">{t("Nessun paper che cita questo (ancora) su OpenAlex.")}</p>{/if}
               </div>
             </div>
             {/if}
@@ -7403,23 +7725,24 @@
   {#if mapPop}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
     <div class="menu mappop" role="menu" tabindex="-1" use:clamp={{ x: mapPop.x, y: mapPop.y }} onclick={(e) => e.stopPropagation()}>
-      <div class="mtitle" title={mapPop.r.title ?? ""}>{mapPop.r.title ?? "Senza titolo"}</div>
-      <div class="mapmeta">{[mapPop.r.authors?.[0], mapPop.r.year, mapPop.r.venue].filter(Boolean).join(" · ")}{mapPop.r.citations ? ` · ${mapPop.r.citations} cit.` : ""}</div>
+      <div class="mtitle" title={mapPop.r.title ?? ""}>{mapPop.r.title ?? t("Senza titolo")}</div>
+      <div class="mapmeta">{[mapPop.r.authors?.[0], mapPop.r.year, mapPop.r.venue, mapPop.r.citations ? t("{n} cit.", { n: mapPop.r.citations }) : ""].filter(Boolean).join(SEP)}</div>
       {#if mapPop.r.in_library}
         {#if mapPop.r.doi}
-          <button class="medit" onclick={() => { const doi = mapPop!.r.doi!; mapPop = null; openByDoi(doi); }}>Apri in libreria</button>
+          <button class="medit" onclick={() => { const doi = mapPop!.r.doi!; mapPop = null; openByDoi(doi); }}>{t("Apri in libreria")}</button>
         {:else}
-          <div class="mapmeta">✓ già in libreria</div>
+          <div class="mapmeta">{t("✓ già in libreria")}</div>
         {/if}
       {:else}
-        <button class="medit" disabled={addingExt === mapPop.r.external_id} onclick={() => { const r = mapPop!.r; addNeighbor(r); }} title="Scarica il PDF se Open Access, altrimenti aggiunge come riferimento">{addingExt === mapPop.r.external_id ? "…" : "+ Aggiungi alla libreria"}</button>
+        <button class="medit" disabled={addingExt === mapPop.r.external_id} onclick={() => { const r = mapPop!.r; addNeighbor(r); }} title={t("Scarica il PDF se Open Access, altrimenti aggiunge come riferimento")}>{addingExt === mapPop.r.external_id ? "…" : t("+ Aggiungi alla libreria")}</button>
       {/if}
-      <button class="medit" onclick={() => { const r = mapPop!.r; mapPop = null; navExplore({ openalexId: r.external_id, doi: r.doi, title: r.title }, r.title ?? "documento"); }} title="Ricentra la mappa su questo paper (← Indietro per tornare)">Esplora da qui</button>
+      <button class="medit" onclick={() => { const r = mapPop!.r; mapPop = null; navExplore({ openalexId: r.external_id, doi: r.doi, title: r.title }, r.title ?? t("documento")); }} title={t("Ricentra la mappa su questo paper (← Indietro per tornare)")}>{t("Esplora da qui")}</button>
       {#if mapPop.r.doi}
+        <!-- i18n-exempt: sigla identica in inglese -->
         <button class="medit" onclick={() => { const doi = mapPop!.r.doi!; mapPop = null; openInBrowser(`https://doi.org/${doi}`); }}>DOI ↗</button>
       {/if}
       {#if mapPop.r.url}
-        <button class="medit" onclick={() => { const u = mapPop!.r.url!; mapPop = null; openInBrowser(u); }}>Pagina del paper ↗</button>
+        <button class="medit" onclick={() => { const u = mapPop!.r.url!; mapPop = null; openInBrowser(u); }}>{t("Pagina del paper ↗")}</button>
       {/if}
     </div>
   {/if}
@@ -7430,8 +7753,8 @@
       <input
         class="teinput"
         bind:value={tagEdit.name}
-        placeholder="nome del tag"
-        aria-label="Nome del tag"
+        placeholder={t("nome del tag")}
+        aria-label={t("Nome del tag")}
         onkeydown={(e) => { if (e.key === "Enter") saveTagEdit(); else if (e.key === "Escape") tagEdit = null; }}
       />
       <div class="teswatches">
@@ -7440,14 +7763,14 @@
             class="teswatch"
             class:on={tagEdit.color === c}
             style="background:{c}"
-            aria-label={`Colore ${c}`}
+            aria-label={t("Colore {colore}", { colore: c })}
             onclick={() => { if (tagEdit) tagEdit = { ...tagEdit, color: c }; }}
           ></button>
         {/each}
       </div>
       <div class="teact">
-        <button class="ghost small" onclick={() => (tagEdit = null)}>Annulla</button>
-        <button class="primary small" disabled={!tagEdit.name.trim()} onclick={saveTagEdit}>Salva</button>
+        <button class="ghost small" onclick={() => (tagEdit = null)}>{t("Annulla")}</button>
+        <button class="primary small" disabled={!tagEdit.name.trim()} onclick={saveTagEdit}>{t("Salva")}</button>
       </div>
     </div>
   {/if}
@@ -7456,102 +7779,109 @@
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) careModal = false; }} role="presentation">
       <div class="idmodal hfwide" role="dialog" tabindex="-1">
-        <h2>Cura della libreria</h2>
-        <div class="seg caretabs" role="group" aria-label="Sezioni">
-          <button class="segbtn wide" class:active={careTab === "salute"} onclick={() => openCare("salute")}>Salute</button>
-          <button class="segbtn wide" class:active={careTab === "gap"} onclick={() => openCare("gap")}>Gap di citazioni</button>
-          <button class="segbtn wide" class:active={careTab === "duplicati"} onclick={() => openCare("duplicati")}>Duplicati</button>
+        <h2>{t("Cura della libreria")}</h2>
+        <div class="seg caretabs" role="group" aria-label={t("Sezioni")}>
+          <button class="segbtn wide" class:active={careTab === "salute"} onclick={() => openCare("salute")}>{t("Salute")}</button>
+          <button class="segbtn wide" class:active={careTab === "gap"} onclick={() => openCare("gap")}>{t("Gap di citazioni")}</button>
+          <button class="segbtn wide" class:active={careTab === "duplicati"} onclick={() => openCare("duplicati")}>{t("Duplicati")}</button>
         </div>
         {#if careTab === "salute"}
         {#if healthLoading}
-          <p class="dimtext">Analisi in corso…</p>
+          <p class="dimtext">{t("Analisi in corso…")}</p>
         {:else if health}
           {@const cats = [
-            { label: "File mancanti sul disco", rows: health.missing_file, hint: "Il PDF non è più al percorso salvato: l'hai spostato o rinominato fuori da Scriptorium. «Ricollega…» ti fa indicare dov'è ora — appunti, evidenziazioni e tag restano; se hai spostato un'intera cartella, dopo il primo ti propongo di sistemare anche gli altri.", ocr: false, find: false, relink: true },
-            { label: "PDF senza testo estratto", rows: health.no_text, hint: "Probabili scansioni (immagine): non cercabili né indicizzabili. «OCR» riconosce il testo con il motore di Windows.", ocr: true, find: false, relink: false },
-            { label: "Metadati incompleti", rows: health.no_metadata, hint: "Manca titolo, anno o autori. «✦ senza metadati» in alto li recupera in blocco; «Trova…» cerca i candidati online per il singolo documento e scegli tu.", ocr: false, find: true, relink: false },
-            { label: "Senza incorporamento semantico", rows: health.no_embedding, hint: "Esclusi dalla ricerca semantica e da «Correlati».", ocr: false, find: false, relink: false },
-            { label: "Senza copertina", rows: health.no_thumbnail, hint: "Nessuna anteprima generata.", ocr: false, find: false, relink: false },
+            { label: t("File mancanti sul disco"), rows: health.missing_file, hint: t("Il PDF non è più al percorso salvato: l'hai spostato o rinominato fuori da Scriptorium. «Ricollega…» ti fa indicare dov'è ora — appunti, evidenziazioni e tag restano; se hai spostato un'intera cartella, dopo il primo ti propongo di sistemare anche gli altri."), ocr: false, find: false, relink: true },
+            { label: t("PDF senza testo estratto"), rows: health.no_text, hint: t("Probabili scansioni (immagine): non cercabili né indicizzabili. «OCR» riconosce il testo con il motore di Windows."), ocr: true, find: false, relink: false },
+            { label: t("Metadati incompleti"), rows: health.no_metadata, hint: t("Manca titolo, anno o autori. «✦ senza metadati» in alto li recupera in blocco; «Trova…» cerca i candidati online per il singolo documento e scegli tu."), ocr: false, find: true, relink: false },
+            { label: t("Senza incorporamento semantico"), rows: health.no_embedding, hint: t("Esclusi dalla ricerca semantica e da «Correlati»."), ocr: false, find: false, relink: false },
+            { label: t("Senza copertina"), rows: health.no_thumbnail, hint: t("Nessuna anteprima generata."), ocr: false, find: false, relink: false },
           ]}
-          <p class="dimtext">{health.total} documenti analizzati.</p>
+          <p class="dimtext">{tp(health.total, "1 documento analizzato.", "{n} documenti analizzati.")}</p>
           {#each cats as cat (cat.label)}
             <div class="hfsec">
-              <h3>{cat.label} ({cat.rows.length})</h3>
+              <h3>{t("{categoria} ({n})", { categoria: cat.label, n: cat.rows.length })}</h3>
               {#if cat.rows.length}
                 <p class="dimtext">{cat.hint}</p>
                 <ul class="hflist">
                   {#each cat.rows.slice(0, 50) as r (r.id)}
                     <li class="refrow">
                       <button class="hflink" onclick={() => openHealthRow(r.id)} title={r.path}>{r.title ?? r.path.split(/[\\/]/).pop()}</button>
-                      {#if cat.ocr}<button class="hflink small" disabled={ocrBusy === r.id} onclick={() => runOcr(r.id)} title="Riconosci il testo della scansione (motore OCR di Windows) e rendilo cercabile">{ocrBusy === r.id ? "OCR…" : "OCR"}</button>{/if}
-                      {#if cat.find}<button class="hflink small" onclick={() => (metaFindId = r.id)} title="Cerca online la scheda giusta (Crossref, arXiv, OpenAlex) e confermala tu">Trova…</button>{/if}
-                      {#if cat.relink}<button class="hflink small" disabled={relinkBusy === r.id} onclick={() => relinkFromCare(r.id, r.title)} title="Indica dov'è finito il file: la scheda con appunti, evidenziazioni e tag resta la stessa">{relinkBusy === r.id ? "…" : "Ricollega…"}</button>{/if}
+                      <!-- i18n-exempt: «OCR» è una sigla, identica in inglese -->
+                      {#if cat.ocr}<button class="hflink small" disabled={ocrBusy === r.id} onclick={() => runOcr(r.id)} title={t("Riconosci il testo della scansione (motore OCR di Windows) e rendilo cercabile")}>{ocrBusy === r.id ? "OCR…" : "OCR"}</button>{/if}
+                      {#if cat.find}<button class="hflink small" onclick={() => (metaFindId = r.id)} title={t("Cerca online la scheda giusta (Crossref, arXiv, OpenAlex) e confermala tu")}>{t("Trova…")}</button>{/if}
+                      {#if cat.relink}<button class="hflink small" disabled={relinkBusy === r.id} onclick={() => relinkFromCare(r.id, r.title)} title={t("Indica dov'è finito il file: la scheda con appunti, evidenziazioni e tag resta la stessa")}>{relinkBusy === r.id ? "…" : t("Ricollega…")}</button>{/if}
                     </li>
                   {/each}
                 </ul>
-                {#if cat.rows.length > 50}<p class="dimtext">…e altri {cat.rows.length - 50}.</p>{/if}
-              {:else}<p class="dimtext">Tutto a posto ✓</p>{/if}
+                {#if cat.rows.length > 50}<p class="dimtext">{t("…e altri {n}.", { n: cat.rows.length - 50 })}</p>{/if}
+              {:else}<p class="dimtext">{t("Tutto a posto ✓")}</p>{/if}
             </div>
           {/each}
           <div class="hfsec">
-            <h3>Duplicati — stesso file ({health.duplicates.length})</h3>
+            <h3>{t("Duplicati — stesso file ({n})", { n: health.duplicates.length })}</h3>
             {#if health.duplicates.length}
               <ul class="hflist">
                 {#each health.duplicates as g (g.file_hash)}
                   <li class="refrow">
-                    <span class="reftext">{g.titles.find((t) => t) ?? "(senza titolo)"} — {g.ids.length} copie</span>
+                    <!-- la variabile della callback si chiama `x`, non `t`: `t` è la funzione di traduzione -->
+                    <span class="reftext">{tp(g.ids.length, "{titolo} — 1 copia", "{titolo} — {n} copie", { titolo: g.titles.find((x) => x) ?? t("(senza titolo)") })}</span>
                     {#each g.ids as did (did)}<button class="hflink small" onclick={() => openHealthRow(did)}>#{did}</button>{/each}
                   </li>
                 {/each}
               </ul>
-              <p class="dimtext">Unisci i duplicati dalla scheda <strong>Duplicati</strong> qui sopra.</p>
-            {:else}<p class="dimtext">Nessun duplicato ✓</p>{/if}
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="dimtext">{@html t("Unisci i duplicati dalla scheda <strong>Duplicati</strong> qui sopra.")}</p>
+            {:else}<p class="dimtext">{t("Nessun duplicato ✓")}</p>{/if}
           </div>
         {/if}
 
         {:else if careTab === "gap"}
-        <p class="dimtext">I DOI che la tua libreria cita di più ma che non possiedi ancora. Si basa sui riferimenti estratti — recupera i <strong>Metadati</strong> dei tuoi paper (Crossref) per arricchirli.</p>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+        <p class="dimtext">{@html t("I DOI che la tua libreria cita di più ma che non possiedi ancora. Si basa sui riferimenti estratti — recupera i <strong>Metadati</strong> dei tuoi paper (Crossref) per arricchirli.")}</p>
         <div class="refdoibar">
           {#if refdoiRunning}
-            <button class="ghost small" onclick={cancelRefDois}>Interrompi</button>
-            <span class="dimtext">{refdoiProg ? `Risolvo ${refdoiProg.done}/${refdoiProg.total} — ${refdoiProg.resolved} DOI trovati…` : "Avvio…"}</span>
+            <button class="ghost small" onclick={cancelRefDois}>{t("Interrompi")}</button>
+            <span class="dimtext">{refdoiProg ? t("Risolvo {fatti}/{totale} — {trovati} DOI trovati…", { fatti: refdoiProg.done, totale: refdoiProg.total, trovati: refdoiProg.resolved }) : t("Avvio…")}</span>
           {:else}
-            <button class="ghost small" onclick={runResolveRefDois} title="Cerca online (Crossref) un DOI per i riferimenti che ne sono privi, così entrano nel conteggio dei gap">Risolvi DOI dei riferimenti (online)</button>
-            <span class="dimtext">Recupera i DOI mancanti dei riferimenti già in libreria — precision-first, nessun abbinamento incerto.</span>
+            <button class="ghost small" onclick={runResolveRefDois} title={t("Cerca online (Crossref) un DOI per i riferimenti che ne sono privi, così entrano nel conteggio dei gap")}>{t("Risolvi DOI dei riferimenti (online)")}</button>
+            <span class="dimtext">{t("Recupera i DOI mancanti dei riferimenti già in libreria — precision-first, nessun abbinamento incerto.")}</span>
           {/if}
         </div>
         {#if gapsLoading}
-          <p class="dimtext">Calcolo in corso…</p>
+          <p class="dimtext">{t("Calcolo in corso…")}</p>
         {:else if gaps.length}
           <ul class="hflist reflist">
             {#each gaps as g (g.doi)}
               <li class="refrow">
-                <span class="badge2" title="Citato da {g.count} tuoi documenti">×{g.count}</span>
+                <span class="badge2" title={tp(g.count, "Citato da 1 tuo documento", "Citato da {n} tuoi documenti")}>×{g.count}</span>
                 <span class="reftext">{g.sample ?? g.doi}</span>
-                <button class="hflink small" onclick={() => gapSearchOnline(g.doi)} title="Cerca questo DOI online per aggiungerlo">Cerca</button>
-                <button class="hflink small" onclick={() => openInBrowser(`https://doi.org/${g.doi}`)} title="Apri il DOI nel browser">DOI ↗</button>
-                <button class="hflink small" onclick={() => copyDoi(g.doi)} title="Copia il DOI">Copia</button>
+                <button class="hflink small" onclick={() => gapSearchOnline(g.doi)} title={t("Cerca questo DOI online per aggiungerlo")}>{t("Cerca")}</button>
+                <!-- i18n-exempt: sigla identica in inglese -->
+                <button class="hflink small" onclick={() => openInBrowser(`https://doi.org/${g.doi}`)} title={t("Apri il DOI nel browser")}>DOI ↗</button>
+                <button class="hflink small" onclick={() => copyDoi(g.doi)} title={t("Copia il DOI")}>{t("Copia")}</button>
               </li>
             {/each}
           </ul>
         {:else}
-          <p class="dimtext">Nessun gap rilevato. Servono riferimenti con DOI: apri un documento → <strong>Riferimenti e citazioni</strong>, oppure recupera i <strong>Metadati</strong> da Crossref.</p>
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+          <p class="dimtext">{@html t("Nessun gap rilevato. Servono riferimenti con DOI: apri un documento → <strong>Riferimenti e citazioni</strong>, oppure recupera i <strong>Metadati</strong> da Crossref.")}</p>
         {/if}
 
         {:else}
-        <p class="dimtext">Copie dello stesso lavoro (per DOI o titolo+anno). «Unisci» tiene la prima e vi trasferisce tag, raccolte e annotazioni; le altre finiscono nel cestino.</p>
+        <p class="dimtext">{t("Copie dello stesso lavoro (per DOI o titolo+anno). «Unisci» tiene la prima e vi trasferisce tag, raccolte e annotazioni; le altre finiscono nel cestino.")}</p>
         {#if dupGroups.length === 0}
-          <p class="dimtext">Nessun duplicato ✓</p>
+          <p class="dimtext">{t("Nessun duplicato ✓")}</p>
         {:else}
           <div class="dupwrap inmodal">
             {#each dupGroups as g, gi (gi)}
               <div class="dupgroup">
                 <div class="duphead">
-                  <span>{g.length} copie</span>
-                  <button class="ghost small" onclick={() => doMerge(g)} title="Unisci nel primo: sposta tag/raccolte/annotazioni, gli altri finiscono nel cestino">Unisci</button>
+                  <span>{tp(g.length, "1 copia", "{n} copie")}</span>
+                  <button class="ghost small" onclick={() => doMerge(g)} title={t("Unisci nel primo: sposta tag/raccolte/annotazioni, gli altri finiscono nel cestino")}>{t("Unisci")}</button>
                 </div>
                 {#each g as id, i (id)}
                   <div class="duprow">
+                    <!-- i18n-exempt: «master» si usa identico in inglese -->
                     <span class="badge">{i === 0 ? "master" : "↳"}</span>
                     <span class="dt" title={dupMap[id]?.title ?? ""}>{dupMap[id]?.title ?? "#" + id}</span>
                     <span class="dim">{dupMap[id] ? [dupMap[id].venue, dupMap[id].year].filter(Boolean).join(" · ") : ""}</span>
@@ -7562,7 +7892,7 @@
           </div>
         {/if}
         {/if}
-        <div class="modactions"><button class="ghost" onclick={() => (careModal = false)}>Chiudi</button></div>
+        <div class="modactions"><button class="ghost" onclick={() => (careModal = false)}>{t("Chiudi")}</button></div>
       </div>
     </div>
   {/if}
@@ -7572,20 +7902,20 @@
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) hfModal = false; }} role="presentation">
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
       <div class="idmodal hfwide" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
-        <h2>Codice & repository</h2>
+        <h2>{t("Codice & repository")}</h2>
         <p class="dimtext" title={hfTitle}>{hfTitle}</p>
 
         <div class="hfsec ghsec">
-          <h3>Repository GitHub {#if ghRepos}({ghRepos.length}){/if}</h3>
+          <h3>{#if ghRepos}{t("Repository GitHub ({n})", { n: ghRepos.length })}{:else}{t("Repository GitHub")}{/if}</h3>
           {#if ghRepos === null}
-            <p class="dimtext">Cerco su GitHub…</p>
+            <p class="dimtext">{t("Cerco su GitHub…")}</p>
           {:else if !ghRepos.length}
-            <p class="dimtext">Nessun repository GitHub trovato nel testo di questo documento.</p>
+            <p class="dimtext">{t("Nessun repository GitHub trovato nel testo di questo documento.")}</p>
           {:else}
             <ul class="hflist">
               {#each ghRepos as r (r.full_name)}
                 <li class="ghrow">
-                  <button class="hflink" onclick={() => openInBrowser(r.url)} title={r.description ?? "Apri su GitHub"}>{r.full_name}</button>
+                  <button class="hflink" onclick={() => openInBrowser(r.url)} title={r.description ?? t("Apri su GitHub")}>{r.full_name}</button>
                   <span class="hfmeta">★ {r.stars}{#if r.language} · {r.language}{/if}{#if r.license} · {r.license}{/if}</span>
                   <button class="ghost small readmebtn" onclick={() => openReadme(r)}>README</button>
                 </li>
@@ -7593,9 +7923,9 @@
             </ul>
             {#if ghReadmeOf}
               <div class="readmebox">
-                <div class="readmehd">README · {ghReadmeOf}</div>
+                <div class="readmehd">{t("README · {repo}", { repo: ghReadmeOf })}</div>
                 {#if ghReadmeLoading}
-                  <p class="dimtext">Carico il README…</p>
+                  <p class="dimtext">{t("Carico il README…")}</p>
                 {:else if ghReadmeError}
                   <p class="dimtext">{ghReadmeError}</p>
                 {:else}
@@ -7607,34 +7937,35 @@
         </div>
 
         <div class="hfsec">
+          <!-- i18n-exempt: nome proprio -->
           <h3>Hugging Face</h3>
           {#if hfLoading}
-            <p class="dimtext">Cerco su Hugging Face…</p>
+            <p class="dimtext">{t("Cerco su Hugging Face…")}</p>
           {:else if !hfData?.arxiv_id}
-            <p class="dimtext">Nessun identificatore arXiv per questo documento: non posso collegarlo a modelli/dataset su Hugging Face.</p>
+            <p class="dimtext">{t("Nessun identificatore arXiv per questo documento: non posso collegarlo a modelli/dataset su Hugging Face.")}</p>
           {:else}
             {#if hfData.paper_url}
-              <button class="hflink paper" onclick={() => openInBrowser(hfData!.paper_url!)}>Apri la pagina del paper su Hugging Face ↗</button>
+              <button class="hflink paper" onclick={() => openInBrowser(hfData!.paper_url!)}>{t("Apri la pagina del paper su Hugging Face ↗")}</button>
             {/if}
-            <div class="hfsub">Modelli ({hfData.models.length})</div>
+            <div class="hfsub">{t("Modelli ({n})", { n: hfData.models.length })}</div>
             {#if hfData.models.length}
               <ul class="hflist">
                 {#each hfData.models as m (m.id)}
-                  <li><button class="hflink" onclick={() => openInBrowser(m.url)} title="Apri su Hugging Face">{m.id}</button><span class="hfmeta">♥ {m.likes} · ↓ {m.downloads}</span></li>
+                  <li><button class="hflink" onclick={() => openInBrowser(m.url)} title={t("Apri su Hugging Face")}>{m.id}</button><span class="hfmeta">♥ {m.likes} · ↓ {m.downloads}</span></li>
                 {/each}
               </ul>
-            {:else}<p class="dimtext">Nessun modello collegato.</p>{/if}
-            <div class="hfsub">Dataset ({hfData.datasets.length})</div>
+            {:else}<p class="dimtext">{t("Nessun modello collegato.")}</p>{/if}
+            <div class="hfsub">{t("Dataset ({n})", { n: hfData.datasets.length })}</div>
             {#if hfData.datasets.length}
               <ul class="hflist">
                 {#each hfData.datasets as m (m.id)}
-                  <li><button class="hflink" onclick={() => openInBrowser(m.url)} title="Apri su Hugging Face">{m.id}</button><span class="hfmeta">♥ {m.likes}</span></li>
+                  <li><button class="hflink" onclick={() => openInBrowser(m.url)} title={t("Apri su Hugging Face")}>{m.id}</button><span class="hfmeta">♥ {m.likes}</span></li>
                 {/each}
               </ul>
-            {:else}<p class="dimtext">Nessun dataset collegato.</p>{/if}
+            {:else}<p class="dimtext">{t("Nessun dataset collegato.")}</p>{/if}
           {/if}
         </div>
-        <div class="modactions"><button class="ghost" onclick={() => (hfModal = false)}>Chiudi</button></div>
+        <div class="modactions"><button class="ghost" onclick={() => (hfModal = false)}>{t("Chiudi")}</button></div>
       </div>
     </div>
   {/if}
@@ -7642,322 +7973,29 @@
   {#if helpModal}
     <!-- Finestra flottante NON modale: l'app resta usabile, la guida si trascina
          dalla barra del titolo e (a scelta) resta in primo piano sopra il lettore. -->
-    <div class="helpwin" class:pinned={helpPin} style="left:{helpPos.x}px; top:{helpPos.y}px" role="dialog" aria-label="Guida a Scriptorium">
+    <div class="helpwin" class:pinned={helpPin} style="left:{helpPos.x}px; top:{helpPos.y}px" role="dialog" aria-label={t("Guida a Scriptorium")}>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="helpdrag" onmousedown={startHelpDrag} title="Trascina per spostare la guida">
-        <h2>Guida a Scriptorium</h2>
-        <label class="helppinlbl" title="Tieni la guida sopra ogni altra vista, anche il lettore">
-          <input type="checkbox" bind:checked={helpPin} /> in primo piano
+      <div class="helpdrag" onmousedown={startHelpDrag} title={t("Trascina per spostare la guida")}>
+        <h2>{t("Guida a Scriptorium")}</h2>
+        <label class="helppinlbl" title={t("Tieni la guida sopra ogni altra vista, anche il lettore")}>
+          <input type="checkbox" bind:checked={helpPin} /> {t("in primo piano")}
         </label>
-        <button class="helpx" title="Chiudi la guida" onclick={() => (helpModal = false)}>×</button>
+        <button class="helpx" title={t("Chiudi la guida")} onclick={() => (helpModal = false)}>×</button>
       </div>
       <div class="helpbody">
-        <p class="dimtext">Gestore locale di PDF, riferimenti e appunti: tutto resta sul tuo computer, le funzioni di rete e AI sono opzionali. <strong>Regola d'oro</strong>: qualunque cosa cerchi, premi <kbd>Ctrl</kbd>+<kbd>K</kbd> e digitala.</p>
+        <p class="dimtext">{@html t("Gestore locale di PDF, riferimenti e appunti: tutto resta sul tuo computer, le funzioni di rete e AI sono opzionali. <strong>Regola d'oro</strong>: qualunque cosa cerchi, premi <kbd>Ctrl</kbd>+<kbd>K</kbd> e digitala.")}</p>
 
         <div class="helptabs">
-          <button class:active={helpTab === "inizia"} onclick={() => (helpTab = "inizia")}>Inizia qui</button>
-          <button class:active={helpTab === "libreria"} onclick={() => (helpTab = "libreria")}>Libreria</button>
-          <button class:active={helpTab === "lettura"} onclick={() => (helpTab = "lettura")}>Lettura</button>
-          <button class:active={helpTab === "scrittura"} onclick={() => (helpTab = "scrittura")}>Scrittura</button>
-          <button class:active={helpTab === "scoperta"} onclick={() => (helpTab = "scoperta")}>Scoperta</button>
-          <button class:active={helpTab === "ai"} onclick={() => (helpTab = "ai")}>AI &amp; dati</button>
-          <button class:active={helpTab === "faq"} onclick={() => (helpTab = "faq")}>FAQ</button>
+          <button class:active={helpTab === "inizia"} onclick={() => (helpTab = "inizia")}>{t("Inizia qui")}</button>
+          <button class:active={helpTab === "libreria"} onclick={() => (helpTab = "libreria")}>{t("Libreria")}</button>
+          <button class:active={helpTab === "lettura"} onclick={() => (helpTab = "lettura")}>{t("Lettura")}</button>
+          <button class:active={helpTab === "scrittura"} onclick={() => (helpTab = "scrittura")}>{t("Scrittura")}</button>
+          <button class:active={helpTab === "scoperta"} onclick={() => (helpTab = "scoperta")}>{t("Scoperta")}</button>
+          <button class:active={helpTab === "ai"} onclick={() => (helpTab = "ai")}>{t("AI & dati")}</button>
+          <button class:active={helpTab === "faq"} onclick={() => (helpTab = "faq")}>{t("FAQ")}</button>
         </div>
 
-        {#if helpTab === "inizia"}
-        <div class="helpsec">
-          <h3>Le tre porte d'ingresso</h3>
-          <ul>
-            <li><strong>Barra strumenti</strong> (in alto): un'icona per ogni strumento — passaci sopra col mouse per il nome. Nell'ordine: <strong>I miei paper</strong> (torna alla griglia), <strong>Importa</strong>, <strong>Vista</strong>, <strong>Riprendi lettura</strong>, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Cerca online</strong>, <strong>Appunti</strong>, <strong>Progetti (LaTeX)</strong>, <strong>Archivio</strong> (raccolte e sotto-raccolte, in vista sinottica), <strong>Riscopri</strong>, <strong>Novità</strong> (🔔 col conteggio dei nuovi paper), <strong>Esporta</strong>, <strong>Cura della libreria</strong>, <strong>Indice semantico</strong>, <strong>Memoria AI</strong> (o <em>Attiva AI</em> quando è spenta), <strong>Backup</strong>, <strong>Cestino</strong>, <strong>Terminale</strong> (&gt;_), <strong>Plancia</strong> (il sinottico dei processi, in finestra separata), <strong>Guida</strong>, <strong>Aspetto</strong>, <strong>Sistema</strong> (Impostazioni · Controlla aggiornamenti · Informazioni). Le voci con un menu si aprono al clic, le altre eseguono; l'icona è evidenziata quando sei nella vista corrispondente. In alto trovi anche il chip <strong>AI</strong> (stato dell'AI locale), «✦ N senza metadati» quando serve, e l'icona della <strong>palette</strong>.</li>
-            <li><strong>Menu radiale</strong> (tasto destro): su un <strong>documento</strong> → le azioni su quel documento; sullo <strong>spazio vuoto</strong> → il menu globale (gli stessi gruppi della barra); su una <strong>selezione multipla</strong> → le azioni in blocco. Muovi verso un petalo e clicca (basta la direzione); <strong>rotella</strong> per ruotare; <strong>digita</strong> per filtrare tutte le voci a qualsiasi profondità; il centro torna indietro, <kbd>Esc</kbd> chiude. La <strong>descrizione</strong> della voce evidenziata compare sotto l'anello.</li>
-            <li><strong>Palette comandi</strong> (<kbd>Ctrl</kbd>+<kbd>K</kbd>): ogni azione, documento, <strong>appunto</strong>, <strong>pagina wiki</strong>, <strong>progetto LaTeX</strong>, filtro, sezione della guida e tema — digitando. Funziona <strong>anche dentro il lettore</strong>. Barra, radiale e palette pescano dallo <strong>stesso registro</strong>: se non trovi un comando, è comunque lì.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>La griglia e la barra laterale</h3>
-          <ul>
-            <li><strong>Un clic</strong> su una scheda apre il <strong>pannello di dettaglio</strong> a destra (abstract, riassunto AI, tag modificabili, citazioni, note); <strong>doppio clic</strong> o <kbd>Invio</kbd> aprono il lettore.</li>
-            <li>La <strong>barra laterale</strong> è la navigazione: filtri rapidi (Preferiti, Da leggere, Con codice, Peer-reviewed, Il mio lavoro), tag, raccolte, ricerche salvate, cartella sorvegliata. <kbd>Ctrl</kbd>+<kbd>B</kbd> la mostra/nasconde.</li>
-            <li>Nella vista «Tutti»: la <strong>Panoramica</strong> (da leggere, in lettura, aggiunti questo mese + un paper da riscoprire al giorno) e <strong>Continua a leggere</strong> (gli ultimi PDF aperti). Nel lettore la barra svanisce mentre leggi e lo zoom è ricordato per documento.</li>
-            <li><strong>Questa guida è una finestra</strong>: trascinala dalla barra del titolo, ridimensionala dall'angolo in basso a destra (come quasi tutte le finestre di dialogo) e spunta <strong>«in primo piano»</strong> per tenerla visibile — anche sopra il lettore — mentre segui i passaggi.</li>
-          </ul>
-          <table class="kbdtable">
-            <tbody>
-              <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Palette comandi — tutto, digitando</td></tr>
-              <tr><td><kbd>/</kbd></td><td>Ricerca in libreria</td></tr>
-              <tr><td><kbd>Ctrl</kbd>+<kbd>B</kbd></td><td>Mostra/nascondi la barra laterale</td></tr>
-              <tr><td><kbd>frecce</kbd> / <kbd>Spazio</kbd></td><td>Muoviti tra le schede / apri-chiudi il pannello</td></tr>
-              <tr><td><kbd>X</kbd> / <kbd>F</kbd></td><td>Seleziona / preferito</td></tr>
-              <tr><td><kbd>Invio</kbd> / <kbd>Esc</kbd></td><td>Apri il lettore / chiudi</td></tr>
-              <tr><td>Tasto destro</td><td>Menu radiale (documento, selezione o globale)</td></tr>
-              <tr><td><kbd>Tab</kbd> → <kbd>Invio</kbd></td><td>Raggiungi la barra strumenti e apri il suo menu</td></tr>
-              <tr><td><kbd>↑</kbd> <kbd>↓</kbd> nei menu</td><td>Scorri le voci — <kbd>Esc</kbd> chiude e torna all'icona</td></tr>
-            </tbody>
-          </table>
-          <p class="dimtext">Tutto è raggiungibile da tastiera: nell'<strong>Archivio</strong> lo schema delle raccolte prende il fuoco con <kbd>Tab</kbd>, poi <kbd>↑</kbd><kbd>↓</kbd> scorrono l'elenco, <kbd>→</kbd><kbd>←</kbd> entrano ed escono dalle sotto-raccolte e <kbd>Invio</kbd> apre la raccolta nella griglia.</p>
-        </div>
-
-        {:else if helpTab === "libreria"}
-        <div class="helpsec">
-          <h3>Importare</h3>
-          <ul>
-            <li><strong>Sei vie</strong> (barra → Importa): <strong>PDF dal disco</strong> (anche trascinandoli nella finestra — restano dove sono, l'app li indicizza; i duplicati si riconoscono dal contenuto); <strong>Da bibliografia o progetto</strong> — l'export di <strong>Zotero, Mendeley, EndNote, JabRef…</strong> in <strong>.bib / .ris / CSL-JSON</strong>: porta metadati, aggancia i PDF (dal campo <em>file</em> o da una cartella d'export che indichi) e trasforma le parole chiave in <strong>tag</strong>, senza doppioni (dedup per DOI e per contenuto del PDF; i lavori già nel Cestino tornano visibili); per <strong>identificatore</strong> (DOI / arXiv / ISBN / PMID); <strong>da URL</strong>; <strong>progetto LaTeX (.zip)</strong> — i tuoi paper con la loro bibliografia, marcati «Il mio lavoro»; <strong>Cartella sorvegliata</strong> (importa da sola ciò che ci finisce dentro).</li>
-            <li><strong>Dal browser</strong>: copia il link del PDF e torna su Scriptorium — compare «Aggancia» (interruttore in Impostazioni → Connettore); in alternativa il <strong>bookmarklet</strong>, o la Cartella sorvegliata puntata su Download.</li>
-            <li><strong>Riferimenti senza PDF</strong> (aggiunti da ricerca online, citazioni, BibTeX o ID): <strong>Trova PDF…</strong> (radiale della scheda, o aprendo la voce) mostra i <strong>candidati</strong> trovati online per identificativo e per titolo (arXiv, Unpaywall, OpenAlex, Semantic Scholar, Crossref) con le prove — «Scarica e allega» quello giusto, «Apri pagina» per controllare, o incolla un link diretto. Sulla <strong>selezione multipla</strong> e in blocco (Cura della libreria → «Trova PDF dei riferimenti») resta automatico: allega solo abbinamenti sicuri, ora anche per titolo su arXiv/S2.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Organizzare</h3>
-          <ul>
-            <li><strong>Tag</strong> colorati (la <strong>✎</strong> in sidebar rinomina/ricolora, la <strong>×</strong> elimina; dal pannello dettagli li applichi al volo) e <strong>Raccolte</strong>, anche <em>smart</em> (si popolano da sole con una regola).</li>
-            <li><strong>Filtri</strong> in sidebar (Preferiti, Da leggere, Con codice, Peer-reviewed, Il mio lavoro), <strong>ordinamento combinabile</strong> (chip «Ordina ▾»: un clic attiva, un altro inverte, un terzo toglie), badge <em>preprint / peer-reviewed</em> sulle schede.</li>
-            <li><strong>Viste</strong> (barra → Vista): griglia (copertine ridimensionabili con − ▭ +), lista a colonne, <strong>Costellazione</strong> (la mappa semantica — vedi la scheda <em>Scoperta</em>). Clic su un <strong>autore</strong> → tutti i suoi lavori.</li>
-            <li><strong>Archivio</strong> (icona cartella sulla barra): le raccolte come <strong>albero navigabile</strong> — sotto-raccolte a piacere, <strong>trascina un paper</strong> su una raccolta per spostarlo (Ctrl = aggiungi anche lì: l'appartenenza è multipla; <strong>sullo sfondo vuoto</strong> = toglilo dalla raccolta), trascina una raccolta su un'altra per annidarla. Eliminare una raccolta non tocca mai i paper (le sotto-raccolte risalgono). Puoi aprire la <strong>Costellazione della sola raccolta</strong> in tre modi: il pulsante <strong>✳</strong> accanto al nome della raccolta in sidebar, la voce <em>Costellazione di «nome»</em> nel menu <strong>Vista</strong> mentre la stai guardando, o il pulsante <strong>COSTELLAZIONE</strong> nel pannello dell'Archivio. Le vicinanze vengono ricalcolate al suo interno e il layout è salvato a parte dalla mappa generale. Nel pannello: <strong>✦ Suggerisci</strong> propone i paper affini (somiglianza semantica locale, con soglia di confidenza — mai automatico): scegli la sorgente <em>prima</em> di calcolare — <em>Nome</em> della raccolta (funziona anche a motori spenti: si àncora ai tuoi paper che ne contengono le parole), <em>Contenuto</em> (i paper già dentro) o <em>Entrambi</em> col <strong>peso regolabile</strong>. Il toggle <strong>Ricerca «Novità»</strong> aggancia una ricerca online alla raccolta (le novità accettate <em>entrano da sole nella raccolta</em>, filtrate per pertinenza quando la raccolta ha ≥3 paper indicizzati; spegnendolo la ricerca si rimuove).</li>
-            <li><strong>Specchio su disco</strong> (chip in alto nell'Archivio): proietta le raccolte in una cartella vera — <code>Raccolta\Sottoraccolta\Autore Anno — Titolo.pdf</code> — con <strong>hardlink</strong> (zero spazio extra), aggiornata da sola a ogni cambio. Comodissima da Esplora risorse e dal terminale. Cancellare o spostare file nello specchio non tocca la libreria (si rigenera); <em>modificare il contenuto</em> di un PDF lì dentro sì, perché è lo stesso file: per annotare usa il lettore.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Condividere e stampare</h3>
-          <ul>
-            <li>Tasto destro → <strong>Condividi</strong>: <strong>WhatsApp / Teams / Gmail</strong> aprono la bozza col messaggio pronto e il <strong>PDF è già copiato ✓ di sistema</strong> — incollalo con <kbd>Ctrl</kbd>+<kbd>V</kbd>; <strong>Outlook desktop</strong> allega il file da solo. Funziona anche sulla <strong>selezione multipla</strong>.</li>
-            <li><strong>Stampa</strong>: dal lettore (menu <strong>⋯ Altro</strong> o radiale) per il documento aperto, o dal radiale della selezione per stamparne più d'uno.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Metadati</h3>
-          <ul>
-            <li>Quando ci sono schede incomplete compare «<strong>✦ N senza metadati</strong>»: un clic le recupera in blocco (con barra di avanzamento e Stop) — prima l'id arXiv nel <strong>nome del file</strong> (funziona anche sulle scansioni), poi DOI e <strong>titolo</strong> dal PDF (Crossref/arXiv). Mai dal primo DOI trovato nel testo: niente etichette sbagliate — ciò che non è sicuro resta com'è.</li>
-            <li>Per il caso singolo o ostinato: tasto destro → Organizza → <strong>Recupera metadati…</strong> fa la ricerca <em>estesa</em> (Crossref, arXiv, OpenAlex, ogni DOI/arXiv stampato nel PDF, nome del file) e mostra i <strong>candidati con le prove</strong> trovate nel PDF (titolo, autori, anno): scegli tu quale applicare, o incolla un DOI/arXiv. Lo stesso da Salute libreria («Trova…») accanto a ogni documento incompleto.</li>
-            <li><strong>Impostazioni → Manutenzione → «Verifica e ripara metadati»</strong> ricontrolla tutta la libreria e corregge le schede il cui titolo non corrisponde al PDF. Sicuro e ripetibile. A mano: tasto destro → <strong>Modifica metadati</strong>.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Cura, backup, cestino</h3>
-          <ul>
-            <li><strong>Cura della libreria</strong> (barra): <strong>Salute</strong> (file mancanti, PDF senza testo → OCR, metadati incompleti), <strong>Gap di citazioni</strong> (i DOI più citati dai tuoi paper che non possiedi; «Risolvi DOI dei riferimenti» ne recupera altri online, senza mai un abbinamento incerto), <strong>Duplicati</strong> (unione), <strong>Rigenera anteprime</strong>.</li>
-            <li><strong>Backup libreria</strong> (barra): copia completa — PDF + database — in una cartella a tua scelta. <strong>Cestino</strong>: gli eliminati restano ripristinabili finché non lo svuoti.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Cercare in libreria</h3>
-          <ul>
-            <li>Barra di ricerca in alto (<kbd>/</kbd>), tre modalità: <em>Tutto</em> (testo + semantica), <em>Testo</em> o <em>Semantica</em> (per significato — serve l'<strong>Indice semantico</strong>). Cerca anche nelle <strong>annotazioni</strong> e nelle <strong>note dei documenti</strong>; gli <strong>Appunti .md</strong> che corrispondono compaiono in un gruppo dedicato sopra i risultati.</li>
-          </ul>
-        </div>
-
-        {:else if helpTab === "scoperta"}
-        <div class="helpsec">
-          <h3>Cerca online</h3>
-          <ul>
-            <li>Barra → <strong>Cerca online</strong>: arXiv, OpenAlex, ADS, Semantic Scholar, Europe PMC, CORE, DOAJ, <strong>HF Papers</strong> (l'indice con i repo GitHub dei paper). Filtri anno/autore/solo-OA, chip <strong>Con codice</strong> / <strong>Peer-reviewed</strong> / <strong>Preprint</strong>, colonne ordinabili. I PDF Open Access si <strong>scaricano</strong>, gli altri entrano come <strong>riferimento</strong> (allegherai il PDF dopo).</li>
-            <li><strong>Ricerche salvate → Novità</strong>: dopo una ricerca premi <em>★ Salva</em> → va in sidebar. I risultati <em>nuovi</em> dall'ultima volta si raccolgono nella campana <strong>Novità</strong> (🔔, ricontrollata a ogni avvio): da lì <em>Aggiungi</em> o <em>Ignora</em>.</li>
-            <li><strong>Riscopri</strong> (barra): ti ripesca un documento dimenticato o mai letto.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Codice, citazioni e repository</h3>
-          <ul>
-            <li>I paper che citano un repo mostrano l'icona <strong>GitHub</strong> (card, lista, risultati online): cliccala per aprire il repository.</li>
-            <li>Tasto destro → <strong>Codice & repo</strong>: anteprima del <strong>README</strong> nell'app, più i modelli/dataset collegati su <strong>Hugging Face</strong>.</li>
-            <li>Filtro <strong>“Con codice (GitHub)”</strong> nella sidebar per vedere solo i paper con codice disponibile.</li>
-            <li>Tasto destro → Cita → <strong>Riferimenti e citazioni</strong>: la bibliografia del paper (con i riferimenti già nella tua libreria cliccabili) e i documenti che lo <strong>citano</strong>. Lì trovi anche <strong>Copia APA / IEEE / BibTeX / citekey / \cite / [@…]</strong>. Con più paper <strong>selezionati</strong>, tasto destro → Cita copia un solo <code>\cite&#123;k1,k2&#125;</code> o tutte le voci BibTeX insieme (per LaTeX/Pandoc).</li>
-            <li><strong>Esplora citazioni (online)</strong> si apre sulla <strong>Mappa</strong>: riferimenti a sinistra (il passato su cui si fonda), citazioni a destra (il futuro), in ordine di anno; pallino <strong>pieno</strong> = già in libreria, <strong>tratteggiato</strong> = mancante, nodo più grande = paper più citato. Clic su un nodo → aggiungi / apri / <em>esplora da qui</em> (la mappa si ricentra, «← Indietro» per tornare). La <strong>Lista</strong> con tutte le azioni (+ PDF, salva) resta a un click.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Costellazione — la mappa della libreria</h3>
-          <ul>
-            <li>Barra → Vista → <strong>Costellazione</strong>: ogni <strong>stella</strong> è un documento, i <strong>rombi viola</strong> sono i tuoi appunti, i legami sono la <strong>somiglianza di significato</strong>. Serve l'<strong>Indice semantico</strong>; i documenti nuovi entrano al prossimo aggiornamento dell'indice. Le posizioni si ricordano tra le sessioni.</li>
-            <li><strong>Clic</strong> = scheda del nodo (con i legami in %, cliccabili); <strong>doppio clic</strong> = apri; <strong>tasto destro</strong> = menu; <strong>Ctrl+clic</strong> = seleziona. Da lontano vedi le <strong>nebulose</strong> — le comunità semantiche con la loro etichetta; da vicino compaiono i badge <strong>✓</strong> (peer-reviewed) e la forcella (codice GitHub).</li>
-            <li>In alto a destra: <strong>Cerca nel grafo</strong> (bastano 2-3 lettere del titolo o di un autore → candidati suggeriti; Invio o clic evidenzia la stella con un alone pulsante e centra la vista lì; × o Esc pulisce), <strong>Colora per</strong> (Tag dominante / Comunità semantiche / Anno / Stato lettura), <strong>Nebulose</strong> e il pannello <strong>⚙</strong> (Legami per nodo, Soglia somiglianza).</li>
-            <li><strong>Esplora dintorni (online)</strong>, nella scheda di una stella: <em>Citazioni</em> / <em>Simili</em> / <em>Autore</em> → i risultati appaiono come <strong>stelle fantasma</strong> tratteggiate attorno a quella; clic → «Aggiungi alla libreria». Entrano nel grafo al prossimo aggiornamento dell'indice.</li>
-            <li><strong>Catena di esplorazione</strong>: anche la scheda di una <em>stella fantasma</em> ha Citazioni / Simili / Autore — le nuove scoperte si agganciano a quella, in catena (snowball), così scavi di paper in paper senza aggiungere nulla finché non trovi quello giusto. Mentre esplori la mappa entra in <strong>modalità esplorazione</strong>: la libreria si attenua, i seed hanno un anello «scanner», ogni generazione della catena ha il suo colore e i collegamenti scorrono animati; le catene si dispongono da sole senza sovrapporsi. <strong>Citazioni</strong> funziona anche senza DOI (id OpenAlex per le scoperte; titolo con corrispondenza rigorosa per i tuoi paper).</li>
-          </ul>
-        </div>
-
-        {:else if helpTab === "lettura"}
-        <div class="helpsec">
-          <h3>Il lettore</h3>
-          <ul>
-            <li><strong>Immersivo</strong>: la barra svanisce mentre leggi (torna col mouse), gli strumenti rari sono sotto <strong>⋯ Altro</strong>, lo zoom è ricordato per documento e si riparte dall'<strong>ultima pagina</strong>. «<strong>Riprendi lettura</strong>» (barra/radiale/palette) riapre l'ultimo PDF al punto in cui eri.</li>
-            <li><strong>Annotazioni</strong> (<kbd>A</kbd>): evidenziazioni con colore e commento, o <strong>note puntuali</strong> «a spillo» — ancorate alla pagina. <strong>Nota del documento</strong> (<kbd>E</kbd>): un appunto per l'<em>intero</em> paper. Gli <strong>Appunti .md</strong> sono invece file indipendenti (scheda <em>Scrittura</em>).</li>
-            <li><strong>Ritrovare un'evidenziazione senza ricordare in quale paper era</strong>: la ricerca in alto guarda anche <em>dentro</em> le tue evidenziazioni e i tuoi commenti — i risultati compaiono nel gruppo «<strong>Evidenziazioni</strong>» e un clic apre il PDF alla pagina esatta. Il segno <strong>✎ n</strong> sulla scheda dice quante ne contiene, senza aprirla.</li>
-            <li><strong>Hai spostato o rinominato un PDF fuori da Scriptorium?</strong> Aprendolo trovi «<strong>Ritrova il file…</strong>»: indichi dov'è ora e la scheda resta intatta (evidenziazioni, tag, nota, citekey). Se hai spostato un'<em>intera cartella</em>, dopo il primo ti propone di sistemare in un colpo tutti gli altri, verificando l'impronta di ciascun file. Lo stesso pulsante è in <em>Cura della libreria → File mancanti sul disco</em>.</li>
-            <li><strong>Cerca nel documento</strong> (<kbd>Ctrl</kbd>+<kbd>F</kbd>) in una fascia dedicata; <kbd>Invio</kbd>/<kbd>Maiusc</kbd>+<kbd>Invio</kbd> scorrono i risultati. Più indice, zoom/adatta, rotazione, due pagine, modalità notte.</li>
-            <li><strong>Lente AI</strong>: seleziona un passaggio → <em>Spiega</em> / <em>Traduci</em> / <em>Chiedi</em> (AI locale attiva); la risposta si può salvare nella Nota del documento.</li>
-            <li><strong>Manda agli Appunti</strong>: selezione → radiale o barretta dell'evidenziazione → scegli l'appunto → entra come citazione col riferimento <code>[[@citekey]]</code> in coda. Le <strong>fonti numerate</strong> di «Chiedi alla libreria» aprono il PDF alla pagina giusta.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Estrarre dal PDF: tabelle, testo, formule, figure</h3>
-          <ul>
-            <li>Premi il tasto della modalità (<kbd>T</kbd> tabella, <kbd>X</kbd> testo, <kbd>F</kbd> formula, <kbd>G</kbd> figura — o le icone/⋯) e <strong>trascina un rettangolo</strong> sulla zona. La finestra che si apre è trascinabile e ridimensionabile; ovunque hai <strong>Copia / Salva / → Appunti</strong> con il <strong>formato a scelta</strong> (l'anteprima mostra esattamente cosa esce). Ciò che mandi agli Appunti porta con sé il riferimento <code>[[@citekey]]</code>.</li>
-            <li><strong>Tabella</strong> (<kbd>T</kbd>) — tre motori nell'intestazione: <strong>Nativa</strong> (dal testo del PDF, veloce, per tabelle semplici), <strong>Modello</strong> (riconosce righe/colonne/intestazioni dall'immagine e prende il testo <em>esatto</em> dal PDF — il migliore sui paper; ~111 MB scaricati al primo uso; non lavora su pagine ruotate), <strong>Ollama</strong> (modello di visione, per scansioni). Export: griglia, CSV, Markdown, Excel, LaTeX (booktabs), più «Migliora con AI».</li>
-            <li><strong>Testo</strong> (<kbd>X</kbd>) — <strong>Nativa</strong> conserva la <strong>formattazione</strong> (corsivo, grassetto, apici/pedici → Markdown, es. H<sub>2</sub>O); <strong>Ollama</strong> fa l'OCR delle pagine scansionate. Export: testo, Markdown, LaTeX.</li>
-            <li><strong>Formula</strong> (<kbd>F</kbd>) — motore <strong>Locale</strong> (math-OCR integrato, ~115 MB al primo uso) o <strong>Ollama</strong>; «<strong>Più righe</strong>» per equazioni impilate. Il LaTeX riconosciuto è <strong>modificabile</strong> con anteprima resa in tempo reale; il pulsante <code>\mathrm&#123;&#125;</code> mette tutto in tondo. Export: LaTeX o <code>$$…$$</code>.</li>
-            <li><strong>Figura</strong> (<kbd>G</kbd>) — ritaglia qualsiasi zona come immagine: <strong>Salva PNG…</strong> o <strong>→ Appunti</strong>.</li>
-          </ul>
-          <table class="kbdtable">
-            <tbody>
-              <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Cerca nel documento</td></tr>
-              <tr><td><kbd>+</kbd> / <kbd>−</kbd> / <kbd>0</kbd></td><td>Ingrandisci / riduci / zoom 100%</td></tr>
-              <tr><td><kbd>W</kbd> / <kbd>H</kbd></td><td>Adatta alla larghezza / alla pagina</td></tr>
-              <tr><td><kbd>2</kbd></td><td>Vista a due pagine</td></tr>
-              <tr><td><kbd>N</kbd></td><td>Aggiungi una nota puntuale</td></tr>
-              <tr><td><kbd>A</kbd> / <kbd>E</kbd></td><td>Pannello Annotazioni / Nota del documento</td></tr>
-              <tr><td><kbd>T</kbd> / <kbd>X</kbd> / <kbd>F</kbd> / <kbd>G</kbd></td><td>Estrai tabella / testo / formula / figura (ripremi per annullare)</td></tr>
-              <tr><td><kbd>I</kbd></td><td>Modalità notte (inverti colori)</td></tr>
-              <tr><td><kbd>[</kbd> / <kbd>]</kbd></td><td>Ruota a sinistra / destra</td></tr>
-              <tr><td><kbd>Ctrl</kbd>+rotella</td><td>Zoom continuo</td></tr>
-              <tr><td><kbd>Esc</kbd></td><td>Chiudi / annulla</td></tr>
-              <tr><td><kbd>?</kbd></td><td>Scorciatoie (dentro il lettore)</td></tr>
-            </tbody>
-          </table>
-        </div>
-
-        {:else if helpTab === "scrittura"}
-        <div class="helpsec">
-          <h3>Wiki della libreria</h3>
-          <ul>
-            <li>La tua <strong>enciclopedia privata</strong>: una pagina per concetto, scritta dall'AI locale leggendo solo i tuoi documenti (icona <strong>Wiki</strong> sulla barra).</li>
-            <li>Le fonti, in tre modi: <strong>«Genera/aggiorna dai tag»</strong> (una pagina per ogni tag con almeno 2 documenti); un <strong>concetto libero</strong> (i paper pertinenti li trova la ricerca semantica); oppure <strong>scegli tu le fonti</strong> — seleziona i documenti nella griglia → tasto destro → <em>Pagina wiki (AI)</em>: la pagina usa esattamente quelli (max 10).</li>
-            <li>Le citazioni <strong>[n]</strong> nel testo aprono il PDF <strong>alla pagina giusta</strong>; i concetti citati in altre pagine diventano <strong>link</strong> tra pagine; in fondo trovi le fonti con i passaggi usati (chip «p. N»).</li>
-            <li>Ogni fonte <em>deve</em> comparire nella pagina: se la sintesi non la usa, viene dichiarata in «Fonti non integrate» — mai omessa in silenzio. Il pallino <strong>●</strong> sull'elenco segnala che la libreria è cambiata e conviene rigenerare.</li>
-            <li>Richiede l'AI locale attiva e l'indice dei passaggi (Chiedi alla libreria → Costruisci indice). Consiglio: un modello ≥ 8B (es. <code>gemma3:27b</code>) per una prosa all'altezza.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Appunti</h3>
-          <ul>
-            <li><strong>File .md veri</strong> nella cartella dell'app: li apri e modifichi anche da un editor esterno o dal terminale (l'indice si riallinea a ogni avvio). Icona <strong>Appunti</strong> sulla barra; elenco ordinabile per modifica/creazione/titolo. <em>Diversi</em> dalle Annotazioni (ancorate al PDF) e dalla Nota del documento (una per paper).</li>
-            <li><strong>[[Collegamenti]]</strong>: <code>[[Titolo di un appunto]]</code> collega un appunto; <code>[[@citekey]]</code> o <code>[[Titolo di un paper]]</code> collegano un documento (clic → si apre). In fondo i <strong>backlink</strong>. Cercabili dalla barra di ricerca.</li>
-            <li><strong>Editor</strong> con salvataggio automatico e tre modalità: <em>Modifica</em>, <em>Affiancato</em> (anteprima live), <em>Anteprima</em>. Barra di formattazione (titoli, grassetto, liste, sposta blocchi), <strong>formule</strong> con <code>$$ … $$</code> (rese in anteprima), <strong>immagini</strong> trascinate o incollate (salvate come file in <code>assets/</code>, nel testo resta un riferimento breve). <strong>Rinomina</strong> (o doppio clic sul titolo) rinomina anche il file.</li>
-            <li><strong>Esporta</strong> (sotto il titolo): <strong>MD</strong> · <strong>HTML</strong> (pagina autonoma) · <strong>LaTeX</strong> (.tex + figure in cartella) · <strong>PDF</strong> — formule e figure incluse.</li>
-            <li>Gli appunti <strong>ricevono</strong> dal lettore: testo selezionato, tabelle, formule e figure estratte, sempre con il riferimento <code>[[@citekey]]</code>; dal pannello dettagli anche Abstract e Riassunto AI; le <strong>Rassegne AI</strong> si salvano come appunto. Con l'Indice semantico, gli appunti compaiono anche nella <strong>Costellazione</strong> (rombi viola).</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Progetti (LaTeX) — un piccolo Overleaf locale</h3>
-          <ul>
-            <li>Icona <strong>Progetti (LaTeX)</strong> sulla barra. Ogni progetto è una <strong>cartella vera</strong> (in <code>projects/</code> nei dati dell'app) con <code>main.tex</code> e <code>refs.bib</code>. Crea da <strong>5 modelli</strong> (articolo, paper a due colonne, relazione/tesi, presentazione beamer, minimale) oppure «<strong>Da .zip…</strong>» con un template scaricato — i link a <strong>Overleaf / IEEE / ACM / Springer / Elsevier</strong> sono lì sotto.</li>
-            <li><strong>Cita</strong>: cerca nella tua libreria e inserisce <code>\cite&#123;citekey&#125;</code> al cursore. <strong>Sincronizza bibliografia</strong>: riscrive <code>refs.bib</code> con tutta la libreria. Salvataggio automatico (o <kbd>Ctrl</kbd>+<kbd>S</kbd>).</li>
-            <li><strong>Compila</strong> usa il compilatore di sistema: <strong>Tectonic</strong>, oppure <strong>MiKTeX</strong> (via texify, non serve Perl), oppure latexmk. L'anteprima del PDF appare accanto all'editor; se il PDF esce con avvisi lo vedi comunque, col log a un clic. Senza compilatore: <code>winget install Tectonic.Tectonic</code>.</li>
-                      <li><strong>Portare qui un progetto Overleaf</strong>: «Da .zip (anche Overleaf)…» ricostruisce l'intero progetto — .tex, immagini, classi, sottocartelle — pronto da compilare; lo stesso lo fa la terza domanda dell'import «Da bibliografia o progetto…».</li>
-            <li><strong>Sincronizzare con Overleaf</strong>: con il ponte Git di Overleaf (funzione a pagamento) puoi fare <code>git clone</code> della cartella del progetto dal <strong>Terminale</strong> integrato e lavorare con <code>git pull</code>/<code>git push</code> — le credenziali restano nel gestore di Windows, mai dentro Scriptorium. Il pulsante <strong>+ .gitignore</strong> prepara la cartella escludendo i prodotti della compilazione. Senza il ponte, si passa dallo <code>.zip</code> (vedi la FAQ su Overleaf).</li>
-</ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>Strumenti di sintesi sulla selezione</h3>
-          <ul>
-            <li><strong>Confronta (AI)</strong>: seleziona 2-3 paper → tasto destro → <em>Confronta</em>: tabella obiettivo/metodo/dati/risultati/limiti + cosa aggiunge ciascuno.</li>
-            <li><strong>Rassegna (AI)</strong>: <strong>seleziona da 2 a 10 paper</strong> → tasto destro → <em>Rassegna (AI)</em>. Ottieni una <strong>mini related-work</strong> (300-500 parole) <strong>organizzata per temi</strong> (non paper-per-paper): confronta gli approcci, evidenzia disaccordi e chiude con <em>«Lacune aperte»</em>. Ogni paper è citato con <strong>[n] cliccabili</strong> (aprono la fonte) e nessuna fonte viene omessa in silenzio (le non integrate finiscono in coda). Puoi copiarla pronta per <strong>LaTeX</strong> (<code>\cite&#123;citekey&#125;</code>) o <strong>Pandoc</strong> (<code>[@citekey]</code>), oppure <strong>«Salva negli Appunti»</strong>: diventa un <strong>appunto .md</strong> dove le <em>[n]</em> sono riscritte come <strong>backlink <code>[[@citekey]]</code></strong> — così ogni paper citato rimanda alla rassegna, ed è cercabile e modificabile come ogni appunto. Richiede l'AI locale attiva.</li>
-            <li><strong>Tabella risultati (AI)</strong>: raccoglie i numeri (metodo · dataset · metrica · valore) dei paper selezionati in un'unica tabella esportabile in CSV/Markdown/Excel. I valori sono estratti testualmente: verifica sempre sul PDF.</li>
-            <li><strong>Percorso di lettura</strong> (tasto destro → AI): per capire un paper, cosa leggere prima — i fondamenti che cita (già tuoi), i vicini di contenuto precedenti, e i riferimenti mancanti da aggiungere con un click. Funziona <em>senza</em> LLM.</li>
-          </ul>
-        </div>
-
-        {:else if helpTab === "ai"}
-        <div class="helpsec">
-          <h3>AI locale (opzionale, mai automatica)</h3>
-          <ul>
-            <li>Serve <strong>Ollama</strong> o <strong>LM Studio</strong> sul tuo PC: configura URL e modello in <strong>Impostazioni → AI locale</strong>. Il <strong>chip AI</strong> in alto dice lo stato: se leggi «AI off», un clic la riattiva. Consiglio: un modello ≥ 8B (es. <code>gemma3:27b</code>).</li>
-            <li>Cosa abilita: <strong>riassunti</strong> e <strong>tag automatici</strong>, <strong>Lente AI</strong> nel lettore, <strong>Chiedi alla libreria</strong>, <strong>Wiki</strong>, <strong>Confronta/Rassegna</strong>, i motori <strong>Ollama</strong> di tabelle/testo/formule, «Migliora con AI» sulle tabelle. Le schede con riassunto mostrano <strong>✦ AI</strong>; il batch sulla selezione <strong>salta</strong> chi ha già riassunto/tag.</li>
-            <li><strong>Chiedi alla libreria</strong> (barra): fai una domanda in linguaggio naturale → risposta con <strong>fonti numerate</strong> che aprono i PDF alla pagina giusta. Alla prima visita premi «<strong>Costruisci indice</strong>» (l'indice dei passaggi, riusato anche dalla Wiki); rigeneralo quando la libreria cambia molto.</li>
-            <li><strong>Memoria AI</strong> (barra): «<strong>Libera GPU</strong>» scarica i modelli dalla VRAM lasciando tutto attivo (si ricaricano al bisogno); «<strong>Ferma AI</strong>» scarica i modelli, chiude davvero il server locale e disattiva l'AI.</li>
-            <li>L'<strong>Indice semantico</strong> (barra) non è l'AI generativa: è l'indice dei significati, tutto locale. Abilita ricerca <em>Semantica</em>, <em>Correlati</em>, <strong>Costellazione</strong> e gli appunti nel grafo. Rilancialo dopo aver aggiunto documenti o appunti.</li>
-          </ul>
-        </div>
-
-        <div class="helpsec">
-          <h3>I tuoi dati — tutto locale</h3>
-          <ul>
-            <li>Cartella dell'app: <code>%APPDATA%\com.pdfmanage.app</code> — <code>pdfmanage.db</code> (il catalogo), <code>papers/</code> (i PDF scaricati; quelli importati dal disco <em>restano dove sono</em>), <code>notes/</code> (gli appunti .md + <code>assets/</code>), <code>projects/</code> (i progetti LaTeX), <code>thumbnails/</code> e i modelli locali (<code>mathocr</code>, <code>tablestruct</code>, <code>fastembed_cache</code>).</li>
-            <li>Appunti e progetti sono <strong>file veri</strong>: modificarli da fuori è previsto. <strong>Backup libreria</strong> (barra) fa una copia completa; <strong>Esporta</strong> produce citazioni (BibTeX/RIS/CSL) o note per <strong>Obsidian</strong>.</li>
-            <li><strong>Aggiornamenti — solo quando li chiedi tu.</strong> L'app non contatta GitHub da sola: l'unica verifica parte da <em>Sistema → Controlla aggiornamenti</em>. Se ce n'è uno ti mostro <strong>cosa cambia</strong> e decidi: «Scarica e installa» mostra l'avanzamento, installa (una finestrella, nessuna domanda) e ti chiede se riavviare. Ogni aggiornamento è <strong>firmato</strong>: uno non firmato con la chiave di Scriptorium viene rifiutato. La tua libreria non viene toccata — sta in <code>%APPDATA%</code>, separata dal programma — e prima di ogni cambio di versione il database viene comunque salvato in <code>backups/</code>. Dopo il riavvio compare una volta il riquadro con le <strong>novità</strong>.</li>
-            <li><strong>Terminale</strong> integrato (&gt;_, es. per <code>claude code</code>); la CLI <code>scriptorium-cli</code> interroga da fuori, in sola lettura, libreria <em>e</em> Appunti <em>e</em> progetti LaTeX (<code>query</code>, <code>bib</code>, <code>notes</code>, <code>note</code>, <code>search-notes</code>, <code>projects</code>, <code>stats</code>…). Il <strong>server MCP</strong> <code>scriptorium-mcp</code> porta gli stessi dati (9 strumenti, sola lettura) dentro <strong>Claude Desktop / Claude Code</strong> e qualsiasi client MCP: config pronta da copiare in <strong>Impostazioni → CLI e MCP</strong>. Il <strong>connettore browser</strong> per «Aggancia» è un servizio solo-locale, spegnibile in Impostazioni. <strong>11 temi</strong> in Aspetto.</li>
-          </ul>
-
-          <h3>Plancia — il sinottico dei processi</h3>
-          <ul>
-            <li>La <strong>Plancia</strong> (icona tachimetro sulla barra, o Ctrl+K → «Plancia») apre una <strong>finestra separata</strong> con un <strong>sinottico visivo</strong> dei processi interni: import, estrazione, metadati, indici, AI, backup… Puoi <strong>tenerla in background</strong> su un lato dello schermo: si illumina <em>solo</em> ciò che sta lavorando davvero, con avanzamento (<code>12/96</code>) e durata; da ferma è spenta.</li>
-            <li><strong>Stato ed errori a colpo d'occhio</strong>: un guasto accende il nodo in rosso con il <strong>motivo</strong> per esteso; un problema non bloccante (es. un file su cento) lo segna in ambra senza fermare il resto. I sottosistemi spenti dicono <em>perché</em> («online disattivato», «modelli da scaricare»…). Clic su un nodo: descrizione, statistiche, storico.</li>
-            <li>Il <strong>registro attività</strong> in basso è filtrabile (Tutti/Errori) ed esportabile con <strong>Salva registro…</strong>; da <strong>Impostazioni → Manutenzione</strong> puoi farlo scrivere anche <strong>su file</strong> (uno al giorno, conservati 14) per capire a posteriori cosa è successo.</li>
-          </ul>
-        </div>
-
-        {:else if helpTab === "faq"}
-        <div class="helpsec">
-          <h3>Come faccio a…?</h3>
-          <dl class="faq">
-            <dt>…aggiungere il PDF che ho appena scaricato col browser?</dt>
-            <dd>Copia il link del PDF e torna su Scriptorium: compare «Aggancia». Oppure punta la Cartella sorvegliata su Download: entra da solo.</dd>
-            <dt>…lavorare con Overleaf: si può scrivere direttamente nel mio progetto online?</dt>
-            <dd>
-              <strong>Non tramite Scriptorium, ed è una scelta voluta.</strong> Overleaf non ha un'API pubblica per scrivere nei progetti: l'unica via sarebbe custodire le tue credenziali (o un token valido su <em>tutti</em> i tuoi progetti) dentro l'app — una responsabilità che non vogliamo prenderci, oltre che contraria alle condizioni d'uso di Overleaf. Le due strade pulite sono:
-              <ul>
-                <li><strong>Con il ponte Git</strong> (funzione a pagamento di Overleaf): su Overleaf apri Menu → Git e copia l'indirizzo, genera un token dalle impostazioni dell'account, poi dal <strong>Terminale</strong> di Scriptorium fai <code>git clone</code> nella cartella dei progetti e lavora con <code>git pull</code>/<code>git push</code>. Le credenziali restano nel gestore di Windows: Scriptorium non le vede mai. Il pulsante <strong>+ .gitignore</strong> nei Progetti prepara la cartella. Limiti dichiarati da Overleaf: solo il ramo principale, e un push può spostare o perdere commenti e revisioni.</li>
-                <li><strong>Senza il ponte</strong> (piano gratuito): su Overleaf Menu → Download → Source per lo <code>.zip</code>, poi «Importa → Da .zip…» nei Progetti; per tornare indietro carichi lo zip su Overleaf. È manuale, ma è un limite di Overleaf, non nostro.</li>
-              </ul>
-            </dd>
-            <dt>…importare la bibliografia di un progetto Overleaf e scaricarne i paper?</dt>
-            <dd>Scarica da Overleaf lo <strong>zip del progetto</strong> (Menu → Download → Source) e usa <strong>Importa → «Da bibliografia o progetto…»</strong>: legge il <code>.bib</code> <em>dentro</em> l'archivio (non serve scompattarlo), crea una scheda per ogni voce citata, e — se rispondi sì alle due domande — <strong>cerca e scarica i PDF open-access</strong> (arXiv, Unpaywall, OpenAlex, Semantic Scholar) e mette tutto in una <strong>raccolta</strong> dedicata. Serve la ricerca online attiva. Poi, sulla selezione, «Tag automatici (AI)» per i tag. Alla terza domanda puoi anche far <strong>ricostruire il progetto LaTeX completo</strong> (file .tex, immagini, classi, sottocartelle) dentro <strong>Progetti (LaTeX)</strong>, pronto da compilare. Per importare invece i PDF già compilati che stanno nell'archivio e il grafo delle citazioni del <em>tuo</em> lavoro, usa in aggiunta «Importa → Progetto LaTeX (.zip)…».</dd>
-            <dt>…portare la mia libreria da Zotero, Mendeley o EndNote?</dt>
-            <dd>Nel gestore fai <strong>Esporta</strong> in <strong>BibTeX/BibLaTeX, RIS o CSL-JSON</strong> (per avere anche i PDF, in Zotero spunta «Esporta file»). Poi barra → Importa → <strong>Da bibliografia o progetto…</strong>, scegli il file e — se i PDF stanno in una cartella a parte — indicala quando te lo chiede. Metadati, PDF e parole chiave (→ tag) entrano insieme, senza doppioni.</dd>
-            <dt>…sistemare un paper arrivato senza titolo o con metadati sbagliati?</dt>
-            <dd>Clic su «✦ N senza metadati» in alto per il recupero in blocco (solo abbinamenti sicuri). Per il caso singolo: tasto destro → Organizza → <strong>Recupera metadati…</strong> mostra i candidati trovati online con le prove nel PDF e applichi quello giusto (o incolli un DOI/arXiv). Ritocchi a mano: Modifica metadati. Per tutta la libreria: Impostazioni → Manutenzione → «Verifica e ripara metadati».</dd>
-            <dt>…organizzare i paper in cartelle e sottocartelle, anche su disco?</dt>
-            <dd>Apri l'<strong>Archivio</strong> (icona cartella): crei raccolte e sotto-raccolte e trascini i paper tra i nodi; «<strong>✦ Suggerisci</strong>» propone cosa metterci (con soglia di confidenza). Vuoi vederle anche in Esplora risorse o dal terminale? Attiva lo <strong>Specchio su disco</strong> (chip in alto): una cartella con l'albero delle raccolte e i PDF con nomi leggibili, sempre sincronizzata, senza occupare spazio in più.</dd>
-            <dt>…vedere cosa sta facendo l'app in questo momento (e perché qualcosa è fallito)?</dt>
-            <dd>Apri la <strong>Plancia</strong> (icona tachimetro sulla barra): un sinottico in finestra separata, da tenere anche in background, dove si illumina solo ciò che sta lavorando. Gli errori accendono il nodo in rosso col motivo per esteso; clic sul nodo per dettagli e storico; «Salva registro…» esporta la sessione. Da Impostazioni → Manutenzione puoi registrare l'attività anche su file.</dd>
-            <dt>…copiare una citazione pronta?</dt>
-            <dd>Tasto destro sul paper → Cita: APA, IEEE, BibTeX, citekey, <code>\cite</code>, <code>[@…]</code>. Con più paper selezionati ottieni <code>\cite&#123;k1,k2&#125;</code> o tutte le voci BibTeX insieme.</dd>
-            <dt>…mandare un paper a un collega?</dt>
-            <dd>Tasto destro → Condividi: WhatsApp/Teams/Gmail aprono il messaggio pronto e il PDF è già copiato (incollalo con <kbd>Ctrl</kbd>+<kbd>V</kbd>); Outlook desktop lo allega da solo.</dd>
-            <dt>…estrarre una tabella che viene male?</dt>
-            <dd>Nella finestra della tabella cambia motore: <strong>Modello</strong> per le tabelle dei paper (anche senza bordi), <strong>Ollama</strong> per le scansioni. Il rettangolo deve coprire tutta la tabella.</dd>
-            <dt>…correggere una formula riconosciuta male?</dt>
-            <dd>Il LaTeX nella finestra è modificabile e l'anteprima si aggiorna live. Se sono più equazioni impilate prova «Più righe»; in alternativa cambia motore.</dd>
-            <dt>…portare un passaggio di un paper nei miei appunti, con la fonte?</dt>
-            <dd>Seleziona il testo nel lettore → «Manda agli Appunti» (radiale o barretta): entra come citazione con <code>[[@citekey]]</code> in coda, che diventa un backlink.</dd>
-            <dt>…scrivere una formula in un appunto?</dt>
-            <dd>Scrivi <code>$$ E = mc^2 $$</code>: la vedi resa in Affiancato/Anteprima e negli export.</dd>
-            <dt>…mettere un'immagine in un appunto?</dt>
-            <dd>Trascinala o incollala nell'editor: viene salvata come file in <code>assets/</code> e nel testo resta un riferimento breve.</dd>
-            <dt>…esportare un appunto in PDF?</dt>
-            <dd>Apri l'appunto → pulsante <strong>PDF</strong> → nella finestra di stampa scegli «Salva come PDF». Ci sono anche MD, HTML e LaTeX.</dd>
-            <dt>…scrivere un articolo LaTeX citando la mia libreria?</dt>
-            <dd>Barra → Progetti (LaTeX) → Crea (scegli un modello). «Cita» inserisce <code>\cite&#123;…&#125;</code> dalla libreria, «Compila» produce il PDF con anteprima. Per un template ufficiale: scaricalo in .zip e usa «Da .zip…».</dd>
-            <dt>…compilare se MiKTeX chiede Perl o non ho un compilatore?</dt>
-            <dd>Con MiKTeX la compilazione passa da texify e non serve Perl. Se non hai nulla: <code>winget install Tectonic.Tectonic</code> (si scarica i pacchetti da solo).</dd>
-            <dt>…sapere quali paper citati mi mancano?</dt>
-            <dd>Barra → Cura della libreria → Gap di citazioni. «Risolvi DOI dei riferimenti» ne fa entrare altri nel conteggio.</dd>
-            <dt>…seguire un tema e accorgermi dei paper nuovi?</dt>
-            <dd>Cerca online → ★ Salva la ricerca. A ogni avvio i risultati nuovi si raccolgono nella campana Novità.</dd>
-            <dt>…perché la Costellazione è vuota o mancano i paper nuovi?</dt>
-            <dd>Serve l'Indice semantico: l'icona sulla barra lo costruisce/aggiorna. I nuovi documenti (e appunti) entrano al prossimo aggiornamento.</dd>
-            <dt>…riaprire l'ultimo PDF al punto in cui ero?</dt>
-            <dd>«Riprendi lettura» sulla barra (o radiale/palette). Ogni PDF comunque riparte dall'ultima pagina letta.</dd>
-            <dt>…perché le funzioni AI non partono?</dt>
-            <dd>Guarda il chip in alto: se dice «AI off», cliccalo. Poi verifica in Impostazioni → AI locale che il server (Ollama/LM Studio) sia raggiungibile e il modello esista.</dd>
-            <dt>…liberare la memoria della GPU senza spegnere tutto?</dt>
-            <dd>Barra → Memoria AI → «Libera GPU». «Ferma AI» invece chiude anche il server e disattiva l'AI.</dd>
-            <dt>…trovare un comando che non ricordo dove sta?</dt>
-            <dd><kbd>Ctrl</kbd>+<kbd>K</kbd> e digitalo: trovi azioni, documenti, appunti, pagine wiki, progetti e le sezioni di questa guida — anche mentre leggi un PDF. Funziona pure nel menu radiale: apri e digita per filtrare.</dd>
-          </dl>
-        </div>
-        {/if}
+        <HelpProse tab={helpTab} />
 
       </div>
     </div>
@@ -7968,75 +8006,123 @@
     <div class="modalback" onmousedown={(e) => { if (e.target === e.currentTarget) settingsModal = false; }} role="presentation">
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
       <div class="setmodal" onclick={(e) => e.stopPropagation()}>
-        <h2>Impostazioni</h2>
+        <h2>{t("Impostazioni")}</h2>
         <div class="setbody">
           <nav class="setnav">
-            <button class="setnavitem" class:active={settingsTab === "online"} onclick={() => (settingsTab = "online")}>Ricerca online</button>
-            <button class="setnavitem" class:active={settingsTab === "ai"} onclick={() => (settingsTab = "ai")}>AI locale</button>
+            <!-- Etichetta bilingue di proposito: chi non legge l'italiano deve
+                 poter trovare il cambio di lingua senza sapere l'italiano.
+                 i18n-exempt: già bilingue -->
+            <button class="setnavitem" class:active={settingsTab === "lang"} onclick={() => (settingsTab = "lang")}>Lingua / Language</button>
+            <button class="setnavitem" class:active={settingsTab === "online"} onclick={() => (settingsTab = "online")}>{t("Ricerca online")}</button>
+            <button class="setnavitem" class:active={settingsTab === "ai"} onclick={() => (settingsTab = "ai")}>{t("AI locale")}</button>
+            <!-- i18n-exempt: nome proprio -->
             <button class="setnavitem" class:active={settingsTab === "obsidian"} onclick={() => (settingsTab = "obsidian")}>Obsidian</button>
-            <button class="setnavitem" class:active={settingsTab === "connector"} onclick={() => { settingsTab = "connector"; loadConnector(); }}>Connettore browser</button>
-            <button class="setnavitem" class:active={settingsTab === "mcp"} onclick={() => { settingsTab = "mcp"; loadCompanions(); }}>CLI e MCP</button>
-            <button class="setnavitem" class:active={settingsTab === "backup"} onclick={() => (settingsTab = "backup")}>Backup</button>
-            <button class="setnavitem" class:active={settingsTab === "maint"} onclick={() => (settingsTab = "maint")}>Manutenzione</button>
+            <button class="setnavitem" class:active={settingsTab === "connector"} onclick={() => { settingsTab = "connector"; loadConnector(); }}>{t("Connettore browser")}</button>
+            <button class="setnavitem" class:active={settingsTab === "mcp"} onclick={() => { settingsTab = "mcp"; loadCompanions(); }}>{t("CLI e MCP")}</button>
+            <button class="setnavitem" class:active={settingsTab === "backup"} onclick={() => (settingsTab = "backup")}>{t("Backup")}</button>
+            <button class="setnavitem" class:active={settingsTab === "maint"} onclick={() => (settingsTab = "maint")}>{t("Manutenzione")}</button>
           </nav>
           <div class="setpane">
-            {#if settingsTab === "online"}
-              <p class="dimtext">La ricerca online è una funzione di rete: finché è disattivata, l'app resta 100% offline. I PDF vengono scaricati solo per i lavori Open Access.</p>
-              <label class="setrow"><input type="checkbox" bind:checked={discEnabled} /> Abilita funzioni online (ricerca su arXiv, OpenAlex, ADS, Semantic Scholar e altre fonti; Trova PDF, esplorazione citazioni, recupero metadati)</label>
+            {#if settingsTab === "lang"}
+              <p class="dimtext">
+                {t("La lingua dell'interfaccia cambia subito, senza riavviare. La scelta è tua e resta: cambiare la lingua di Windows non cambia quella di Scriptorium.")}
+              </p>
+              <div class="langpick" role="radiogroup" aria-label="Lingua / Language"><!-- i18n-exempt: etichetta bilingue di proposito, come il pulsante di scheda qui sopra -->
+                {#each LOCALES as l (l.value)}
+                  <button
+                    class="langbtn"
+                    class:on={i18n.locale === l.value}
+                    role="radio"
+                    aria-checked={i18n.locale === l.value}
+                    onclick={() => setLocale(l.value)}
+                  >
+                    {l.label}
+                  </button>
+                {/each}
+              </div>
+              <p class="sethint">
+                {t("La tua libreria non viene toccata: titoli, appunti e tag restano come li hai scritti. Cambia solo il testo del programma.")}
+              </p>
+
+              <div class="setlbl" style="margin-top: 18px;">
+                {t("Lingua delle risposte dell'AI")}
+                <select bind:value={aiLang} onchange={() => void persistAiLang()}>
+                  <option value="auto">
+                    {t("Come l'interfaccia")} — {aiLangEffective === "en" ? t("adesso: inglese") : t("adesso: italiano")}
+                  </option>
+                  <option value="it">{t("Sempre italiano")}</option>
+                  <option value="en">{t("Sempre inglese")}</option>
+                </select>
+                <span class="sethint">
+                  {t("Vale per riassunti, «Chiedi alla libreria», Lente AI e wiki. È separata perché si può voler leggere il programma in una lingua e farsi riassumere i paper in un'altra. I tag automatici restano sempre in inglese: sono un vocabolario condiviso e mescolarli spaccherebbe in due la tua tassonomia.")}
+                </span>
+              </div>
+            {:else if settingsTab === "online"}
+              <p class="dimtext">{t("La ricerca online è una funzione di rete: finché è disattivata, l'app resta 100% offline. I PDF vengono scaricati solo per i lavori Open Access.")}</p>
+              <label class="setrow"><input type="checkbox" bind:checked={discEnabled} /> {t("Abilita funzioni online (ricerca su arXiv, OpenAlex, ADS, Semantic Scholar e altre fonti; Trova PDF, esplorazione citazioni, recupero metadati)")}</label>
               <label class="setlbl">
-                Email di contatto — opzionale ma consigliata
-                <input bind:value={discEmail} placeholder="tua@email.it" />
-                <span class="sethint">Inviata agli archivi (Crossref, OpenAlex, Unpaywall) per identificarti gentilmente: dà limiti di richiesta più alti e meno blocchi. È <strong>richiesta</strong> per “Trova PDF” (Unpaywall). Non viene usata per altro.</span>
+                {t("Email di contatto — opzionale ma consigliata")}
+                <input bind:value={discEmail} placeholder={t("tua@email.it")} />
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                <span class="sethint">{@html t("Inviata agli archivi (Crossref, OpenAlex, Unpaywall) per identificarti gentilmente: dà limiti di richiesta più alti e meno blocchi. È <strong>richiesta</strong> per “Trova PDF” (Unpaywall). Non viene usata per altro.")}</span>
               </label>
-              <p class="sethint" style="margin: 4px 0 -2px;">🔒 Le chiavi sono salvate nel <strong>Credential Manager di Windows</strong> (cifrate), non nel database. Dopo il salvataggio non sono più visibili: puoi solo sostituirle o rimuoverle.</p>
-              {@render secretField("openalex_key", "Chiave API OpenAlex", "Gratuita su openalex.org/settings/api (opzionale: il free tier funziona anche senza).")}
-              {@render secretField("ads_token", "Token API ADS", "Gratuito su ui.adsabs.harvard.edu (Account → API Token). Richiesto per la fonte ADS.")}
-              {@render secretField("s2_key", "Chiave API Semantic Scholar", "Opzionale (alza i limiti), su semanticscholar.org/product/api.")}
-              {@render secretField("core_key", "Chiave API CORE", "Gratuita su core.ac.uk/services/api. Richiesta per la fonte CORE.")}
-              {@render secretField("github_token", "Token GitHub", "Opzionale (alza il limite di richieste per README/repo), su github.com/settings/tokens.")}
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="sethint" style="margin: 4px 0 -2px;">{@html t("🔒 Le chiavi sono salvate nel <strong>Credential Manager di Windows</strong> (cifrate), non nel database. Dopo il salvataggio non sono più visibili: puoi solo sostituirle o rimuoverle.")}</p>
+              {@render secretField("openalex_key", t("Chiave API OpenAlex"), t("Gratuita su openalex.org/settings/api (opzionale: il free tier funziona anche senza)."))}
+              {@render secretField("ads_token", t("Token API ADS"), t("Gratuito su ui.adsabs.harvard.edu (Account → API Token). Richiesto per la fonte ADS."))}
+              {@render secretField("s2_key", t("Chiave API Semantic Scholar"), t("Opzionale (alza i limiti), su semanticscholar.org/product/api."))}
+              {@render secretField("core_key", t("Chiave API CORE"), t("Gratuita su core.ac.uk/services/api. Richiesta per la fonte CORE."))}
+              {@render secretField("github_token", t("Token GitHub"), t("Opzionale (alza il limite di richieste per README/repo), su github.com/settings/tokens."))}
             {:else if settingsTab === "ai"}
               <p class="dimtext">
-                Locali e disattivate di default. Richiedono <strong>Ollama</strong> oppure <strong>LM Studio</strong> installato, con almeno un modello caricato.
-                Puoi <em>Avviare</em>/<em>Fermare</em> il server direttamente da qui (richiede Ollama nel PATH, o la CLI <code>lms</code> di LM Studio), premere <em>Verifica</em> per vedere i modelli, poi scegliere quale usare nel menu in fondo. Quando un provider è raggiungibile compare l'indicatore <strong>AI</strong> in alto.
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                {@html t("Locali e disattivate di default. Richiedono <strong>Ollama</strong> oppure <strong>LM Studio</strong> installato, con almeno un modello caricato.")}
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                {@html t("Puoi <em>Avviare</em>/<em>Fermare</em> il server direttamente da qui (richiede Ollama nel PATH, o la CLI <code>lms</code> di LM Studio), premere <em>Verifica</em> per vedere i modelli, poi scegliere quale usare nel menu in fondo. Quando un provider è raggiungibile compare l'indicatore <strong>AI</strong> in alto.")}
               </p>
-              <label class="setrow"><input type="checkbox" bind:checked={aiEnabled} /> Abilita le funzioni AI</label>
+              <label class="setrow"><input type="checkbox" bind:checked={aiEnabled} /> {t("Abilita le funzioni AI")}</label>
 
               <div class="setlbl">
-                Ollama — URL del server
+                {t("Ollama — URL del server")}
                 <div class="airow">
                   <input bind:value={ollamaUrl} placeholder="http://localhost:11434" />
-                  <button class="ghost small" onclick={() => verifyProvider("ollama")} disabled={verifyingOllama}>{verifyingOllama ? "…" : "Verifica"}</button>
-                  <button class="ghost small" onclick={() => startServer("ollama")} title="Avvia il server Ollama (ollama serve)">Avvia</button>
-                  <button class="ghost small" onclick={() => stopServer("ollama")} title="Ferma il server Ollama">Ferma</button>
+                  <button class="ghost small" onclick={() => verifyProvider("ollama")} disabled={verifyingOllama}>{verifyingOllama ? "…" : t("Verifica")}</button>
+                  <button class="ghost small" onclick={() => startServer("ollama")} title={t("Avvia il server Ollama (ollama serve)")}>{t("Avvia")}</button>
+                  <button class="ghost small" onclick={() => stopServer("ollama")} title={t("Ferma il server Ollama")}>{t("Ferma")}</button>
                 </div>
                 {#if ollamaModels}
-                  <span class="aifeedback ok">{ollamaModels.length ? `✓ raggiungibile — ${ollamaModels.length} ${ollamaModels.length === 1 ? "modello" : "modelli"}` : "✓ raggiungibile, ma nessun modello (scaricane uno: ollama pull …)"}</span>
+                  <span class="aifeedback ok">{ollamaModels.length
+                    ? tp(ollamaModels.length, "✓ raggiungibile — 1 modello", "✓ raggiungibile — {n} modelli")
+                    : t("✓ raggiungibile, ma nessun modello (scaricane uno: ollama pull …)")}</span>
                 {:else if ollamaErr}
-                  <span class="aifeedback bad">✗ non raggiungibile — avvia Ollama</span>
+                  <span class="aifeedback bad">{t("✗ non raggiungibile — avvia Ollama")}</span>
                 {/if}
               </div>
 
               <div class="setlbl">
-                LM Studio — URL del server
+                {t("LM Studio — URL del server")}
                 <div class="airow">
                   <input bind:value={lmstudioUrl} placeholder="http://localhost:1234" />
-                  <button class="ghost small" onclick={() => verifyProvider("lmstudio")} disabled={verifyingLm}>{verifyingLm ? "…" : "Verifica"}</button>
-                  <button class="ghost small" onclick={() => startServer("lmstudio")} title="Avvia il server di LM Studio (lms server start)">Avvia</button>
-                  <button class="ghost small" onclick={() => stopServer("lmstudio")} title="Ferma il server di LM Studio (lms server stop)">Ferma</button>
+                  <button class="ghost small" onclick={() => verifyProvider("lmstudio")} disabled={verifyingLm}>{verifyingLm ? "…" : t("Verifica")}</button>
+                  <button class="ghost small" onclick={() => startServer("lmstudio")} title={t("Avvia il server di LM Studio (lms server start)")}>{t("Avvia")}</button>
+                  <button class="ghost small" onclick={() => stopServer("lmstudio")} title={t("Ferma il server di LM Studio (lms server stop)")}>{t("Ferma")}</button>
                 </div>
                 {#if lmstudioModels}
-                  <span class="aifeedback ok">{lmstudioModels.length ? `✓ raggiungibile — ${lmstudioModels.length} ${lmstudioModels.length === 1 ? "modello" : "modelli"}` : "✓ raggiungibile, ma nessun modello caricato in LM Studio"}</span>
+                  <span class="aifeedback ok">{lmstudioModels.length
+                    ? tp(lmstudioModels.length, "✓ raggiungibile — 1 modello", "✓ raggiungibile — {n} modelli")
+                    : t("✓ raggiungibile, ma nessun modello caricato in LM Studio")}</span>
                 {:else if lmstudioErr}
-                  <span class="aifeedback bad">✗ non raggiungibile — avvia il server di LM Studio</span>
+                  <span class="aifeedback bad">{t("✗ non raggiungibile — avvia il server di LM Studio")}</span>
                 {/if}
               </div>
 
               <label class="setlbl">
-                Modello da usare (scelto tra quelli trovati)
+                {t("Modello da usare (scelto tra quelli trovati)")}
                 <select value={`${aiProvider}::${aiModel}`} onchange={(e) => chooseModel(e.currentTarget.value)}>
                   {#if aiModel && !(aiProvider === "lmstudio" ? (lmstudioModels ?? []) : (ollamaModels ?? [])).includes(aiModel)}
-                    <option value={`${aiProvider}::${aiModel}`}>{aiModel} — attuale ({aiProvider === "lmstudio" ? "LM Studio" : "Ollama"})</option>
+                    <option value={`${aiProvider}::${aiModel}`}>{t("{modello} — attuale ({provider})", { modello: aiModel, provider: aiProvider === "lmstudio" ? "LM Studio" : "Ollama" })}</option>
                   {/if}
+                  <!-- i18n-exempt: nomi propri dei provider -->
                   {#if ollamaModels?.length}
                     <optgroup label="Ollama">
                       {#each ollamaModels as m (m)}<option value={`ollama::${m}`}>{m}</option>{/each}
@@ -8048,182 +8134,161 @@
                     </optgroup>
                   {/if}
                   {#if !ollamaModels?.length && !lmstudioModels?.length}
-                    <option value="" disabled>Avvia un provider e premi «Verifica» per vedere i modelli</option>
+                    <option value="" disabled>{t("Avvia un provider e premi «Verifica» per vedere i modelli")}</option>
                   {/if}
                 </select>
               </label>
-              <label class="setrow"><input type="checkbox" bind:checked={aiEmbedGpu} /> Indicizzazione su GPU (via Ollama)</label>
+              <label class="setrow"><input type="checkbox" bind:checked={aiEmbedGpu} /> {t("Indicizzazione su GPU (via Ollama)")}</label>
               <p class="sethint" style="margin-top: -8px;">
-                Calcola gli embeddings dell'indice con la GPU tramite Ollama (modello <code>bge-m3</code>, 1024-dim, compatibile con l'indice esistente) invece del modello CPU integrato. Richiede Ollama avviato e <code>ollama pull bge-m3</code>.
-                Su 6 GB di VRAM condivide la memoria con l'LLM: conviene indicizzare con l'LLM scarico. Se cambi metodo, <strong>Ricostruisci</strong> l'indice in «Chiedi alla libreria» per coerenza.
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                {@html t("Calcola gli embeddings dell'indice con la GPU tramite Ollama (modello <code>bge-m3</code>, 1024-dim, compatibile con l'indice esistente) invece del modello CPU integrato. Richiede Ollama avviato e <code>ollama pull bge-m3</code>.")}
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                {@html t("Su 6 GB di VRAM condivide la memoria con l'LLM: conviene indicizzare con l'LLM scarico. Se cambi metodo, <strong>Ricostruisci</strong> l'indice in «Chiedi alla libreria» per coerenza.")}
               </p>
               <label class="setlbl">
-                Dimensione batch embeddings — 0 = automatico (64 su GPU, 16 su CPU)
-                <input type="number" min="0" max="512" bind:value={aiEmbedBatch} placeholder="0 (auto)" />
-                <span class="sethint">Su GPU potenti (es. RTX 4090/5090) alza a <strong>128–256</strong> per saturare la GPU e velocizzare l'indicizzazione. Su CPU lascia basso (8–16).</span>
+                {t("Dimensione batch embeddings — 0 = automatico (64 su GPU, 16 su CPU)")}
+                <input type="number" min="0" max="512" bind:value={aiEmbedBatch} placeholder="0 (auto)" /><!-- i18n-exempt: valore predefinito numerico, «auto» identico in inglese -->
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                <span class="sethint">{@html t("Su GPU potenti (es. RTX 4090/5090) alza a <strong>128–256</strong> per saturare la GPU e velocizzare l'indicizzazione. Su CPU lascia basso (8–16).")}</span>
               </label>
             {:else if settingsTab === "obsidian"}
               <p class="dimtext">
-                Esporta i tuoi documenti come note <strong>Markdown</strong> in un vault <strong>Obsidian</strong> (funziona anche con Logseq, Zettlr, Foam…).
-                Ogni documento diventa una nota <code>.md</code> in <code>&lt;vault&gt;/Scriptorium/</code> con metadati, abstract, note, annotazioni e tag/autori come <code>[[wikilink]]</code> per il grafo.
-                L'esportazione è a senso unico (Scriptorium → vault) e sovrascrive le note esistenti con lo stesso titolo.
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                {@html t("Esporta i tuoi documenti come note <strong>Markdown</strong> in un vault <strong>Obsidian</strong> (funziona anche con Logseq, Zettlr, Foam…).")}
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                {@html t("Ogni documento diventa una nota <code>.md</code> in <code>&lt;vault&gt;/Scriptorium/</code> con metadati, abstract, note, annotazioni e tag/autori come <code>[[wikilink]]</code> per il grafo.")}
+                {t("L'esportazione è a senso unico (Scriptorium → vault) e sovrascrive le note esistenti con lo stesso titolo.")}
               </p>
               <label class="setlbl">
-                Cartella del vault
+                {t("Cartella del vault")}
                 <div class="airow">
-                  <input bind:value={obsidianVault} placeholder="(nessuna cartella scelta)" readonly />
-                  <button class="ghost small" onclick={pickObsidianVault}>Scegli…</button>
+                  <input bind:value={obsidianVault} placeholder={t("(nessuna cartella scelta)")} readonly />
+                  <button class="ghost small" onclick={pickObsidianVault}>{t("Scegli…")}</button>
                 </div>
               </label>
-              <p class="dimtext">Per esportare usa il pulsante <strong>→ Obsidian</strong> in alto: invia i documenti mostrati (o quelli selezionati).</p>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="dimtext">{@html t("Per esportare usa il pulsante <strong>→ Obsidian</strong> in alto: invia i documenti mostrati (o quelli selezionati).")}</p>
             {:else if settingsTab === "connector"}
-              <p class="dimtext">
-                Aggancia un PDF direttamente dal browser con <strong>un clic</strong>. Trascina una volta il pulsante
-                qui sotto nella <strong>barra dei preferiti</strong>; poi, quando sei su un PDF (o su una pagina che
-                ne contiene uno), cliccalo e il file finisce nella tua libreria. Perfetto con arXiv e i PDF ad
-                accesso aperto.
-              </p>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="dimtext">{@html t("Aggancia un PDF direttamente dal browser con <strong>un clic</strong>. Trascina una volta il pulsante qui sotto nella <strong>barra dei preferiti</strong>; poi, quando sei su un PDF (o su una pagina che ne contiene uno), cliccalo e il file finisce nella tua libreria. Perfetto con arXiv e i PDF ad accesso aperto.")}</p>
               <label class="setrow">
                 <input
                   type="checkbox"
                   checked={connectorInfo?.enabled ?? false}
                   onchange={(e) => toggleConnector(e.currentTarget.checked)}
                 />
-                Abilita il connettore (server locale su 127.0.0.1) — disattivato di default
+                {t("Abilita il connettore (server locale su 127.0.0.1) — disattivato di default")}
               </label>
               {#if connectorInfo}
                 <p class="sethint" style="margin-top:-6px;">
-                  {#if !connectorInfo.enabled}Disattivato — attiva l'interruttore per usare il bookmarklet.
-                  {:else if connectorInfo.running}✓ In ascolto sulla porta <code>{connectorInfo.port}</code>.
-                  {:else}⚠ Attivo, ma non ho trovato una porta libera: chiudi eventuali conflitti e riattiva.{/if}
+                  <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma; {porta} è un numero di porta del backend -->
+                  {#if !connectorInfo.enabled}{t("Disattivato — attiva l'interruttore per usare il bookmarklet.")}
+                  {:else if connectorInfo.running}{@html t("✓ In ascolto sulla porta <code>{porta}</code>.", { porta: connectorInfo.port })}
+                  {:else}{t("⚠ Attivo, ma non ho trovato una porta libera: chiudi eventuali conflitti e riattiva.")}{/if}
                 </p>
               {/if}
 
               <div class="setlbl">
-                Trascina nella barra dei preferiti
+                {t("Trascina nella barra dei preferiti")}
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px;">
                   <!-- svelte-ignore a11y_no_static_element_interactions a11y_missing_attribute -->
                   <a
                     href={bookmarklet}
                     draggable="true"
-                    onclick={(e) => { e.preventDefault(); status = "Trascina il pulsante nella barra dei preferiti (non cliccarlo qui)"; }}
+                    onclick={(e) => { e.preventDefault(); status = t("Trascina il pulsante nella barra dei preferiti (non cliccarlo qui)"); }}
                     style="display:inline-block;padding:8px 14px;background:var(--accent);color:var(--on-accent);border-radius:var(--r-pill,999px);font-weight:600;text-decoration:none;cursor:grab;user-select:none;"
-                    title="Trascinami nella barra dei preferiti del browser"
-                  >📎 Scriptorium</a>
-                  <button class="ghost small" onclick={copyBookmarklet} disabled={!bookmarklet}>Copia bookmarklet</button>
+                    title={t("Trascinami nella barra dei preferiti del browser")}
+                  >📎 Scriptorium</a><!-- i18n-exempt: nome proprio del programma -->
+                  <button class="ghost small" onclick={copyBookmarklet} disabled={!bookmarklet}>{t("Copia bookmarklet")}</button>
                 </div>
-                <span class="sethint">
-                  Non cliccarlo qui: <strong>trascinalo</strong> nella barra dei preferiti. In alternativa premi
-                  «Copia bookmarklet», crea un nuovo preferito e incolla il testo come <em>indirizzo/URL</em>.
-                </span>
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                <span class="sethint">{@html t("Non cliccarlo qui: <strong>trascinalo</strong> nella barra dei preferiti. In alternativa premi «Copia bookmarklet», crea un nuovo preferito e incolla il testo come <em>indirizzo/URL</em>.")}</span>
               </div>
 
-              <p class="sethint">
-                🔒 Il server ascolta solo in locale (<code>127.0.0.1</code>, non raggiungibile dalla rete) ed è protetto
-                da un <strong>token segreto</strong> incluso solo nel tuo bookmarklet: nessun altro sito può aggiungere
-                PDF. Il download passa dagli stessi controlli anti-abuso del resto dell'app (solo https, solo file PDF).
-                Se disattivi e riattivi il connettore, o cambia la porta, ri-trascina il bookmarklet aggiornato.
-              </p>
-              <p class="sethint">
-                Sui siti che bloccano le richieste dirette (es. <strong>GitHub</strong>), il bookmarklet apre una piccola
-                scheda di conferma di Scriptorium che completa l'aggancio. I link ai PDF nelle pagine GitHub
-                (<code>…/blob/…</code>) vengono riscritti automaticamente verso il file vero.
-              </p>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="sethint">{@html t("🔒 Il server ascolta solo in locale (<code>127.0.0.1</code>, non raggiungibile dalla rete) ed è protetto da un <strong>token segreto</strong> incluso solo nel tuo bookmarklet: nessun altro sito può aggiungere PDF. Il download passa dagli stessi controlli anti-abuso del resto dell'app (solo https, solo file PDF). Se disattivi e riattivi il connettore, o cambia la porta, ri-trascina il bookmarklet aggiornato.")}</p>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="sethint">{@html t("Sui siti che bloccano le richieste dirette (es. <strong>GitHub</strong>), il bookmarklet apre una piccola scheda di conferma di Scriptorium che completa l'aggancio. I link ai PDF nelle pagine GitHub (<code>…/blob/…</code>) vengono riscritti automaticamente verso il file vero.")}</p>
 
-              <h3 class="settitle">Appunti intelligenti</h3>
-              <label class="setrow" title="Quando torni su Scriptorium, se hai copiato un link che sembra un PDF compare un suggerimento «Aggancia»">
-                <input type="checkbox" bind:checked={clipAssist} /> Suggerisci l'aggancio dei link PDF copiati
+              <h3 class="settitle">{t("Appunti intelligenti")}</h3>
+              <label class="setrow" title={t("Quando torni su Scriptorium, se hai copiato un link che sembra un PDF compare un suggerimento «Aggancia»")}>
+                <input type="checkbox" bind:checked={clipAssist} /> {t("Suggerisci l'aggancio dei link PDF copiati")}
               </label>
-              <p class="sethint">
-                Il metodo più semplice: <strong>copia il link</strong> del PDF nel browser e torna su Scriptorium —
-                comparirà il suggerimento in basso a destra. Il testo copiato viene letto solo quando l'app torna in primo
-                piano e non lasciano mai il tuo computer; non parte nulla finché non clicchi «Aggancia».
-              </p>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="sethint">{@html t("Il metodo più semplice: <strong>copia il link</strong> del PDF nel browser e torna su Scriptorium — comparirà il suggerimento in basso a destra. Il testo copiato viene letto solo quando l'app torna in primo piano e non lasciano mai il tuo computer; non parte nulla finché non clicchi «Aggancia».")}</p>
             {:else if settingsTab === "mcp"}
-              <p class="dimtext">
-                Due compagni <strong>in sola lettura</strong> per usare la libreria da fuori (sicuri anche con l'app
-                aperta): la <strong>CLI</strong> per il terminale e il <strong>server MCP</strong> per Claude Desktop /
-                Claude Code e qualsiasi client MCP. Nessun servizio resta in ascolto: è il client ad avviare il
-                processo quando serve e a chiuderlo a fine sessione.
-              </p>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="dimtext">{@html t("Due compagni <strong>in sola lettura</strong> per usare la libreria da fuori (sicuri anche con l'app aperta): la <strong>CLI</strong> per il terminale e il <strong>server MCP</strong> per Claude Desktop / Claude Code e qualsiasi client MCP. Nessun servizio resta in ascolto: è il client ad avviare il processo quando serve e a chiuderlo a fine sessione.")}</p>
               {#if companions}
                 <div class="setlbl">
-                  Server MCP — registralo in Claude Code con questo comando
+                  {t("Server MCP — registralo in Claude Code con questo comando")}
                   <div class="airow">
                     <input readonly value={mcpAddCmd} />
-                    <button class="ghost small" onclick={() => copyPlain(mcpAddCmd, "Comando copiato ✓")}>Copia</button>
+                    <button class="ghost small" onclick={() => copyPlain(mcpAddCmd, t("Comando copiato ✓"))}>{t("Copia")}</button>
                   </div>
                   <span class="sethint">
-                    {companions.mcp_exists ? "✓ binario presente accanto all'app" : "⚠ binario non trovato — scarica scriptorium-mcp.exe dalle Release e mettilo accanto all'app"}
-                    — 9 strumenti: ricerca libreria, schede, BibTeX, appunti, ricerca appunti, progetti LaTeX, statistiche. Solo lettura.
+                    {companions.mcp_exists ? t("✓ binario presente accanto all'app") : t("⚠ binario non trovato — scarica scriptorium-mcp.exe dalle Release e mettilo accanto all'app")}
+                    {t("— 9 strumenti: ricerca libreria, schede, BibTeX, appunti, ricerca appunti, progetti LaTeX, statistiche. Solo lettura.")}
                   </span>
                 </div>
                 <div class="setlbl">
-                  Per Claude Desktop: aggiungi questa voce in <code>claude_desktop_config.json</code> → <code>"mcpServers"</code>
+                  <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                  {@html t("Per Claude Desktop: aggiungi questa voce in <code>claude_desktop_config.json</code> →")}
+                  <code>"mcpServers"</code><!-- i18n-exempt: chiave del file di configurazione -->
                   <div class="airow">
                     <input readonly value={mcpJsonSnippet} />
-                    <button class="ghost small" onclick={() => copyPlain(mcpJsonSnippet, "Config copiata ✓")}>Copia</button>
+                    <button class="ghost small" onclick={() => copyPlain(mcpJsonSnippet, t("Config copiata ✓"))}>{t("Copia")}</button>
                   </div>
                 </div>
                 <div class="setlbl">
-                  CLI da terminale (query, list, show, bib, notes, note, search-notes, projects, stats)
+                  {t("CLI da terminale (query, list, show, bib, notes, note, search-notes, projects, stats)")}
                   <div class="airow">
                     <input readonly value={companions.cli} />
-                    <button class="ghost small" onclick={() => copyPlain(companions!.cli, "Percorso copiato ✓")}>Copia</button>
+                    <button class="ghost small" onclick={() => copyPlain(companions!.cli, t("Percorso copiato ✓"))}>{t("Copia")}</button>
                   </div>
                   <span class="sethint">
-                    {companions.cli_exists ? "✓ binario presente accanto all'app" : "⚠ binario non trovato — scarica scriptorium-cli.exe dalle Release"}
-                    — <code>scriptorium-cli help</code> per tutti i comandi; output JSON, comodo per script e Claude Code.
+                    {companions.cli_exists ? t("✓ binario presente accanto all'app") : t("⚠ binario non trovato — scarica scriptorium-cli.exe dalle Release")}
+                    <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+                    {@html t("— <code>scriptorium-cli help</code> per tutti i comandi; output JSON, comodo per script e Claude Code.")}
                   </span>
                 </div>
               {:else}
-                <p class="dimtext">Carico i percorsi…</p>
+                <p class="dimtext">{t("Carico i percorsi…")}</p>
               {/if}
             {:else if settingsTab === "backup"}
-              <p class="dimtext">Salva una copia completa (database + PDF + miniature) in una cartella a tua scelta.</p>
-              <button class="ghost" onclick={doBackup}>Scegli cartella e salva backup…</button>
-              <p class="dimtext" style="margin-top:20px;">
-                <strong>Ripristina</strong> la libreria da un backup precedente. <strong>Sostituisce</strong> i dati attuali
-                (ne salva prima una copia di sicurezza) e riavvia l'app. I dati non vengono mai persi installando o
-                disinstallando: vivono in <code>%APPDATA%\com.pdfmanage.app</code>, separati dal programma.
-              </p>
-              <button class="ghost" onclick={doRestoreFolder}>Ripristina da cartella di backup…</button>
-              <button class="ghost" style="margin-top:8px;" onclick={doRestoreDbFile}>…o da un file .db (backup automatici in <code>backups\</code>)</button>
+              <p class="dimtext">{t("Salva una copia completa (database + PDF + miniature) in una cartella a tua scelta.")}</p>
+              <button class="ghost" onclick={doBackup}>{t("Scegli cartella e salva backup…")}</button>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="dimtext" style="margin-top:20px;">{@html t("<strong>Ripristina</strong> la libreria da un backup precedente. <strong>Sostituisce</strong> i dati attuali (ne salva prima una copia di sicurezza) e riavvia l'app. I dati non vengono mai persi installando o disinstallando: vivono in <code>{percorso}</code>, separati dal programma.", { percorso: "%APPDATA%\\com.pdfmanage.app" })}</p>
+              <button class="ghost" onclick={doRestoreFolder}>{t("Ripristina da cartella di backup…")}</button>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <button class="ghost" style="margin-top:8px;" onclick={doRestoreDbFile}>{@html t("…o da un file .db (backup automatici in <code>{cartella}</code>)", { cartella: "backups\\" })}</button>
             {:else}
-              <p class="dimtext">
-                <strong>Verifica e ripara metadati.</strong> Controlla ogni documento e corregge quelli il cui
-                titolo non corrisponde al PDF — di solito perché l'arricchimento ha pescato il DOI di un
-                <em>lavoro citato</em> invece di quello del documento. I paper <strong>arXiv</strong> recuperano
-                i dati corretti da arXiv (anche quelli ancora senza metadati); per gli altri il titolo viene
-                ricavato dalla prima riga del PDF. I documenti già corretti non vengono toccati.
-                È sicuro e ripetibile; può richiedere fino a un minuto.
-              </p>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="dimtext">{@html t("<strong>Verifica e ripara metadati.</strong> Controlla ogni documento e corregge quelli il cui titolo non corrisponde al PDF — di solito perché l'arricchimento ha pescato il DOI di un <em>lavoro citato</em> invece di quello del documento. I paper <strong>arXiv</strong> recuperano i dati corretti da arXiv (anche quelli ancora senza metadati); per gli altri il titolo viene ricavato dalla prima riga del PDF. I documenti già corretti non vengono toccati. È sicuro e ripetibile; può richiedere fino a un minuto.")}</p>
               <button class="ghost" onclick={repairMeta} disabled={repairing || docs.length === 0}>
-                {repairing ? "Riparazione in corso…" : "Verifica e ripara metadati"}
+                {repairing ? t("Riparazione in corso…") : t("Verifica e ripara metadati")}
               </button>
               {#if repairMsg}<p class="sethint" style="margin-top:8px;">{repairMsg}</p>{/if}
 
-              <p class="dimtext" style="margin-top:20px;">
-                <strong>Plancia — registro su file.</strong> La Plancia (icona tachimetro) mostra in tempo reale i
-                processi interni; qui puoi far scrivere lo stesso registro anche su file, uno al giorno
-                (conservati gli ultimi 14), utile per capire a posteriori cosa è successo.
-              </p>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- stringa letterale del programma, nessun dato dell'utente -->
+              <p class="dimtext" style="margin-top:20px;">{@html t("<strong>Plancia — registro su file.</strong> La Plancia (icona tachimetro) mostra in tempo reale i processi interni; qui puoi far scrivere lo stesso registro anche su file, uno al giorno (conservati gli ultimi 14), utile per capire a posteriori cosa è successo.")}</p>
               <label class="setrow" style="display:flex;align-items:center;gap:8px;">
                 <input type="checkbox" checked={pulseLog} onchange={togglePulseLog} />
-                Registra l'attività della Plancia su file
+                {t("Registra l'attività della Plancia su file")}
               </label>
               {#if pulseLog && pulseLogDir}
                 <p class="sethint">
-                  I file sono in <code>{pulseLogDir}</code>
-                  <button class="linklike" onclick={() => void pulseRevealLogs()}>apri cartella</button>
+                  {t("I file sono in")} <code>{pulseLogDir}</code>
+                  <button class="linklike" onclick={() => void pulseRevealLogs()}>{t("apri cartella")}</button>
                 </p>
               {/if}
             {/if}
           </div>
         </div>
         <div class="modactions">
-          <button class="ghost" onclick={() => (settingsModal = false)}>Annulla</button>
-          <button class="primary" onclick={saveSettings}>Salva</button>
+          <button class="ghost" onclick={() => (settingsModal = false)}>{t("Annulla")}</button>
+          <button class="primary" onclick={saveSettings}>{t("Salva")}</button>
         </div>
       </div>
     </div>
@@ -8664,6 +8729,8 @@
   .tfmode button.active { background: var(--accent); color: var(--on-accent); }
   .empty { text-align: center; color: var(--faint); padding: 100px 20px; }
   .empty .big { font-size: 20px; color: var(--dim); margin-bottom: 6px; font-family: var(--serif); }
+  .emptyhits { list-style: none; margin: 4px 0 0; padding: 0; }
+  .emptyhits li { margin: 2px 0; }
   .grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--grid-min, 180px), 1fr));
     gap: 18px; padding: 22px;
@@ -8844,17 +8911,14 @@
   }
   .helptabs button:hover { color: var(--accent); }
   .helptabs button.active { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent); }
-  .faq { margin: 0; }
-  .faq dt { font-size: 13px; font-weight: 600; color: var(--text); margin-top: 10px; }
-  .faq dd { margin: 2px 0 0; font-size: 13px; line-height: 1.5; color: var(--dim); }
-  .helpsec { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
-  .helpsec h3 { font-size: 14px; font-family: var(--serif); margin: 0 0 8px; color: var(--text); }
-  .helpsec ul { margin: 0; padding-left: 18px; }
-  .helpsec li { font-size: 13px; line-height: 1.55; color: var(--text); margin: 4px 0; }
-  .kbdtable { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  .kbdtable td { padding: 4px 8px; font-size: 12.5px; border-bottom: 1px solid var(--border-soft); color: var(--dim); }
-  .kbdtable td:first-child { white-space: nowrap; width: 1%; }
-  .helpwin kbd {
+  /* .faq, .helpsec e .kbdtable sono migrate in $lib/help/HelpProse.svelte
+     insieme al markup che stilavano: questo <style> e' scoped, e un componente
+     non eredita la classe di scoping della pagina. */
+  /* `:global(kbd)` e non `kbd`: i <kbd> ora nascono in HelpProse (e uno
+     nell'occhiello, che passa da {@html}), quindi non portano la classe di
+     scoping — l'antenato .helpwin, che invece e' markup di questa pagina, basta
+     a tenere la regola circoscritta alla finestra della guida. */
+  .helpwin :global(kbd) {
     background: var(--panel); border: 1px solid var(--border); border-radius: 5px;
     padding: 1px 6px; font-family: ui-monospace, monospace; font-size: 12px; color: var(--text);
   }
@@ -9163,6 +9227,17 @@
   }
   .setmodal h2 { margin: 0 0 14px; font-size: 18px; font-family: var(--serif); font-weight: 600; }
   .setbody { display: flex; gap: 18px; flex: 1; min-height: 0; }
+  /* Scelta della lingua: due pulsanti grandi, non un menu a tendina — sono due
+     opzioni e devono essere leggibili entrambe senza aprire nulla. */
+  .langpick { display: flex; gap: 10px; margin: 12px 0 4px; }
+  .langbtn {
+    flex: 1; padding: 12px 16px; font-size: 14px; cursor: pointer;
+    background: var(--field); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--r-sm);
+    transition: border-color var(--ease), background var(--ease);
+  }
+  .langbtn:hover { border-color: var(--accent); }
+  .langbtn.on { background: var(--accent-soft); border-color: var(--accent); font-weight: 600; }
   .setnav { display: flex; flex-direction: column; gap: 3px; width: 150px; flex-shrink: 0; }
   .setnavitem {
     text-align: left; background: transparent; border: 1px solid transparent; color: var(--dim);
@@ -9644,7 +9719,9 @@
   .notehit.anno .nhnote { font-size: 12px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .refdoibar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; }
   .refdoibar .dimtext { margin: 0; }
-  .wikiintro code { background: var(--accent-soft); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+  /* :global perché il testo di questi paragrafi arriva da {@html t(…)}: il
+     contenuto iniettato non riceve la classe di scoping di Svelte. */
+  .wikiintro :global(code) { background: var(--accent-soft); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
 
   /* ===== Esplora citazioni: mappa a due ali + indicatore in-libreria ===== */
   .libdot {

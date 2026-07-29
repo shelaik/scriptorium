@@ -336,6 +336,7 @@ pub fn run() {
             commands::compile_project,
             commands::reveal_project_dir,
             commands::check_update,
+            commands::set_ui_lang,
             commands::release_notes_since,
             commands::last_seen_version,
             commands::mark_version_seen,

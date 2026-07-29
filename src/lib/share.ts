@@ -2,7 +2,10 @@
 // link, so we share the real PDF by copying it to the clipboard (the user pastes
 // it with Ctrl+V) and opening the target app with a pre-filled message. Outlook
 // desktop is special-cased to attach the file directly.
-import { invoke } from "@tauri-apps/api/core";
+// `invoke` viene da $lib/api (non da Tauri): e' l'imbuto che traduce i messaggi
+// d'errore del backend nella lingua scelta.
+import { invoke } from "$lib/api";
+import { t, tp } from "$lib/i18n/index.svelte";
 
 export type ShareTarget = "whatsapp" | "teams" | "gmail" | "outlook";
 
@@ -59,16 +62,21 @@ export async function shareTo(
   label: string,
   link?: string | null,
 ): Promise<ShareOutcome> {
-  if (!ids.length) return { ok: false, note: "Niente da condividere" };
-  const subject = label || "Documento PDF";
+  if (!ids.length) return { ok: false, note: t("Niente da condividere") };
+  // Il messaggio che parte DAVVERO verso WhatsApp/Teams/Gmail segue la lingua
+  // dell'interfaccia: e' effimero e non resta scritto da nessuna parte. Senza
+  // questo l'oggetto usciva tradotto e il corpo no («Ti condivido: PDF document»).
+  const subject = label || t("Documento PDF");
   // Include the paper's original link (DOI) so the recipient can open it directly.
-  const body = `Ti condivido: ${subject}` + (link && link.trim() ? `\n${link.trim()}` : "");
+  const body =
+    t("Ti condivido: {oggetto}", { oggetto: subject }) +
+    (link && link.trim() ? `\n${link.trim()}` : "");
 
   // Outlook desktop, single document: attach the file directly.
   if (target === "outlook" && ids.length === 1) {
     try {
       await invoke<void>("share_via_outlook", { id: ids[0] });
-      return { ok: true, note: "Outlook: PDF allegato a una nuova email" };
+      return { ok: true, note: t("Outlook: PDF allegato a una nuova email") };
     } catch {
       // Outlook desktop not installed — fall back to webmail + clipboard below.
     }
@@ -78,10 +86,10 @@ export async function shareTo(
   await openExternal(composeUrl(target, subject, body));
 
   if (copied === 0) {
-    return { ok: true, note: "App aperta. Nessun PDF allegabile (riferimenti senza file)." };
+    return { ok: true, note: t("App aperta. Nessun PDF allegabile (riferimenti senza file).") };
   }
   const missing = ids.length - copied;
-  const tail = missing > 0 ? ` (${missing} senza file saltati)` : "";
-  const verb = copied > 1 ? `${copied} PDF copiati` : "PDF copiato";
-  return { ok: true, note: `${verb}: incolla nella conversazione con Ctrl+V${tail}` };
+  const tail = missing > 0 ? t(" ({n} senza file saltati)", { n: missing }) : "";
+  const verb = tp(copied, "PDF copiato", "{n} PDF copiati", { n: copied });
+  return { ok: true, note: t("{verbo}: incolla nella conversazione con Ctrl+V{coda}", { verbo: verb, coda: tail }) };
 }

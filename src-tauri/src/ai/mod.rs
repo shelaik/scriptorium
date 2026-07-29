@@ -8,6 +8,9 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+/// In che lingua l'AI deve rispondere (manopola separata da quella dell'interfaccia).
+pub mod lang;
+
 /// HTTP client with a long timeout — local LLM generation can be slow on CPU.
 pub fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()

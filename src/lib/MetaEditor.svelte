@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getDocumentMeta, updateDocumentMetadata, type EditableMeta } from "$lib/api";
+  import { t } from "$lib/i18n/index.svelte";
 
   let {
     id,
@@ -29,7 +30,7 @@
       m = { ...d };
       authorsText = (d.authors ?? []).join("\n");
     } catch (e) {
-      error = "Errore caricamento: " + e;
+      error = t("Errore caricamento: {err}", { err: String(e) });
     } finally {
       loading = false;
     }
@@ -62,29 +63,31 @@
 <div class="back" onmousedown={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="modal" onclick={(e) => e.stopPropagation()}>
-    <h2>Modifica metadati</h2>
+    <h2>{t("Modifica metadati")}</h2>
     {#if loading}
-      <p class="dim">Caricamento…</p>
+      <p class="dim">{t("Caricamento…")}</p>
     {:else}
-      <label>Titolo<input bind:value={m.title} /></label>
+      <label>{t("Titolo")}<input bind:value={m.title} /></label>
       <label>
-        Autori (uno per riga)
-        <textarea rows="4" bind:value={authorsText} placeholder="Nome Cognome"></textarea>
+        {t("Autori (uno per riga)")}
+        <textarea rows="4" bind:value={authorsText} placeholder={t("Nome Cognome")}></textarea>
       </label>
       <div class="row2">
-        <label>Anno<input type="number" bind:value={m.year} /></label>
+        <label>{t("Anno")}<input type="number" bind:value={m.year} /></label>
+        <!-- i18n-exempt: DOI e' una sigla, identica in inglese -->
         <label>DOI<input bind:value={m.doi} /></label>
       </div>
-      <label>Rivista / Venue<input bind:value={m.venue} /></label>
+      <label>{t("Rivista / Venue")}<input bind:value={m.venue} /></label>
+      <!-- i18n-exempt: «Abstract» e' gia' la parola inglese, identica nelle due lingue -->
       <label>Abstract<textarea rows="5" bind:value={m.abstract_text}></textarea></label>
-      <label>Nota del documento<textarea rows="4" bind:value={m.notes} placeholder="La tua nota su questo paper (diversa dagli Appunti .md)"></textarea></label>
+      <label>{t("Nota del documento")}<textarea rows="4" bind:value={m.notes} placeholder={t("La tua nota su questo paper (diversa dagli Appunti .md)")}></textarea></label>
       {#if m.summary}
-        <label>Riassunto (AI)<textarea rows="5" readonly value={m.summary}></textarea></label>
+        <label>{t("Riassunto (AI)")}<textarea rows="5" readonly value={m.summary}></textarea></label>
       {/if}
       {#if error}<p class="err">{error}</p>{/if}
       <div class="actions">
-        <button class="ghost" onclick={onClose}>Annulla</button>
-        <button class="primary" onclick={save} disabled={saving}>{saving ? "…" : "Salva"}</button>
+        <button class="ghost" onclick={onClose}>{t("Annulla")}</button>
+        <button class="primary" onclick={save} disabled={saving}>{saving ? "…" : t("Salva")}</button>
       </div>
     {/if}
   </div>

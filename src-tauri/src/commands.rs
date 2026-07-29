@@ -3708,11 +3708,11 @@ async fn ask_library_inner(
         return Err("Scrivi una domanda".into());
     }
     let cache = embed_cache_dir(&app);
-    let (enabled, provider, url, model, gpu, ollama_url) = {
+    let (enabled, provider, url, model, gpu, ollama_url, lang) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
         let c = ai_config(&conn);
-        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), c.embed_gpu, c.ollama_url.clone())
+        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), c.embed_gpu, c.ollama_url.clone(), c.lang)
     };
     if !enabled {
         return Err("Le funzioni AI sono disattivate (abilitale nelle Impostazioni)".into());
@@ -3895,8 +3895,14 @@ async fn ask_library_inner(
             relation: r.relation.to_string(),
         });
     }
-    let prompt = format!(
-        "Sei un assistente di ricerca. Rispondi alla DOMANDA usando SOLO i passaggi numerati qui sotto, in italiano, in modo chiaro e conciso. Dopo ogni affermazione cita la fonte tra parentesi quadre, es. [1] o [2][3]. Se i passaggi non contengono la risposta, dillo onestamente senza inventare.\n\nDOMANDA: {question}\n\nPASSAGGI:\n{context}\nRISPOSTA (in italiano, con citazioni [n]):"
+    // La coda «RISPOSTA (…):» e' un prefisso di completamento, non un'istruzione:
+    // orienta il modello a partire dalla risposta. Va nella lingua di uscita.
+    let prompt = ai::lang::with_lang(
+        lang,
+        &format!(
+            "Sei un assistente di ricerca. Rispondi alla DOMANDA usando SOLO i passaggi numerati qui sotto, in modo chiaro e conciso. Dopo ogni affermazione cita la fonte tra parentesi quadre, es. [1] o [2][3]. Se i passaggi non contengono la risposta, dillo onestamente senza inventare.\n\nDOMANDA: {question}\n\nPASSAGGI:\n{context}\n{} (con citazioni [n]):",
+            lang.answer_label()
+        ),
     );
     let client = ai::client().map_err(|e| e.to_string())?;
     let app3 = app.clone();
@@ -8886,6 +8892,11 @@ pub struct AiSettings {
     pub embed_gpu: bool,
     /// Embedding batch size (0 = auto: 64 on GPU, 16 on CPU). Larger = faster on strong GPUs.
     pub embed_batch: i64,
+    /// Lingua delle risposte AI come l'utente l'ha scelta: `auto` | `it` | `en`.
+    pub lang: String,
+    /// La stessa, gia' risolta (`auto` sciolto nella lingua dell'interfaccia):
+    /// serve al pannello per dire «Automatica (inglese)» invece del solo «Automatica».
+    pub lang_effective: String,
 }
 
 /// Resolved AI configuration read from the settings table.
@@ -8897,6 +8908,11 @@ struct AiConfig {
     model: String,
     embed_gpu: bool,
     embed_batch: i64,
+    /// Lingua in cui il modello deve RISPONDERE, gia' risolta (`auto` sciolto).
+    /// Sta qui, accanto a provider e modello, perche' e' della stessa natura:
+    /// una preferenza persistente, non un argomento della singola chiamata —
+    /// e ogni comando AI legge comunque questa struttura.
+    lang: ai::lang::Lang,
 }
 
 impl AiConfig {
@@ -8933,6 +8949,18 @@ fn ai_config(conn: &Connection) -> AiConfig {
             .unwrap_or_else(|| "llama3.2:3b".to_string()),
         embed_gpu: setting(conn, "embed_gpu").as_deref() == Some("1"),
         embed_batch: setting(conn, "embed_batch").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+        lang: resolve_ai_lang(conn),
+    }
+}
+
+/// Scioglie la manopola della lingua AI: una scelta esplicita vince; `auto` (o
+/// assente) segue la lingua dell'interfaccia, che il frontend rispecchia in
+/// `ui_lang` perche' vive in `localStorage` e il Rust non la vedrebbe.
+fn resolve_ai_lang(conn: &Connection) -> ai::lang::Lang {
+    match setting(conn, "ai_lang").as_deref() {
+        Some("it") => ai::lang::Lang::It,
+        Some("en") => ai::lang::Lang::En,
+        _ => ai::lang::Lang::from_code(&setting(conn, "ui_lang").unwrap_or_default()),
     }
 }
 
@@ -8948,7 +8976,26 @@ pub fn get_ai_settings(state: State<'_, AppState>) -> Result<AiSettings, String>
         model: c.model,
         embed_gpu: c.embed_gpu,
         embed_batch: c.embed_batch,
+        // Grezzo per il selettore, risolto per l'etichetta.
+        lang: setting(&conn, "ai_lang").unwrap_or_else(|| "auto".into()),
+        lang_effective: c.lang.code().to_string(),
     })
+}
+
+/// Rispecchia in `settings` la lingua dell'interfaccia, che vive in
+/// `localStorage` e che il Rust non vedrebbe. Comando separato da
+/// `set_ai_settings` perche' la lingua si cambia anche fuori dal pannello, e
+/// perche' e' cio' che permette alla manopola AI di stare su «automatica».
+#[tauri::command]
+pub fn set_ui_lang(state: State<'_, AppState>, lang: String) -> Result<(), String> {
+    let code = ai::lang::Lang::from_code(&lang).code();
+    let conn = state.db.lock();
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('ui_lang', ?1)",
+        params![code],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8962,6 +9009,7 @@ pub fn set_ai_settings(
     model: String,
     embed_gpu: bool,
     embed_batch: i64,
+    lang: String,
 ) -> Result<(), String> {
     let conn = state.db.lock();
     let put = |k: &str, v: &str| {
@@ -8977,6 +9025,13 @@ pub fn set_ai_settings(
     put("ai_model", model.trim()).map_err(|e| e.to_string())?;
     put("embed_gpu", if embed_gpu { "1" } else { "0" }).map_err(|e| e.to_string())?;
     put("embed_batch", &embed_batch.clamp(0, 512).to_string()).map_err(|e| e.to_string())?;
+    // Valore chiuso: qualunque altra cosa torna ad «automatica».
+    let lang = match lang.trim() {
+        "it" => "it",
+        "en" => "en",
+        _ => "auto",
+    };
+    put("ai_lang", lang).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -9087,12 +9142,12 @@ pub async fn summarize_document(app: AppHandle, id: i64) -> Result<String, Strin
 }
 
 async fn summarize_document_inner(app: AppHandle, id: i64) -> Result<String, String> {
-    let (enabled, provider, url, model, title, text) = {
+    let (enabled, provider, url, model, title, text, lang) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
         let c = ai_config(&conn);
         let (title, text) = fetch_doc_text(&conn, id)?;
-        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), title, text)
+        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), title, text, c.lang)
     };
     if !enabled {
         return Err("Le funzioni AI sono disattivate (abilitale nelle Impostazioni)".into());
@@ -9101,8 +9156,11 @@ async fn summarize_document_inner(app: AppHandle, id: i64) -> Result<String, Str
     if text.trim().is_empty() {
         return Err("Nessun testo disponibile da riassumere per questo documento".into());
     }
-    let prompt = format!(
-        "Sei un assistente accademico. Riassumi in italiano, in 4-6 frasi chiare e concrete, il seguente articolo. Rispondi solo con il riassunto, senza preamboli.\n\nTitolo: {title}\n\nTesto:\n{text}"
+    let prompt = ai::lang::with_lang(
+        lang,
+        &format!(
+            "Sei un assistente accademico. Riassumi in 4-6 frasi chiare e concrete il seguente articolo. Rispondi solo con il riassunto, senza preamboli.\n\nTitolo: {title}\n\nTesto:\n{text}"
+        ),
     );
     let client = ai::client().map_err(|e| e.to_string())?;
     let summary = ai::generate(&client, &provider, &url, &model, &prompt, 360)
@@ -9135,7 +9193,7 @@ pub async fn ai_explain(
     doc_id: Option<i64>,
     req: Option<String>,
 ) -> Result<String, String> {
-    let (enabled, provider, url, model, doc_title) = {
+    let (enabled, provider, url, model, doc_title, lang) = {
         let conn = state.db.lock();
         let c = ai_config(&conn);
         // Optional context: the title of the document the passage comes from.
@@ -9149,7 +9207,7 @@ pub async fn ai_explain(
                 .flatten(),
             None => None,
         };
-        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), doc_title)
+        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), doc_title, c.lang)
     };
     if !enabled {
         return Err("Le funzioni AI sono disattivate (abilitale nelle Impostazioni)".into());
@@ -9163,19 +9221,29 @@ pub async fn ai_explain(
         .map(|t| format!("Dal documento: {t}\n\n"))
         .unwrap_or_default();
     let prompt = match task.as_str() {
-        "explain" => format!(
-            "{context}Spiega in italiano, in modo chiaro e conciso (massimo 150 parole circa), il seguente passaggio, definendo brevemente i termini tecnici. Rispondi solo con la spiegazione, senza preamboli.\n\nPassaggio:\n{text}"
+        "explain" => ai::lang::with_lang(
+            lang,
+            &format!(
+                "{context}Spiega in modo chiaro e conciso (massimo 150 parole circa) il seguente passaggio, definendo brevemente i termini tecnici. Rispondi solo con la spiegazione, senza preamboli.\n\nPassaggio:\n{text}"
+            ),
         ),
+        // «Traduci» e' l'unico caso in cui la lingua NON e' una direttiva ma il
+        // compito stesso: qui serve la lingua di DESTINAZIONE, non l'istruzione
+        // generica (che direbbe al modello di spiegare la traduzione in inglese).
         "translate" => format!(
-            "{context}Traduci in italiano il seguente passaggio, mantenendo la terminologia tecnica in lingua originale dove appropriato. Rispondi SOLO con la traduzione, senza spiegazioni né preamboli.\n\nPassaggio:\n{text}"
+            "{context}Traduci {} il seguente passaggio, mantenendo la terminologia tecnica in lingua originale dove appropriato. Rispondi SOLO con la traduzione, senza spiegazioni né preamboli.\n\nPassaggio:\n{text}",
+            lang.in_lang()
         ),
         "ask" => {
             let q = question.as_deref().map(str::trim).unwrap_or_default();
             if q.is_empty() {
                 return Err("Domanda mancante".into());
             }
-            format!(
-                "{context}Rispondi in italiano alla DOMANDA basandoti sul passaggio qui sotto, in modo chiaro e conciso. Se il passaggio non contiene la risposta, dillo onestamente senza inventare.\n\nDOMANDA: {q}\n\nPassaggio:\n{text}"
+            ai::lang::with_lang(
+                lang,
+                &format!(
+                    "{context}Rispondi alla DOMANDA basandoti sul passaggio qui sotto, in modo chiaro e conciso. Se il passaggio non contiene la risposta, dillo onestamente senza inventare.\n\nDOMANDA: {q}\n\nPassaggio:\n{text}"
+                ),
             )
         }
         other => return Err(format!("Operazione non supportata: {other}")),
@@ -12218,11 +12286,11 @@ async fn wiki_generate_inner(
         return Err("Scrivi un concetto (o usa il nome di un tag)".into());
     }
     let cache = embed_cache_dir(&app);
-    let (enabled, provider, url, model, gpu, ollama_url) = {
+    let (enabled, provider, url, model, gpu, ollama_url, lang) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
         let c = ai_config(&conn);
-        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), c.embed_gpu, c.ollama_url.clone())
+        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), c.embed_gpu, c.ollama_url.clone(), c.lang)
     };
     if !enabled {
         return Err("Le funzioni AI sono disattivate (abilitale nelle Impostazioni)".into());
@@ -12343,7 +12411,7 @@ async fn wiki_generate_inner(
         wiki_emit(&app, &concept, "estrazione", i, total);
         let mut claims: Vec<(String, Option<i64>)> = Vec::new();
         if !m.material.trim().is_empty() {
-            let prompt = wiki::extraction_prompt(&concept, &m.title, m.year, &m.material);
+            let prompt = wiki::extraction_prompt(lang, &concept, &m.title, m.year, &m.material);
             let out = ai::generate(&client, &provider, &url, &model, &prompt, 420)
                 .await
                 .map_err(|e| format!("{e:#}"))?;
@@ -12384,7 +12452,7 @@ async fn wiki_generate_inner(
         return Err("Generazione annullata".into());
     }
     wiki_emit(&app, &concept, "sintesi", materials.len(), total);
-    let mut page = ai::generate(&client, &provider, &url, &model, &wiki::synthesis_prompt(&concept, &blocks), 1100)
+    let mut page = ai::generate(&client, &provider, &url, &model, &wiki::synthesis_prompt(lang, &concept, &blocks), 1100)
         .await
         .map_err(|e| format!("{e:#}"))?;
     // Belt & braces: drop a leading H1 the model may add despite instructions.
@@ -12404,7 +12472,7 @@ async fn wiki_generate_inner(
     };
     if !missing.is_empty() && !cancelled(&app) {
         wiki_emit(&app, &concept, "copertura", materials.len(), total);
-        let repaired = ai::generate(&client, &provider, &url, &model, &wiki::repair_prompt(&concept, &page, &missing), 1300)
+        let repaired = ai::generate(&client, &provider, &url, &model, &wiki::repair_prompt(lang, &concept, &page, &missing), 1300)
             .await
             .map_err(|e| format!("{e:#}"))?;
         if repaired.len() > 200 && wiki::cited_ns(&repaired).len() >= wiki::cited_ns(&page).len() {
@@ -12565,18 +12633,20 @@ fn synth_docs(conn: &Connection, ids: &[i64], digit_focus: bool) -> Result<Vec<S
 }
 
 /// AI config + client, or the standard Italian "AI disabled" error.
-fn ai_ready(app: &AppHandle) -> Result<(reqwest::Client, String, String, String), String> {
-    let (enabled, provider, url, model) = {
+fn ai_ready(
+    app: &AppHandle,
+) -> Result<(reqwest::Client, String, String, String, ai::lang::Lang), String> {
+    let (enabled, provider, url, model, lang) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
         let c = ai_config(&conn);
-        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone())
+        (c.enabled, c.provider.clone(), c.active_url().to_string(), c.model.clone(), c.lang)
     };
     if !enabled {
         return Err("Le funzioni AI sono disattivate (abilitale nelle Impostazioni)".into());
     }
     let client = ai::client().map_err(|e| e.to_string())?;
-    Ok((client, provider, url, model))
+    Ok((client, provider, url, model, lang))
 }
 
 fn synth_sources(docs: &[SynthDoc]) -> Vec<ReviewSource> {
@@ -12610,7 +12680,7 @@ pub async fn compare_documents(app: AppHandle, ids: Vec<i64>) -> Result<AiDocRes
 }
 
 async fn compare_documents_inner(app: AppHandle, ids: Vec<i64>) -> Result<AiDocResult, String> {
-    let (client, provider, url, model) = ai_ready(&app)?;
+    let (client, provider, url, model, lang) = ai_ready(&app)?;
     let docs = {
         let state = app.state::<AppState>();
         let conn = state.db.lock();
@@ -12626,16 +12696,19 @@ async fn compare_documents_inner(app: AppHandle, ids: Vec<i64>) -> Result<AiDocR
         })
         .collect::<Vec<_>>()
         .join("\n\n=====\n\n");
-    let prompt = format!(
-        "Confronta in italiano i {n} paper qui sotto, usando SOLO il materiale fornito.\n\
-         Struttura richiesta (markdown):\n\
-         1. una tabella con colonna «Aspetto» e una colonna per paper (intestazioni [1], [2]…),\n\
-            righe: Obiettivo · Approccio/Metodo · Dati o dominio · Risultati chiave · Limiti;\n\
-            celle brevi (max ~15 parole); se il materiale non dice nulla scrivi \"—\";\n\
-         2. sezione \"## In sintesi\": 2-4 punti su cosa distingue ciascun paper e cosa aggiunge \
-            rispetto agli altri, citando [n];\n\
-         niente premesse, niente titolo iniziale, non inventare nulla.\n\n{blocks}",
-        n = docs.len()
+    let prompt = ai::lang::with_lang(
+        lang,
+        &format!(
+            "Confronta i {n} paper qui sotto, usando SOLO il materiale fornito.\n\
+             Struttura richiesta (markdown):\n\
+             1. una tabella con colonna «Aspetto» e una colonna per paper (intestazioni [1], [2]…),\n\
+                righe: Obiettivo · Approccio/Metodo · Dati o dominio · Risultati chiave · Limiti;\n\
+                celle brevi (max ~15 parole); se il materiale non dice nulla scrivi \"—\";\n\
+             2. sezione \"## In sintesi\": 2-4 punti su cosa distingue ciascun paper e cosa aggiunge \
+                rispetto agli altri, citando [n];\n\
+             niente premesse, niente titolo iniziale, non inventare nulla.\n\n{blocks}",
+            n = docs.len()
+        ),
     );
     let md = ai::generate(&client, &provider, &url, &model, &prompt, 900)
         .await
@@ -12658,7 +12731,7 @@ pub async fn generate_review(app: AppHandle, ids: Vec<i64>) -> Result<AiDocResul
 }
 
 async fn generate_review_inner(app: AppHandle, ids: Vec<i64>) -> Result<AiDocResult, String> {
-    let (client, provider, url, model) = ai_ready(&app)?;
+    let (client, provider, url, model, lang) = ai_ready(&app)?;
     {
         let state = app.state::<AppState>();
         state.wiki_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -12676,11 +12749,14 @@ async fn generate_review_inner(app: AppHandle, ids: Vec<i64>) -> Result<AiDocRes
         }
         wiki_emit(&app, "Rassegna", "estrazione", i, total);
         let year = d.year.map(|y| y.to_string()).unwrap_or_else(|| "s.d.".into());
-        let prompt = format!(
-            "Dal materiale del paper «{}» ({year}) estrai 4-6 affermazioni chiave su: contributo \
-             principale, metodo, risultati, limiti. Una per riga con \"- \", italiano, fattuali, \
-             SOLO dal materiale.\n\nMATERIALE:\n{}",
-            d.title, d.material
+        let prompt = ai::lang::with_lang(
+            lang,
+            &format!(
+                "Dal materiale del paper «{}» ({year}) estrai 4-6 affermazioni chiave su: contributo \
+                 principale, metodo, risultati, limiti. Una per riga con \"- \", fattuali, \
+                 SOLO dal materiale.\n\nMATERIALE:\n{}",
+                d.title, d.material
+            ),
         );
         let out = ai::generate(&client, &provider, &url, &model, &prompt, 420)
             .await
@@ -12688,14 +12764,17 @@ async fn generate_review_inner(app: AppHandle, ids: Vec<i64>) -> Result<AiDocRes
         blocks.push(format!("[{}] {} ({year})\n{}", i + 1, d.title, out.trim()));
     }
     wiki_emit(&app, "Rassegna", "sintesi", docs.len(), total);
-    let prompt = format!(
-        "Scrivi in italiano una breve rassegna della letteratura (stile \"related work\", 300-500 \
-         parole) basata ESCLUSIVAMENTE sulle affermazioni per paper qui sotto.\n\
-         Regole: organizza per temi (non paper per paper); confronta gli approcci; evidenzia \
-         disaccordi e lacune aperte; cita OGNI paper almeno una volta con [n] subito dopo le \
-         affermazioni che ne derivano; niente titolo iniziale, comincia con \"## Panorama\"; \
-         chiudi con \"## Lacune aperte\" (2-3 punti). Non inventare nulla.\n\n{}",
-        blocks.join("\n\n")
+    let prompt = ai::lang::with_lang(
+        lang,
+        &format!(
+            "Scrivi una breve rassegna della letteratura (stile \"related work\", 300-500 \
+             parole) basata ESCLUSIVAMENTE sulle affermazioni per paper qui sotto.\n\
+             Regole: organizza per temi (non paper per paper); confronta gli approcci; evidenzia \
+             disaccordi e lacune aperte; cita OGNI paper almeno una volta con [n] subito dopo le \
+             affermazioni che ne derivano; niente titolo iniziale, comincia con \"## Panorama\"; \
+             chiudi con \"## Lacune aperte\" (2-3 punti). Non inventare nulla.\n\n{}",
+            blocks.join("\n\n")
+        ),
     );
     let mut md = ai::generate(&client, &provider, &url, &model, &prompt, 1100)
         .await
@@ -12725,7 +12804,9 @@ pub async fn harvest_results(app: AppHandle, ids: Vec<i64>) -> Result<Vec<Vec<St
     if !(1..=8).contains(&ids.len()) {
         return Err("Seleziona da 1 a 8 documenti".into());
     }
-    let (client, provider, url, model) = ai_ready(&app)?;
+    // `_lang`: qui l'uscita non e' prosa ma una griglia di valori copiati dal
+    // paper (metodo | dataset | metrica | valore), quindi non ha una lingua.
+    let (client, provider, url, model, _lang) = ai_ready(&app)?;
     {
         let state = app.state::<AppState>();
         state.wiki_cancel.store(false, std::sync::atomic::Ordering::SeqCst);

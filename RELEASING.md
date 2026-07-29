@@ -23,7 +23,30 @@ vedono l'aggiornamento (nessun danno, ma nessun aggiornamento).
    `src-tauri/Cargo.toml`, `const APP_VERSION` in `src/routes/+page.svelte`.
 2. **Voce nel CHANGELOG**: `## X.Y.Z — Titolo`. È il testo che l'utente vedrà
    nel pannello di aggiornamento e, dopo il riavvio, nel riquadro «Novità».
-3. **Controlli**: `npm run check` (0 errori) e `cargo test --lib`.
+3. **Controlli**: `npm run check` (0 errori), `cargo test --lib`, e i due della
+   traduzione:
+
+   ```powershell
+   node scripts/i18n-check.mjs    # deve uscire 0
+   node scripts/i18n-drift.mjs <ultimo-tag>
+   ```
+
+   - `i18n-check` fallisce se ci sono chiavi **mancanti** (resterebbero in
+     italiano con l'interfaccia in inglese), **segnaposto disallineati** fra le
+     due lingue (un messaggio che perde il numero), o **attributi non avvolti** —
+     i `title=` e gli `aria-label`, che sono invisibili a un collaudo per
+     schermate e sono la parte più voluminosa del testo. Le voci **orfane** sono
+     solo un avviso: vuol dire che una stringa italiana è stata riscritta e la
+     sua traduzione è rimasta indietro.
+   - `i18n-drift` elenca le chiavi il cui testo italiano non compare più alla
+     lettera nel tag indicato. Serve alla rete di sicurezza del meccanismo:
+     **la chiave È la stringa italiana**, quindi in italiano `t(x)` restituisce
+     `x` e l'app deve restare identica. Ogni riga va giustificata (frammenti di
+     markup ricuciti, forma singolare nuova, riscrittura voluta) o è un difetto.
+
+   Regola che ne discende: **quando ritocchi un testo italiano, aggiorna la
+   chiave in `src/lib/i18n/en.ts`**, altrimenti quella frase smette
+   silenziosamente di essere tradotta.
 4. **Build firmata** — la variabile è indispensabile:
 
    ```powershell

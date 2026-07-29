@@ -2,6 +2,14 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.51 — Scriptorium parla anche inglese
+- **Italiano o inglese, si cambia in un clic** e senza riavviare: *Impostazioni → Lingua / Language*. La scelta è tua e resta — cambiare la lingua di Windows non cambia quella di Scriptorium. Aggiornando da una versione precedente **resti in italiano**: la lingua di sistema decide solo alla primissima apertura di un'installazione nuova.
+- **Tradotto tutto quello che leggi**: 2.325 voci — non solo i pulsanti, ma i **tooltip** (che dopo l'audit sono la documentazione vera dell'app), le etichette per i lettori di schermo, i messaggi di stato e di errore, la **guida completa** con le sue 7 schede e la FAQ, la Plancia, l'Archivio, il lettore, la Costellazione. Anche i messaggi che arrivano dal motore interno.
+- **Manopola separata per la lingua delle risposte dell'AI**, di default uguale all'interfaccia: si può leggere il programma in italiano e farsi riassumere i paper in inglese, o il contrario. I **tag automatici restano sempre in inglese**: sono un vocabolario condiviso e indicizzato, mescolare le lingue spaccherebbe in due la tua classificazione.
+- **La tua libreria non viene toccata.** Titoli, appunti, tag e citekey restano esattamente come li hai scritti: cambia solo il testo del programma. Anche i nomi dei file esportati, le intestazioni dentro gli appunti `.md` e le cartelle sul disco restano invariati, altrimenti cambiare lingua avrebbe cambiato i tuoi dati.
+- Date e ore seguono la lingua (in inglese `en-GB`, per non ribaltare giorno-mese-anno né passare all'orologio a 12 ore).
+- *Correzioni emerse dalla revisione*: la Plancia ora segue il cambio di lingua a finestra aperta; la Costellazione ridisegna le etichette; due conteggi della Plancia avevano perso il separatore delle migliaia; il messaggio di condivisione usciva metà tradotto.
+
 ## 0.9.50 — Preparativi per l'inglese (e quattro difetti che ne sono usciti)
 Nessun cambiamento visibile nell'uso quotidiano: è la base su cui poggerà il cambio di lingua. Misurando quanto testo contiene il programma sono emersi dei difetti che valeva la pena correggere subito, a prescindere.
 - **Le intestazioni della vista elenco non si sovrappongono più**: le celle troncavano coi puntini, le intestazioni no — e con la tabella a colonne fisse un'intestazione troppo larga finiva *sopra* la colonna accanto. La colonna «Anno» era al limite: allargata.

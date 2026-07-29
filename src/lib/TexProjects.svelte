@@ -10,6 +10,7 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { openInBrowser } from "$lib/share";
   import { fmtDayMonth } from "$lib/format";
+  import { t, tp } from "$lib/i18n/index.svelte";
   import {
     listProjects,
     createProject,
@@ -46,6 +47,8 @@
    *  progetto con Git — per esempio col ponte Git di Overleaf — e non vuole
    *  versionare i prodotti della compilazione. */
   const GITIGNORE = [
+    /* i18n-exempt: riga scritta dentro un file sul disco dell'utente (.gitignore),
+       versionabile con Git: tradurla cambierebbe il file, non l'interfaccia */
     "# Prodotti della compilazione LaTeX (Tectonic/latexmk)",
     "main.pdf",
     "*.aux",
@@ -67,25 +70,30 @@
       await writeProjectFile(current, ".gitignore", GITIGNORE);
       files = await projectFiles(current);
       errorMsg = "";
-      syncMsg = ".gitignore scritto nella cartella del progetto";
+      syncMsg = t(".gitignore scritto nella cartella del progetto");
     } catch (e) {
       errorMsg = String(e);
     }
   }
 
   /** Extensions we can open in the text editor (the rest is preview-only). */
-  const TEXT_EXT = ["tex", "bib", "sty", "cls", "bst", "txt", "md"];
+  const TEXT_EXT = ["tex", "bib", "sty", "cls", "bst", "txt", "md"]; /* i18n-exempt: estensioni di file, non testo */
 
-  /** Built-in templates (ids match projects::TEMPLATES in the backend). */
-  const TEMPLATES = [
-    { id: "articolo", label: "Articolo semplice" },
-    { id: "paper", label: "Paper (due colonne)" },
-    { id: "relazione", label: "Relazione / tesi" },
-    { id: "presentazione", label: "Presentazione (beamer)" },
-    { id: "minimale", label: "Minimale" },
-  ];
+  /** Built-in templates. Gli `id` sono protocollo col backend (`projects::TEMPLATES`
+   *  in `src-tauri/src/projects/mod.rs`) e finiscono anche nella cartella del
+   *  progetto: si traduce solo l'etichetta. Derivato, così le etichette seguono un
+   *  cambio di lingua a finestra aperta. */
+  let TEMPLATES = $derived([
+    /* i18n-exempt: gli id sono valori di protocollo col backend */
+    { id: "articolo", label: t("Articolo semplice") },
+    { id: "paper", label: t("Paper (due colonne)") },
+    { id: "relazione", label: t("Relazione / tesi") },
+    { id: "presentazione", label: t("Presentazione (beamer)") },
+    { id: "minimale", label: t("Minimale") },
+  ]);
 
   /** Official template galleries: download a .zip, then "Da .zip…". */
+  /* i18n-exempt: nomi propri (gallerie ed editori), identici nelle due lingue */
   const GALLERIES = [
     { label: "Overleaf Gallery", url: "https://www.overleaf.com/latex/templates" },
     { label: "IEEE", url: "https://template-selector.ieee.org/" },
@@ -104,7 +112,7 @@
   let loadToken = 0; // discards stale file loads after a quick switch
 
   let newName = $state("");
-  let newTemplate = $state("articolo");
+  let newTemplate = $state("articolo"); /* i18n-exempt: id di template, valore di protocollo */
   let creating = $state(false);
   let errorMsg = $state("");
 
@@ -253,7 +261,7 @@
     if (creating) return;
     const picked = await openDialog({
       multiple: false,
-      filters: [{ name: "Progetto o template LaTeX (.zip)", extensions: ["zip"] }],
+      filters: [{ name: t("Progetto o template LaTeX (.zip)"), extensions: ["zip"] /* i18n-exempt: estensione */ }],
     });
     if (typeof picked !== "string") return;
     let name = newName.trim();
@@ -306,7 +314,7 @@
     if (!current) return;
     try {
       const n = await syncProjectBib(current);
-      syncMsg = `refs.bib aggiornato: ${n} ${n === 1 ? "voce" : "voci"} dalla libreria`;
+      syncMsg = tp(n, "refs.bib aggiornato: 1 voce dalla libreria", "refs.bib aggiornato: {n} voci dalla libreria");
       files = await projectFiles(current);
       if (openRel === "refs.bib") {
         // Reload the buffer so the editor shows what is on disk now.
@@ -404,9 +412,32 @@
   }
 
   function fmtSize(n: number): string {
+    /* i18n-exempt: simboli di unità (B/KB/MB), identici nelle due lingue */
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
     return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  /** Frasi con un po' di marcatura in linea. Un `<code>` in mezzo a un paragrafo
+   *  spezzerebbe la frase in tre chiavi che nessuno puo' tradurre bene (l'inglese
+   *  non mette le parole nello stesso ordine); qui la frase resta UNA chiave e i
+   *  pezzi fra backtick / fra doppi asterischi tornano <code> e <strong> al
+   *  momento della resa. Stesso spirito dell'evidenziazione a segmenti della
+   *  palette: niente {@html}. */
+  type Piece = { text: string; tag: "" | "code" | "strong" };
+  function inline(s: string): Piece[] {
+    const out: Piece[] = [];
+    const re = /`([^`]+)`|\*\*([^*]+)\*\*/g;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(s)) !== null) {
+      if (m.index > last) out.push({ text: s.slice(last, m.index), tag: "" });
+      // I gruppi chiedono almeno un carattere, quindi la verita' distingue i due rami.
+      out.push(m[1] ? { text: m[1], tag: "code" } : { text: m[2], tag: "strong" });
+      last = m.index + m[0].length;
+    }
+    if (last < s.length) out.push({ text: s.slice(last), tag: "" });
+    return out;
   }
 
   function fmtWhen(ms: number | null): string {
@@ -419,29 +450,31 @@
   <aside class="texside">
     <div class="newproj">
       <input
-        placeholder="Nuovo progetto…"
+        placeholder={t("Nuovo progetto…")}
         bind:value={newName}
         onkeydown={(e) => e.key === "Enter" && doCreate()}
       />
-      <button class="tbtn" onclick={doCreate} disabled={creating || !newName.trim()}>Crea</button>
+      <button class="tbtn" onclick={doCreate} disabled={creating || !newName.trim()}>{t("Crea")}</button>
     </div>
     <div class="newopts">
       <select
         class="tplsel"
         bind:value={newTemplate}
-        title="Modello di partenza per «Crea»"
+        title={t("Modello di partenza per «Crea»")}
       >
-        {#each TEMPLATES as t (t.id)}
-          <option value={t.id}>{t.label}</option>
+        {#each TEMPLATES as tpl (tpl.id)}
+          <option value={tpl.id}>{tpl.label}</option>
         {/each}
       </select>
       <button
         class="tbtn"
         onclick={doCreateFromZip}
         disabled={creating}
-        title="Crea un progetto da uno .zip: il TUO progetto scaricato da Overleaf (Menu → Download → Source) oppure un template (IEEE, ACM…). Estrae tutto: .tex, immagini, classi e sottocartelle."
+        title={t(
+          "Crea un progetto da uno .zip: il TUO progetto scaricato da Overleaf (Menu → Download → Source) oppure un template (IEEE, ACM…). Estrae tutto: .tex, immagini, classi e sottocartelle.",
+        )}
       >
-        Da .zip (anche Overleaf)…
+        {t("Da .zip (anche Overleaf)…")}
       </button>
     </div>
     <div class="projlist">
@@ -456,20 +489,18 @@
         </button>
       {/each}
       {#if !projects.length}
-        <p class="hint">
-          Nessun progetto. Creane uno: nasce con un <code>main.tex</code> di partenza e un
-          <code>refs.bib</code> con le citazioni della tua libreria.
-        </p>
+        <p class="hint">{#each inline(t("Nessun progetto. Creane uno: nasce con un `main.tex` di partenza e un `refs.bib` con le citazioni della tua libreria.")) as seg}{#if seg.tag === "code"}<code>{seg.text}</code>{:else if seg.tag === "strong"}<strong>{seg.text}</strong>{:else}{seg.text}{/if}{/each}</p>
       {/if}
     </div>
     <div class="galleries">
-      <span class="galhead" title="Scarica un template ufficiale come .zip, poi «Da .zip…»">Modelli online:</span>
+      <span class="galhead" title={t("Scarica un template ufficiale come .zip, poi «Da .zip…»")}>{t("Modelli online:")}</span>
       {#each GALLERIES as g (g.url)}
+        <!-- i18n-exempt: g.label e' un nome proprio (Overleaf, IEEE, ACM…), il title e' l'URL -->
         <button class="gallink" onclick={() => openInBrowser(g.url)} title={g.url}>{g.label}</button>
       {/each}
     </div>
     {#if current}
-      <div class="filehead">File</div>
+      <div class="filehead">{t("File|intestazione dell'elenco dei file di un progetto")}</div>
       <div class="filelist">
         {#each files as f (f.rel)}
           <button
@@ -484,13 +515,16 @@
         {/each}
       </div>
       <button class="tbtn ghost" onclick={() => current && revealProjectDir(current)}>
-        Apri cartella
+        {t("Apri cartella")}
       </button>
       <button
         class="tbtn ghost"
         onclick={addGitignore}
-        title="Scrive un .gitignore adatto a LaTeX — utile se sincronizzi questa cartella con Git (per esempio col ponte Git di Overleaf)"
+        title={t(
+          "Scrive un .gitignore adatto a LaTeX — utile se sincronizzi questa cartella con Git (per esempio col ponte Git di Overleaf)",
+        )}
       >
+        <!-- i18n-exempt: nome del file scritto sul disco -->
         + .gitignore
       </button>
     {/if}
@@ -502,17 +536,17 @@
       <div class="edbar">
         <span class="edfile">{openRel}</span>
         <span class="edstate">
-          {#if saveState === "saving"}salvataggio…{:else if saveState === "saved"}salvato{:else if dirty}●{/if}
+          {#if saveState === "saving"}{t("salvataggio…")}{:else if saveState === "saved"}{t("salvato")}{:else if dirty}●{/if}
         </span>
         <span class="spacer"></span>
         <div class="citewrap">
-          <button class="tbtn" onclick={() => (citeOpen = !citeOpen)}>Cita</button>
+          <button class="tbtn" onclick={() => (citeOpen = !citeOpen)}>{t("Cita")}</button>
           {#if citeOpen}
             <div class="citepop">
               <!-- svelte-ignore a11y_autofocus -->
               <input
                 autofocus
-                placeholder="Cerca nella libreria…"
+                placeholder={t("Cerca nella libreria…")}
                 bind:value={citeQuery}
                 oninput={onCiteInput}
                 onkeydown={(e) => e.key === "Escape" && (citeOpen = false)}
@@ -520,14 +554,15 @@
               <div class="citehits">
                 {#each citeHits as d (d.id)}
                   <button class="citehit" disabled={!d.citekey} onclick={() => insertCite(d)}>
-                    <span class="chtitle">{d.title ?? "(senza titolo)"}</span>
+                    <span class="chtitle">{d.title ?? t("(senza titolo)")}</span>
                     <span class="chkey">
-                      {d.citekey ?? "senza citekey"}{d.year ? ` · ${d.year}` : ""}
+                      <!-- i18n-exempt: « · » e' un separatore, non testo -->
+                      {d.citekey ?? t("senza citekey")}{d.year ? ` · ${d.year}` : ""}
                     </span>
                   </button>
                 {/each}
                 {#if citeQuery.trim() && !citeHits.length}
-                  <p class="hint">Nessun risultato.</p>
+                  <p class="hint">{t("Nessun risultato.")}</p>
                 {/if}
               </div>
             </div>
@@ -535,18 +570,17 @@
         </div>
         {#if syncAsk}
           <span class="syncask">
-            Sovrascrivo <code>refs.bib</code> con tutta la libreria: quello che c'è ora, comprese le
-            voci scritte a mano, va perso.
-            <button class="tbtn small" onclick={() => (syncAsk = false)}>Annulla</button>
-            <button class="tbtn small primary" onclick={doSyncBib}>Sovrascrivi</button>
+            {#each inline(t("Sovrascrivo `refs.bib` con tutta la libreria: quello che c'è ora, comprese le voci scritte a mano, va perso.")) as seg}{#if seg.tag === "code"}<code>{seg.text}</code>{:else if seg.tag === "strong"}<strong>{seg.text}</strong>{:else}{seg.text}{/if}{/each}
+            <button class="tbtn small" onclick={() => (syncAsk = false)}>{t("Annulla")}</button>
+            <button class="tbtn small primary" onclick={doSyncBib}>{t("Sovrascrivi")}</button>
           </span>
         {:else}
-          <button class="tbtn" onclick={() => (syncAsk = true)} title="Riscrive refs.bib con tutta la libreria (chiede conferma)">
-            Sincronizza bibliografia
+          <button class="tbtn" onclick={() => (syncAsk = true)} title={t("Riscrive refs.bib con tutta la libreria (chiede conferma)")}>
+            {t("Sincronizza bibliografia")}
           </button>
         {/if}
         <button class="tbtn primary" onclick={doCompile} disabled={compiling}>
-          {compiling ? "Compilo…" : "Compila"}
+          {compiling ? t("Compilo…") : t("Compila")}
         </button>
       </div>
       {#if syncMsg}
@@ -554,23 +588,23 @@
       {/if}
       {#if compileRes && !compileRes.ok}
         <div class="note err">
-          Compilazione fallita{compileRes.tool ? ` (${compileRes.tool})` : ""}.
+          {compileRes.tool ? t("Compilazione fallita ({strumento}).", { strumento: compileRes.tool }) : t("Compilazione fallita.")}
           <button class="linkbtn" onclick={() => (showLog = !showLog)}>
-            {showLog ? "Nascondi log" : "Mostra log"}
+            {showLog ? t("Nascondi log") : t("Mostra log")}
           </button>
         </div>
       {:else if compileRes?.ok && !compileRes.clean}
         <div class="note warn">
-          PDF prodotto ({compileRes.tool}), ma con avvisi o errori nel log.
+          {t("PDF prodotto ({strumento}), ma con avvisi o errori nel log.", { strumento: compileRes.tool })}
           <button class="linkbtn" onclick={() => (showLog = !showLog)}>
-            {showLog ? "Nascondi log" : "Mostra log"}
+            {showLog ? t("Nascondi log") : t("Mostra log")}
           </button>
         </div>
       {:else if compileRes?.ok}
         <div class="note ok">
-          Compilato con {compileRes.tool}.
+          {t("Compilato con {strumento}.", { strumento: compileRes.tool })}
           <button class="linkbtn" onclick={() => (showLog = !showLog)}>
-            {showLog ? "Nascondi log" : "Mostra log"}
+            {showLog ? t("Nascondi log") : t("Mostra log")}
           </button>
         </div>
       {/if}
@@ -586,26 +620,18 @@
         spellcheck="false"
       ></textarea>
     {:else if current}
-      <div class="placeholder">Scegli un file dal pannello a sinistra.</div>
+      <div class="placeholder">{t("Scegli un file dal pannello a sinistra.")}</div>
     {:else}
       <div class="placeholder">
-        <h3>Progetti LaTeX</h3>
-        <p>
-          Un piccolo Overleaf locale: i progetti sono cartelle vere in
-          <code>projects/</code> dentro i dati dell'app — file <code>.tex</code> e
-          <code>.bib</code> tuoi, per sempre.
-        </p>
-        <p>
-          Per compilare serve un compilatore LaTeX di sistema: va bene
-          <strong>MiKTeX</strong> o TeX Live già installati, oppure
-          <strong>Tectonic</strong> (un solo eseguibile, scarica i pacchetti da solo):
-        </p>
+        <h3>{t("Progetti LaTeX")}</h3>
+        <p>{#each inline(t("Un piccolo Overleaf locale: i progetti sono cartelle vere in `projects/` dentro i dati dell'app — file `.tex` e `.bib` tuoi, per sempre.")) as seg}{#if seg.tag === "code"}<code>{seg.text}</code>{:else if seg.tag === "strong"}<strong>{seg.text}</strong>{:else}{seg.text}{/if}{/each}</p>
+        <p>{#each inline(t("Per compilare serve un compilatore LaTeX di sistema: va bene **MiKTeX** o TeX Live già installati, oppure **Tectonic** (un solo eseguibile, scarica i pacchetti da solo):")) as seg}{#if seg.tag === "code"}<code>{seg.text}</code>{:else if seg.tag === "strong"}<strong>{seg.text}</strong>{:else}{seg.text}{/if}{/each}</p>
+        <!-- i18n-exempt: comando da digitare, non testo -->
         <pre>winget install Tectonic.Tectonic</pre>
         <p>
-          Parti da un modello integrato («Crea») o scarica un template ufficiale
-          (Overleaf, IEEE, ACM…) come .zip e usa «Da .zip…».
+          {t("Parti da un modello integrato («Crea») o scarica un template ufficiale (Overleaf, IEEE, ACM…) come .zip e usa «Da .zip…».")}
         </p>
-        <p>Senza compilatore, editor + citazioni + bibliografia funzionano comunque.</p>
+        <p>{t("Senza compilatore, editor + citazioni + bibliografia funzionano comunque.")}</p>
       </div>
     {/if}
     {#if errorMsg}
@@ -619,14 +645,18 @@
   <!-- PDF preview -->
   <section class="texpreview">
     {#if previewPages}
-      <div class="pvhead">Anteprima · {previewPages} pagine{rendering ? " (rendering…)" : ""}</div>
+      <div class="pvhead">
+        {rendering
+          ? tp(previewPages, "Anteprima · 1 pagina (rendering…)", "Anteprima · {n} pagine (rendering…)")
+          : tp(previewPages, "Anteprima · 1 pagina", "Anteprima · {n} pagine")}
+      </div>
       <div class="pvscroll" bind:this={previewEl}></div>
     {:else}
       <div class="placeholder dimmed">
         {#if compiling}
-          Compilazione in corso…
+          {t("Compilazione in corso…")}
         {:else}
-          L'anteprima del PDF compilato apparirà qui dopo «Compila».
+          {t("L'anteprima del PDF compilato apparirà qui dopo «Compila».")}
         {/if}
       </div>
     {/if}

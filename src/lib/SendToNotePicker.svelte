@@ -1,6 +1,7 @@
 <script lang="ts">
   import { listNotes, createNote, appendToNote, deleteNote, type NoteMeta } from "$lib/api";
   import { buildQuoteBlock, type NotePayload } from "$lib/notecite";
+  import { t } from "$lib/i18n/index.svelte";
 
   let {
     payload,
@@ -27,8 +28,9 @@
   // Ignore the very click that opened us, so the popover doesn't self-close.
   let armed = $state(false);
   $effect(() => {
-    const t = setTimeout(() => (armed = true), 60);
-    return () => clearTimeout(t);
+    // Non chiamarlo `t`: ombreggerebbe la funzione di traduzione importata.
+    const timer = setTimeout(() => (armed = true), 60);
+    return () => clearTimeout(timer);
   });
   function guardedClose(e: MouseEvent) {
     if (!armed) return;
@@ -76,11 +78,11 @@
     busy = true;
     try {
       await appendToNote(slug, buildQuoteBlock(payload));
-      onstatus?.(`Aggiunto a «${title}» ✓`);
+      onstatus?.(t("Aggiunto a «{titolo}» ✓", { titolo: title }));
       ondone?.({ slug, title });
       onclose();
     } catch (e) {
-      onstatus?.("Errore: non aggiunto all'appunto (" + e + ")");
+      onstatus?.(t("Errore: non aggiunto all'appunto ({err})", { err: String(e) }));
       busy = false;
     }
   }
@@ -88,12 +90,13 @@
   async function toNew() {
     if (busy) return;
     busy = true;
+    /* i18n-exempt: dato su disco — «Appunti» diventa il NOME dell'appunto creato */
     const name = (payload.title || "Appunti").trim() || "Appunti";
     let slug: string | null = null;
     try {
       slug = await createNote(name);
       await appendToNote(slug, buildQuoteBlock(payload));
-      onstatus?.(`Creato l'appunto «${name}» ✓`);
+      onstatus?.(t("Creato l'appunto «{nome}» ✓", { nome: name }));
       ondone?.({ slug, title: name });
       onclose();
     } catch (e) {
@@ -105,7 +108,7 @@
           /* best-effort */
         }
       }
-      onstatus?.("Errore: appunto non creato (" + e + ")");
+      onstatus?.(t("Errore: appunto non creato ({err})", { err: String(e) }));
       busy = false;
     }
   }
@@ -114,30 +117,32 @@
 <svelte:window onclick={guardedClose} onkeydowncapture={onKeyCapture} />
 
 <div class="stnp" style="left:{box.x}px; top:{box.y}px; width:{box.w}px">
-  <div class="stnp-head">Manda agli Appunti</div>
+  <div class="stnp-head">{t("Manda agli Appunti")}</div>
 
   {#if currentNote}
     <button class="stnp-item open" disabled={busy} onclick={() => append(currentNote.slug, currentNote.title)}>
       <span class="stnp-dot">▸</span>
       <span class="stnp-t">{currentNote.title}</span>
-      <span class="stnp-tag">aperta</span>
+      <span class="stnp-tag">{t("aperta")}</span>
     </button>
   {/if}
 
   {#if recent.length}
-    <div class="stnp-lbl">Recenti</div>
+    <div class="stnp-lbl">{t("Recenti")}</div>
     {#each recent as n (n.slug)}
       <button class="stnp-item" disabled={busy} onclick={() => append(n.slug, n.title)}>
         <span class="stnp-t">{n.title}</span>
       </button>
     {/each}
   {:else if loaded && !currentNote}
-    <div class="stnp-empty">Nessun appunto ancora — creane uno qui sotto.</div>
+    <div class="stnp-empty">{t("Nessun appunto ancora — creane uno qui sotto.")}</div>
   {/if}
 
   <div class="stnp-sep"></div>
   <button class="stnp-item new" disabled={busy} onclick={toNew}>
-    ＋ Nuovo appunto{payload.title ? ` — «${payload.title}»` : ""}
+    {payload.title
+      ? t("＋ Nuovo appunto — «{titolo}»", { titolo: payload.title })
+      : t("＋ Nuovo appunto")}
   </button>
 </div>
 

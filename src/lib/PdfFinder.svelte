@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { pdfCandidates, attachPdfCandidate, attachFromUrl, type PdfProbe, type PdfCandidate } from "$lib/api";
   import { openInBrowser } from "$lib/share";
+  import { t, te } from "$lib/i18n/index.svelte";
 
   let { id, onClose, onApplied }: { id: number; onClose: () => void; onApplied: () => void } = $props();
 
@@ -17,7 +18,7 @@
     try {
       probe = await pdfCandidates(id);
     } catch (e) {
-      error = "Errore ricerca: " + e;
+      error = t("Errore ricerca: {err}", { err: String(e) });
     } finally {
       loading = false;
     }
@@ -30,6 +31,7 @@
     error = "";
     try {
       const r = await attachPdfCandidate(id, c);
+      /* i18n-exempt: "attached"/"duplicate"/"already" sono esiti di protocollo del comando Rust, non testo */
       if (r === "attached") {
         onApplied();
         return;
@@ -38,10 +40,12 @@
         idx,
         msg:
           r === "duplicate"
-            ? "Questo PDF è già in libreria su un'altra voce — meglio unire i duplicati"
+            ? t("Questo PDF è già in libreria su un'altra voce — meglio unire i duplicati")
             : r === "already"
-              ? "La voce ha già un PDF"
-              : "Nessun link scaricabile per questo candidato — prova il prossimo, o apri la pagina e allega il link qui sotto",
+              ? t("La voce ha già un PDF")
+              : t(
+                  "Nessun link scaricabile per questo candidato — prova il prossimo, o apri la pagina e allega il link qui sotto",
+                ),
       };
     } catch (e) {
       rowErr = { idx, msg: "" + e };
@@ -57,18 +61,19 @@
     error = "";
     try {
       const r = await attachFromUrl(id, u);
+      /* i18n-exempt: "attached"/"duplicate"/"already"/"not_pdf" sono esiti di protocollo del comando Rust, non testo */
       if (r === "attached") {
         onApplied();
         return;
       }
       error =
         r === "duplicate"
-          ? "Quel PDF è già in libreria (su un'altra voce)"
+          ? t("Quel PDF è già in libreria (su un'altra voce)")
           : r === "already"
-            ? "La voce ha già un PDF"
+            ? t("La voce ha già un PDF")
             : r === "not_pdf"
-              ? "Il link non è un PDF diretto (deve scaricare un .pdf)"
-              : "Non allegato: " + r;
+              ? t("Il link non è un PDF diretto (deve scaricare un .pdf)")
+              : t("Non allegato: {esito}", { esito: r });
     } catch (e) {
       error = "" + e;
     } finally {
@@ -83,7 +88,7 @@
   function authorsLine(c: PdfCandidate): string {
     if (!c.authors.length) return "";
     if (c.authors.length <= 4) return c.authors.join(", ");
-    return c.authors.slice(0, 4).join(", ") + " et al.";
+    return t("{autori} et al.", { autori: c.authors.slice(0, 4).join(", ") });
   }
 
   function onKey(e: KeyboardEvent) {
@@ -96,13 +101,13 @@
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 <div class="back" onmousedown={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-  <div class="modal" role="dialog" tabindex="-1" aria-label="Trova PDF" onclick={(e) => e.stopPropagation()}>
-    <h2>Trova PDF — candidati</h2>
+  <div class="modal" role="dialog" tabindex="-1" aria-label={t("Trova PDF")} onclick={(e) => e.stopPropagation()}>
+    <h2>{t("Trova PDF — candidati")}</h2>
     {#if loading}
-      <p class="dim">Cerco su arXiv, OpenAlex, Semantic Scholar e Crossref — per identificativo e per titolo…</p>
+      <p class="dim">{t("Cerco su arXiv, OpenAlex, Semantic Scholar e Crossref — per identificativo e per titolo…")}</p>
     {:else}
       {#if probe?.title}
-        <p class="ctx">Voce: <strong>{probe.title}</strong></p>
+        <p class="ctx">{t("Voce:")} <strong>{probe.title}</strong></p>
       {/if}
 
       {#if probe && probe.candidates.length}
@@ -110,19 +115,21 @@
           {#each probe.candidates as c, i (i)}
             <li class="cand" class:sure={c.sure}>
               <div class="candbody">
-                <p class="candtitle">{c.title ?? "Senza titolo"}</p>
+                <p class="candtitle">{c.title ?? t("Senza titolo")}</p>
                 {#if authorsLine(c)}<p class="candauth">{authorsLine(c)}</p>{/if}
+                <!-- i18n-exempt: «PDF», «DOI», «arXiv» sono nomi propri di formato/identificativo, identici in inglese; il separatore « · » unisce dati (anno, sede), non testo -->
                 <p class="candmeta">
                   {[c.year, c.venue].filter(Boolean).join(" · ")}
                   {#if c.pdf_url}<span class="idchip" title={c.pdf_url}>PDF</span>{/if}
                   {#if c.doi}<span class="idchip" title="DOI">{c.doi}</span>{/if}
                   {#if c.arxiv_id}<span class="idchip" title="arXiv">arXiv:{c.arxiv_id}</span>{/if}
                 </p>
-                <p class="candorigin">{c.origin}</p>
+                <!-- provenienza e indizi arrivano dal Rust gia' in italiano: si traducono qui, al consumatore -->
+                <p class="candorigin">{te(c.origin)}</p>
                 {#if c.sure || c.signals.length}
                   <p class="chips">
-                    {#if c.sure}<span class="chip surechip">corrispondenza sicura</span>{/if}
-                    {#each c.signals as s (s)}<span class="chip">{s}</span>{/each}
+                    {#if c.sure}<span class="chip surechip">{t("corrispondenza sicura")}</span>{/if}
+                    {#each c.signals as s (s)}<span class="chip">{te(s)}</span>{/each}
                   </p>
                 {/if}
                 {#if rowErr && rowErr.idx === i}
@@ -134,33 +141,35 @@
                   class={c.sure || i === 0 ? "primary small" : "ghost small"}
                   disabled={busyIdx !== null}
                   onclick={() => attach(c, i)}
-                  title="Scarica il PDF da questa fonte e allegalo a questa voce (senza duplicati)"
-                >{busyIdx === i ? "scarico…" : "Scarica e allega"}</button>
+                  title={t("Scarica il PDF da questa fonte e allegalo a questa voce (senza duplicati)")}
+                >{busyIdx === i ? t("scarico…") : t("Scarica e allega")}</button>
                 {#if landing(c)}
-                  <button class="ghost small" onclick={() => openInBrowser(landing(c)!)} title="Apri la pagina del paper nel browser per controllare">Apri pagina</button>
+                  <button class="ghost small" onclick={() => openInBrowser(landing(c)!)} title={t("Apri la pagina del paper nel browser per controllare")}>{t("Apri pagina")}</button>
                 {/if}
               </div>
             </li>
           {/each}
         </ul>
       {:else}
-        <p class="dim">Nessun candidato trovato online. Se conosci la pagina del paper, incolla qui sotto il link diretto al PDF.</p>
+        <p class="dim">{t("Nessun candidato trovato online. Se conosci la pagina del paper, incolla qui sotto il link diretto al PDF.")}</p>
       {/if}
 
       <div class="manual">
-        <label for="pfurl">Link diretto al PDF:</label>
+        <label for="pfurl">{t("Link diretto al PDF:")}</label>
         <input
           id="pfurl"
           bind:value={manualUrl}
-          placeholder="https://…/file.pdf (vanno bene anche le pagine GitHub /blob/)"
+          placeholder={t("https://…/file.pdf (vanno bene anche le pagine GitHub /blob/)")}
           onkeydown={(e) => e.key === "Enter" && attachManual()}
         />
-        <button class="ghost small" disabled={manualBusy || !manualUrl.trim()} onclick={attachManual}>{manualBusy ? "…" : "Allega"}</button>
+        <button class="ghost small" disabled={manualBusy || !manualUrl.trim()} onclick={attachManual}
+          >{manualBusy ? "…" /* i18n-exempt: puntini d'attesa, non testo */ : t("Allega")}</button
+        >
       </div>
 
       {#if error}<p class="err">{error}</p>{/if}
       <div class="actions">
-        <button class="ghost" onclick={onClose}>Chiudi</button>
+        <button class="ghost" onclick={onClose}>{t("Chiudi")}</button>
       </div>
     {/if}
   </div>

@@ -1,11 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  // `invoke` viene da $lib/api (non da Tauri): e' l'imbuto che traduce i
+  // messaggi d'errore del backend nella lingua scelta.
+  import { invoke } from "$lib/api";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import "@xterm/xterm/css/xterm.css";
+  import { t } from "$lib/i18n/index.svelte";
 
   // The parent handles confirmation + teardown (unmounting kills the PTY).
   let { onClose }: { onClose?: () => void } = $props();
@@ -83,12 +86,16 @@
       cwd = r.cwd;
       term.focus();
     } catch (e) {
-      term.writeln("Errore avvio terminale: " + e);
+      term.writeln(t("Errore avvio terminale: {err}", { err: String(e) }));
     }
   }
 
   async function changeFolder() {
-    const dir = await open({ directory: true, multiple: false, title: "Apri il terminale in questa cartella" });
+    const dir = await open({
+      directory: true,
+      multiple: false,
+      title: t("Apri il terminale in questa cartella"),
+    });
     if (typeof dir === "string") await reopen(dir);
   }
 
@@ -116,7 +123,12 @@
     });
     unlistenExit = await listen<{ epoch: number }>("term-exit", (e) => {
       if (e.payload.epoch < sess.epoch) return;
-      term?.writeln("\r\n\x1b[2m[sessione terminata — premi Riavvia per ripartire]\x1b[0m");
+      // Le sequenze ANSI restano fuori dalla chiave: sono resa, non testo.
+      term?.writeln(
+        "\r\n\x1b[2m" /* i18n-exempt: sequenza ANSI, non testo */ +
+          t("[sessione terminata — premi Riavvia per ripartire]") +
+          "\x1b[0m" /* i18n-exempt: sequenza ANSI, non testo */,
+      );
     });
     term.onData((d) => {
       invoke("term_write", { data: d }).catch(() => {});
@@ -164,12 +176,13 @@
   <div class="termbar">
     <span class="folder" title={cwd}>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <!-- i18n-exempt: segnaposto di attesa (puntini), non testo -->
       <span class="cwd">{cwd || "…"}</span>
     </span>
     <span class="spacer"></span>
-    <button class="tbtn" onclick={changeFolder} title="Apri il terminale in un'altra cartella">Cambia cartella…</button>
-    <button class="tbtn" onclick={() => reopen()} title="Termina e riavvia la sessione nella stessa cartella">Riavvia</button>
-    <button class="tbtn close" onclick={() => onClose?.()} title="Chiudi il terminale">✕ Chiudi</button>
+    <button class="tbtn" onclick={changeFolder} title={t("Apri il terminale in un'altra cartella")}>{t("Cambia cartella…")}</button>
+    <button class="tbtn" onclick={() => reopen()} title={t("Termina e riavvia la sessione nella stessa cartella")}>{t("Riavvia")}</button>
+    <button class="tbtn close" onclick={() => onClose?.()} title={t("Chiudi il terminale")}>✕ {t("Chiudi")}</button>
   </div>
   <div class="termhost" bind:this={container}></div>
 </div>

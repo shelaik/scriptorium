@@ -1,5 +1,9 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
+  import { t, tp } from "$lib/i18n/index.svelte";
+
+  /* i18n-exempt: separatore tipografico fra frammenti autonomi, non testo */
+  const SEP = " · ";
 
   // ----- Data contract (local structural copy of $lib/api's SimilarityGraph: no coupling) -----
   interface GraphNode {
@@ -184,6 +188,8 @@
   let rafId: number | null = null;
   let ro: ResizeObserver | null = null;
   let mo: MutationObserver | null = null;
+  /** Ridisegna il canvas quando cambia la lingua (vedi onMount). */
+  let langWatch: MutationObserver | null = null;
 
   let ptr = { down: false, startX: 0, startY: 0, moved: false, mode: "pan" as "pan" | "node" | "ghost", nodeIdx: -1, ghostKey: null as string | null, panTx: 0, panTy: 0 };
   let ghostDragKey: string | null = null; // ghost pinned under the cursor while dragging
@@ -193,12 +199,14 @@
 
   // Node color mode: dominant tag (default) · semantic community · year · read state.
   type ColorMode = "tag" | "community" | "year" | "read";
-  const COLOR_MODES: { value: ColorMode; label: string }[] = [
-    { value: "tag", label: "Tag dominante" },
-    { value: "community", label: "Comunità semantiche" },
-    { value: "year", label: "Anno" },
-    { value: "read", label: "Stato lettura" },
-  ];
+  /* i18n-exempt: i `value` sono chiavi persistite in localStorage, non etichette.
+     `$derived`: le etichette devono ricalcolarsi se la lingua cambia a mappa aperta. */
+  const COLOR_MODES: { value: ColorMode; label: string }[] = $derived([
+    { value: "tag", label: t("Tag dominante") },
+    { value: "community", label: t("Comunità semantiche") },
+    { value: "year", label: t("Anno") },
+    { value: "read", label: t("Stato lettura") },
+  ]);
   let colorMode = $state<ColorMode>(
     (localStorage.getItem("scriptorium-map-color") as ColorMode) || "tag",
   );
@@ -218,11 +226,12 @@
   });
   // Nebulose delle comunità: aloni + nomi, solo aloni, o niente (persistito).
   type NebulaMode = "full" | "tint" | "off";
-  const NEBULA_MODES: { value: NebulaMode; label: string }[] = [
-    { value: "full", label: "Nebulose + nomi" },
-    { value: "tint", label: "Solo nebulose" },
-    { value: "off", label: "Senza nebulose" },
-  ];
+  /* i18n-exempt: i `value` sono chiavi persistite in localStorage, non etichette */
+  const NEBULA_MODES: { value: NebulaMode; label: string }[] = $derived([
+    { value: "full", label: t("Nebulose + nomi") },
+    { value: "tint", label: t("Solo nebulose") },
+    { value: "off", label: t("Senza nebulose") },
+  ]);
   let nebulaMode = $state<NebulaMode>(
     (localStorage.getItem("scriptorium-map-nebula") as NebulaMode) || "full",
   );
@@ -305,13 +314,13 @@
       .map((e) => {
         const i = idToIdx.get(e.id);
         const m = i !== undefined ? nodes[i] : undefined;
-        return { id: e.id, title: m?.title || "Senza titolo", year: m?.year ?? null, w: e.w };
+        return { id: e.id, title: m?.title || t("Senza titolo"), year: m?.year ?? null, w: e.w };
       })
       .sort((a, b) => b.w - a.w);
     panel = {
       id,
       kind: n.kind,
-      title: n.title || "Senza titolo",
+      title: n.title || t("Senza titolo"),
       year: n.year,
       degree: n.degree,
       unread: n.unread,
@@ -697,10 +706,11 @@
     const subs: SearchHit[] = [];
     const auth: SearchHit[] = [];
     for (const n of nodes) {
-      const t = foldq(n.title || "");
-      const hit: SearchHit = { id: n.id, title: n.title || "Senza titolo", year: n.year, kind: n.kind };
-      if (t.startsWith(q)) starts.push(hit);
-      else if (t.includes(q)) subs.push(hit);
+      // `ft` e non `t`: `t` e' la funzione di traduzione importata in cima.
+      const ft = foldq(n.title || "");
+      const hit: SearchHit = { id: n.id, title: n.title || t("Senza titolo"), year: n.year, kind: n.kind };
+      if (ft.startsWith(q)) starts.push(hit);
+      else if (ft.includes(q)) subs.push(hit);
       else if (n.kind === "doc" && resolve?.(n.id)?.authors?.some((a) => foldq(a).includes(q))) auth.push(hit);
     }
     return [...starts, ...subs, ...auth].slice(0, 8);
@@ -757,8 +767,10 @@
   const countsText = $derived(
     graph === null
       ? ""
-      : `${graph.nodes.length} ${graph.nodes.length === 1 ? "documento" : "documenti"} · ` +
-        `${graph.edges.length} ${graph.edges.length === 1 ? "legame" : "legami"}`
+      : [
+          tp(graph.nodes.length, "1 documento", "{n} documenti"),
+          tp(graph.edges.length, "1 legame", "{n} legami"),
+        ].join(SEP)
   );
 
   // ----- Theme tokens (re-read on body[data-theme] changes) -----
@@ -1356,7 +1368,7 @@
         if (nebulaMode === "full" && zoom < 0.9 && !exploring) {
           nebLabels.push({
             title: ellipsize(meta.label, 34),
-            sub: `${a.n} paper`,
+            sub: tp(a.n, "1 paper", "{n} paper"),
             cx,
             cy,
             color: commColor(meta.id, 0.85),
@@ -1571,7 +1583,7 @@
         }
         if (zoom > 0.75) {
           c.fillStyle = withAlpha(theme.dim, 0.85);
-          c.fillText(ellipsize(g.title || "Senza titolo", 26), gx, gy + 17);
+          c.fillText(ellipsize(g.title || t("Senza titolo"), 26), gx, gy + 17);
         }
       }
       c.textAlign = "left";
@@ -1603,7 +1615,7 @@
         const rs = clamp(n.r * zoom, 3, 26);
         let la = focus && !focus.has(id) ? 0.3 : 1;
         if (seedSet && !seedSet.has(id) && id !== hovId) la = Math.min(la, 0.35); // backdrop while exploring
-        const label = ellipsize(n.title || "Senza titolo", 28);
+        const label = ellipsize(n.title || t("Senza titolo"), 28);
         const w = c.measureText(label).width;
         const lx = sx - w / 2;
         const ly = sy + rs + 13;
@@ -1692,16 +1704,16 @@
     }
     if (i >= 0) {
       const n = nodes[i];
-      const conn = n.degree === 1 ? "1 connessione" : `${n.degree} connessioni`;
+      const conn = tp(n.degree, "1 connessione", "{n} connessioni");
       tip = {
         x: clamp(px + 16, 0, Math.max(0, vw - 256)),
         y: clamp(py + 18, 0, Math.max(0, vh - 84)),
-        title: n.title || "Senza titolo",
+        title: n.title || t("Senza titolo"),
         meta:
           n.kind === "note"
-            ? `appunto · ${conn}`
+            ? [t("appunto"), conn].join(SEP)
             : n.year !== null
-              ? `${n.year} · ${conn}`
+              ? [String(n.year), conn].join(SEP)
               : conn,
       };
     } else {
@@ -1736,8 +1748,8 @@
           tip = {
             x: clamp(e.offsetX + 16, 0, Math.max(0, vw - 256)),
             y: clamp(e.offsetY + 18, 0, Math.max(0, vh - 84)),
-            title: g.title || "Senza titolo",
-            meta: `${g.year ?? "s.d."} · stella fantasma — clic per la scheda`,
+            title: g.title || t("Senza titolo"),
+            meta: [String(g.year ?? t("s.d.")), t("stella fantasma — clic per la scheda")].join(SEP),
           };
         }
       }
@@ -1883,6 +1895,12 @@
       schedule();
     });
     mo.observe(document.body, { attributes: true, attributeFilter: ["data-theme"] });
+    // La mappa e' disegnata su canvas: le etichette tradotte (`Senza titolo`, i
+    // conteggi dei cluster) passano da fillText dentro draw(), che nessun effetto
+    // rilancia. Senza questo, cambiando lingua il cielo resta nella lingua di
+    // prima finche' non lo si sposta o si cambia lo zoom.
+    langWatch = new MutationObserver(() => schedule());
+    langWatch.observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
     canvas.addEventListener("wheel", onWheel, { passive: false });
     armDprWatch();
     return () => {
@@ -1891,6 +1909,7 @@
       rafId = null;
       ro?.disconnect();
       mo?.disconnect();
+      langWatch?.disconnect();
       canvas.removeEventListener("wheel", onWheel);
       dprQuery?.removeEventListener("change", onDprChange);
       dprQuery = null;
@@ -1935,28 +1954,28 @@
     <div class="chip counts">
       {countsText}
       {#if (ghosts?.length ?? 0) > 0}
-        · {ghosts!.length} fantasm{ghosts!.length === 1 ? "a" : "i"}
-        {#if onGhostsClear}<button class="chipx" onclick={onGhostsClear} title="Nascondi le stelle fantasma">×</button>{/if}
+        · {tp(ghosts!.length, "1 fantasma", "{n} fantasmi")}
+        {#if onGhostsClear}<button class="chipx" onclick={onGhostsClear} title={t("Nascondi le stelle fantasma")}>×</button>{/if}
       {/if}
     </div>
-    <div class="chip legend">clic = scheda · doppio clic = apri · ✦ preferito · ◆ appunto · da vicino: ✓ peer-reviewed, ⑂ GitHub</div>
+    <div class="chip legend">{t("clic = scheda · doppio clic = apri · ✦ preferito · ◆ appunto · da vicino: ✓ peer-reviewed, ⑂ GitHub")}</div>
     <div class="hud">
       <div class="srch">
         <input
           class="srchin"
-          placeholder="Cerca nel grafo…"
+          placeholder={t("Cerca nel grafo…")}
           bind:value={searchQ}
           oninput={onSearchInput}
           onkeydown={onSearchKey}
           onfocus={() => { if (searchList.length) searchOpen = true; }}
           onblur={() => (searchOpen = false)}
-          title="Trova un paper o un appunto nel grafo: digita qualche lettera del titolo (o di un autore), scegli il candidato e la vista si centra lì"
+          title={t("Trova un paper o un appunto nel grafo: digita qualche lettera del titolo (o di un autore), scegli il candidato e la vista si centra lì")}
         />
         {#if searchQ}
-          <button class="srchx" onmousedown={(e) => { e.preventDefault(); clearSearch(); }} title="Pulisci la ricerca (togli anche l'evidenziazione)">×</button>
+          <button class="srchx" onmousedown={(e) => { e.preventDefault(); clearSearch(); }} title={t("Pulisci la ricerca (togli anche l'evidenziazione)")}>×</button>
         {/if}
         {#if searchOpen && searchList.length}
-          <ul class="srchlist" role="listbox" aria-label="Candidati">
+          <ul class="srchlist" role="listbox" aria-label={t("Candidati")}>
             {#each searchList as h, i (h.id)}
               <li>
                 <button
@@ -1975,121 +1994,122 @@
             {/each}
           </ul>
         {:else if searchOpen && searchQ.trim().length >= 2}
-          <div class="srchlist srchnone">Niente nel grafo (ci sono solo i documenti con indice semantico).</div>
+          <div class="srchlist srchnone">{t("Niente nel grafo (ci sono solo i documenti con indice semantico).")}</div>
         {/if}
       </div>
-      <select class="hudsel" bind:value={colorMode} title="Colora le stelle per…">
+      <select class="hudsel" bind:value={colorMode} title={t("Colora le stelle per…")}>
         {#each COLOR_MODES as m (m.value)}<option value={m.value}>{m.label}</option>{/each}
       </select>
-      <select class="hudsel" bind:value={nebulaMode} title="Nebulose delle comunità: aloni con i nomi, solo gli aloni, oppure niente">
+      <select class="hudsel" bind:value={nebulaMode} title={t("Nebulose delle comunità: aloni con i nomi, solo gli aloni, oppure niente")}>
         {#each NEBULA_MODES as m (m.value)}<option value={m.value}>{m.label}</option>{/each}
       </select>
       {#if onParams}
-        <button title="Densità del grafo (vicini e soglia di somiglianza)" class:on={tuneOpen} onclick={toggleTune}>⚙</button>
+        <button title={t("Densità del grafo (vicini e soglia di somiglianza)")} class:on={tuneOpen} onclick={toggleTune}>⚙</button>
       {/if}
-      <button title="Adatta alla vista" onclick={() => fitToView(true)}>⤢</button>
-      <button title="Ingrandisci" onclick={() => zoomAt(vw / 2, vh / 2, 1.3)}>+</button>
-      <button title="Riduci" onclick={() => zoomAt(vw / 2, vh / 2, 1 / 1.3)}>−</button>
-      <button title="Ricarica il grafo" onclick={onRefresh}>↻</button>
+      <button title={t("Adatta alla vista")} onclick={() => fitToView(true)}>⤢</button>
+      <button title={t("Ingrandisci")} onclick={() => zoomAt(vw / 2, vh / 2, 1.3)}>+</button>
+      <button title={t("Riduci")} onclick={() => zoomAt(vw / 2, vh / 2, 1 / 1.3)}>−</button>
+      <button title={t("Ricarica il grafo")} onclick={onRefresh}>↻</button>
     </div>
     {#if tuneOpen}
-      <div class="tune" role="group" aria-label="Densità del grafo">
-        <label title="Quanti vicini più simili collegare a ogni paper. Più alto = rete più fitta e cluster più fusi; più basso = mappa più rada e leggibile.">
-          <span>Legami per nodo <b>{tuneK}</b></span>
+      <div class="tune" role="group" aria-label={t("Densità del grafo")}>
+        <label title={t("Quanti vicini più simili collegare a ogni paper. Più alto = rete più fitta e cluster più fusi; più basso = mappa più rada e leggibile.")}>
+          <span>{t("Legami per nodo")} <b>{tuneK}</b></span>
           <input type="range" min="1" max="8" step="1" bind:value={tuneK} />
         </label>
-        <label title="Somiglianza minima perché un legame esista (0-100%). Più alta = restano solo i legami forti (mappa più frammentata ma affidabile); più bassa = più connessioni, anche deboli.">
-          <span>Soglia somiglianza <b>{Math.round(tuneSim * 100)}%</b></span>
+        <label title={t("Somiglianza minima perché un legame esista (0-100%). Più alta = restano solo i legami forti (mappa più frammentata ma affidabile); più bassa = più connessioni, anche deboli.")}>
+          <span>{t("Soglia somiglianza")} <b>{Math.round(tuneSim * 100)}%</b></span>
           <input type="range" min="0.4" max="0.8" step="0.05" bind:value={tuneSim} />
         </label>
         <div class="tunerow">
-          <button class="tuneapply" onclick={applyTune}>Ricalcola</button>
-          <button class="tunecancel" onclick={() => (tuneOpen = false)}>Annulla</button>
+          <button class="tuneapply" onclick={applyTune}>{t("Ricalcola")}</button>
+          <button class="tunecancel" onclick={() => (tuneOpen = false)}>{t("Annulla")}</button>
         </div>
       </div>
     {/if}
   {/if}
 
   {#if panel}
-    <aside class="card" aria-label="Scheda del paper">
-      <button class="card-x" title="Chiudi la scheda" onclick={() => setFocus(null)}>×</button>
+    <aside class="card" aria-label={t("Scheda del paper")}>
+      <button class="card-x" title={t("Chiudi la scheda")} onclick={() => setFocus(null)}>×</button>
       <div class="card-title">{panel.title}</div>
       <div class="card-meta">
         {#if panel.kind === "note"}
-          ◆ Appunto (.md)
+          {t("◆ Appunto (.md)")}
         {:else}
-          {panel.year ?? "s.d."}
-          {#if panel.favorite}· ✦ preferito{/if}
-          {#if panel.unread}· da leggere{/if}
-          {#if panel.peer}· <span class="card-peer">✓ peer-reviewed</span>{/if}
-          {#if panel.gh}· ⑂ GitHub{/if}
+          {panel.year ?? t("s.d.")}
+          {#if panel.favorite}· {t("✦ preferito")}{/if}
+          {#if panel.unread}· {t("da leggere")}{/if}
+          {#if panel.peer}· <span class="card-peer">{t("✓ peer-reviewed")}</span>{/if}
+          {#if panel.gh}· {t("⑂ GitHub")}{/if}
         {/if}
       </div>
       {#if panel.extra?.authors?.length}
-        <div class="card-authors">{panel.extra.authors.slice(0, 4).join(", ")}{panel.extra.authors.length > 4 ? " e altri" : ""}</div>
+        <div class="card-authors">{panel.extra.authors.length > 4 ? t("{autori} e altri", { autori: panel.extra.authors.slice(0, 4).join(", ") }) : panel.extra.authors.join(", ")}</div>
       {/if}
       {#if panel.extra?.venue}
         <div class="card-venue">{panel.extra.venue}</div>
       {/if}
       {#if panel.extra?.tags?.length}
         <div class="card-tags">
-          {#each panel.extra.tags.slice(0, 6) as t (t.name)}
-            <span class="card-tag" style:border-color={t.color || "var(--border)"}>{t.name}</span>
+          <!-- `tg` e non `t`: `t` e' la funzione di traduzione. -->
+          {#each panel.extra.tags.slice(0, 6) as tg (tg.name)}
+            <span class="card-tag" style:border-color={tg.color || "var(--border)"}>{tg.name}</span>
           {/each}
         </div>
       {/if}
-      <div class="card-sec">{panel.neighbors.length === 1 ? "1 legame" : `${panel.neighbors.length} legami`} per somiglianza</div>
+      <div class="card-sec">{tp(panel.neighbors.length, "1 legame per somiglianza", "{n} legami per somiglianza")}</div>
       <div class="card-links">
         {#each panel.neighbors as nb (nb.id)}
-          <button class="card-link" title="Mostra la scheda di questo paper" onclick={() => { setFocus(nb.id); panToNode(nb.id); }}>
+          <button class="card-link" title={t("Mostra la scheda di questo paper")} onclick={() => { setFocus(nb.id); panToNode(nb.id); }}>
             <span class="card-link-w">{Math.round(nb.w * 100)}%</span>
-            <span class="card-link-t">{nb.title}{nb.year !== null ? ` (${nb.year})` : ""}</span>
+            <span class="card-link-t">{nb.year !== null ? t("{titolo} ({anno})", { titolo: nb.title, anno: nb.year }) : nb.title}</span>
           </button>
         {:else}
-          <p class="card-none">Nessun legame sopra la soglia.</p>
+          <p class="card-none">{t("Nessun legame sopra la soglia.")}</p>
         {/each}
       </div>
       {#if onExplore && panel.kind === "doc"}
-        <div class="card-sec">Esplora dintorni (online)</div>
+        <div class="card-sec">{t("Esplora dintorni (online)")}</div>
         <div class="card-explore">
-          <button onclick={() => onExplore(panel!.id, "citations")} title="Chi cita e chi è citato da questo paper (OpenAlex) — via DOI, o per titolo se manca">Citazioni</button>
-          <button onclick={() => onExplore(panel!.id, "similar")} title="Paper simili per argomento (OpenAlex)">Simili</button>
-          <button onclick={() => onExplore(panel!.id, "author")} title="Altri lavori del primo autore">Autore</button>
+          <button onclick={() => onExplore(panel!.id, "citations")} title={t("Chi cita e chi è citato da questo paper (OpenAlex) — via DOI, o per titolo se manca")}>{t("Citazioni")}</button>
+          <button onclick={() => onExplore(panel!.id, "similar")} title={t("Paper simili per argomento (OpenAlex)")}>{t("Simili")}</button>
+          <button onclick={() => onExplore(panel!.id, "author")} title={t("Altri lavori del primo autore")}>{t("Autore")}</button>
         </div>
-        <p class="card-ghosthint">I risultati appaiono come stelle tratteggiate attorno a questa.</p>
+        <p class="card-ghosthint">{t("I risultati appaiono come stelle tratteggiate attorno a questa.")}</p>
       {/if}
       <div class="card-actions">
-        <button class="card-open" onclick={() => onOpen(panel!.id)}>{panel.kind === "note" ? "Apri l'appunto" : "Apri il paper"}</button>
-        <span class="card-hint">o doppio clic sulla stella</span>
+        <button class="card-open" onclick={() => onOpen(panel!.id)}>{panel.kind === "note" ? t("Apri l'appunto") : t("Apri il paper")}</button>
+        <span class="card-hint">{t("o doppio clic sulla stella")}</span>
       </div>
     </aside>
   {/if}
 
   {#if ghostCard}
-    <aside class="card ghostcard" aria-label="Scheda della scoperta">
-      <button class="card-x" title="Chiudi" onclick={() => (ghostCard = null)}>×</button>
-      <div class="card-meta ghostlbl">✦ Stella fantasma — trovata online</div>
-      <div class="card-title">{ghostCard.title || "Senza titolo"}</div>
+    <aside class="card ghostcard" aria-label={t("Scheda della scoperta")}>
+      <button class="card-x" title={t("Chiudi")} onclick={() => (ghostCard = null)}>×</button>
+      <div class="card-meta ghostlbl">{t("✦ Stella fantasma — trovata online")}</div>
+      <div class="card-title">{ghostCard.title || t("Senza titolo")}</div>
       <div class="card-meta">
-        {ghostCard.year ?? "s.d."}
+        {ghostCard.year ?? t("s.d.")}
         {#if ghostCard.venue}· {ghostCard.venue}{/if}
       </div>
       {#if onGhostExplore}
-        <div class="card-sec">Esplora da questa scoperta</div>
+        <div class="card-sec">{t("Esplora da questa scoperta")}</div>
         <div class="card-explore">
-          <button onclick={() => onGhostExplore(ghostCard!.key, "citations")} title="Chi cita e chi è citato da questa scoperta (OpenAlex)">Citazioni</button>
-          <button onclick={() => onGhostExplore(ghostCard!.key, "similar")} title="Paper simili per argomento (OpenAlex)">Simili</button>
-          <button disabled={!ghostCard.author} onclick={() => onGhostExplore(ghostCard!.key, "author")} title={ghostCard.author ? `Altri lavori di ${ghostCard.author}` : "Autore non noto per questa scoperta"}>Autore</button>
+          <button onclick={() => onGhostExplore(ghostCard!.key, "citations")} title={t("Chi cita e chi è citato da questa scoperta (OpenAlex)")}>{t("Citazioni")}</button>
+          <button onclick={() => onGhostExplore(ghostCard!.key, "similar")} title={t("Paper simili per argomento (OpenAlex)")}>{t("Simili")}</button>
+          <button disabled={!ghostCard.author} onclick={() => onGhostExplore(ghostCard!.key, "author")} title={ghostCard.author ? t("Altri lavori di {autore}", { autore: ghostCard.author }) : t("Autore non noto per questa scoperta")}>{t("Autore")}</button>
         </div>
-        <p class="card-ghosthint">Le nuove stelle si agganciano a questa, in catena — puoi continuare a scavare senza aggiungere nulla. Trascina una scoperta per spostarla: il suo gruppo la segue.</p>
+        <p class="card-ghosthint">{t("Le nuove stelle si agganciano a questa, in catena — puoi continuare a scavare senza aggiungere nulla. Trascina una scoperta per spostarla: il suo gruppo la segue.")}</p>
       {/if}
       <div class="card-actions">
         {#if ghostCard.inLibrary}
-          <span class="ghost-in">✓ Già nella libreria</span>
+          <span class="ghost-in">{t("✓ Già nella libreria")}</span>
         {:else if ghostCard.added}
-          <span class="ghost-in">✓ Aggiunto — entrerà nel grafo al prossimo aggiornamento dell'indice</span>
+          <span class="ghost-in">{t("✓ Aggiunto — entrerà nel grafo al prossimo aggiornamento dell'indice")}</span>
         {:else if onGhostAdd}
-          <button class="card-open" onclick={() => onGhostAdd(ghostCard!.key)}>Aggiungi alla libreria</button>
+          <button class="card-open" onclick={() => onGhostAdd(ghostCard!.key)}>{t("Aggiungi alla libreria")}</button>
         {/if}
       </div>
     </aside>
@@ -2105,27 +2125,26 @@
   {#if loading && !graph}
     <div class="state">
       <div class="dots"><span></span><span></span><span></span></div>
-      <p>Calcolo la mappa semantica…</p>
+      <p>{t("Calcolo la mappa semantica…")}</p>
     </div>
   {:else if !graph}
     <div class="state">
-      <h3>Mappa non disponibile</h3>
-      <p>Non sono riuscito a caricare il grafo semantico. Controlla che il backend sia attivo e riprova.</p>
-      <button class="cta" onclick={onRefresh}>Riprova</button>
+      <h3>{t("Mappa non disponibile")}</h3>
+      <p>{t("Non sono riuscito a caricare il grafo semantico. Controlla che il backend sia attivo e riprova.")}</p>
+      <button class="cta" onclick={onRefresh}>{t("Riprova")}</button>
     </div>
   {:else if graph.embedded < 2}
     <div class="state">
-      <h3>La costellazione ha bisogno dell'indice semantico</h3>
+      <h3>{t("La costellazione ha bisogno dell'indice semantico")}</h3>
       <p>
-        Per disegnare la mappa servono gli embedding dei documenti: ogni stella è un documento e i legami
-        nascono dalla somiglianza dei contenuti. Genera l'indice per accendere il cielo.
+        {t("Per disegnare la mappa servono gli embedding dei documenti: ogni stella è un documento e i legami nascono dalla somiglianza dei contenuti. Genera l'indice per accendere il cielo.")}
       </p>
       <button class="cta" disabled={generating} onclick={startGenerate}>
-        {generating ? "Avvio…" : "Genera indice"}
+        {generating ? t("Avvio…") : t("Genera indice")}
       </button>
     </div>
   {:else if graph.nodes.length >= 2 && graph.edges.length === 0}
-    <div class="hint">Nessun legame sopra la soglia — genera più embedding o riduci la soglia col ricalcolo</div>
+    <div class="hint">{t("Nessun legame sopra la soglia — genera più embedding o riduci la soglia col ricalcolo")}</div>
   {/if}
 </div>
 

@@ -35,24 +35,39 @@ pub fn slugify(s: &str) -> String {
 
 /// Step 1 — per-paper claim extraction. A narrow, grounded task: small local
 /// models are far more reliable here than at free-form writing.
-pub fn extraction_prompt(concept: &str, title: &str, year: Option<i64>, material: &str) -> String {
+pub fn extraction_prompt(
+    lang: crate::ai::lang::Lang,
+    concept: &str,
+    title: &str,
+    year: Option<i64>,
+    material: &str,
+) -> String {
     let year = year.map(|y| format!(" ({y})")).unwrap_or_default();
-    format!(
+    crate::ai::lang::with_lang(
+        lang,
+        &format!(
         "Sei un assistente di ricerca. Dal materiale seguente, tratto dal paper «{title}»{year}, \
          estrai da 3 a 6 affermazioni chiave pertinenti al concetto «{concept}».\n\
          Regole:\n\
-         - ogni affermazione in italiano, autonoma e fattuale, su UNA riga che inizia con \"- \";\n\
+         - ogni affermazione autonoma e fattuale, su UNA riga che inizia con \"- \";\n\
          - se il passaggio da cui deriva indica la pagina (es. [p. 4]), chiudi la riga con (p. 4);\n\
          - usa SOLO il materiale fornito: niente conoscenze esterne, niente opinioni;\n\
          - se il materiale non dice nulla di pertinente al concetto, rispondi esattamente: NIENTE.\n\n\
          MATERIALE:\n{material}"
+        ),
     )
 }
 
 /// Step 2 — page synthesis, exclusively from the extracted claims.
-pub fn synthesis_prompt(concept: &str, claims_blocks: &[String]) -> String {
-    format!(
-        "Scrivi in italiano la pagina di un'enciclopedia personale sul concetto «{concept}», \
+pub fn synthesis_prompt(
+    lang: crate::ai::lang::Lang,
+    concept: &str,
+    claims_blocks: &[String],
+) -> String {
+    crate::ai::lang::with_lang(
+        lang,
+        &format!(
+        "Scrivi la pagina di un'enciclopedia personale sul concetto «{concept}», \
          basandoti ESCLUSIVAMENTE sulle affermazioni estratte dai paper elencati sotto.\n\
          Struttura e regole:\n\
          - NON inserire un titolo iniziale: comincia direttamente con \"## In breve\" (2-3 frasi);\n\
@@ -64,24 +79,33 @@ pub fn synthesis_prompt(concept: &str, claims_blocks: &[String]) -> String {
          - tono enciclopedico ma vivo, 350-550 parole, niente premesse né conclusioni di cortesia;\n\
          - non inventare nulla che non sia nelle affermazioni.\n\n\
          AFFERMAZIONI PER PAPER:\n\n{blocks}",
-        blocks = claims_blocks.join("\n\n")
+            blocks = claims_blocks.join("\n\n")
+        ),
     )
 }
 
 /// Step 3 — coverage repair: the synthesis ignored some sources.
-pub fn repair_prompt(concept: &str, page_md: &str, missing: &[(usize, String)]) -> String {
+pub fn repair_prompt(
+    lang: crate::ai::lang::Lang,
+    concept: &str,
+    page_md: &str,
+    missing: &[(usize, String)],
+) -> String {
     let list = missing
         .iter()
         .map(|(n, t)| format!("[{n}] {t}"))
         .collect::<Vec<_>>()
         .join("\n");
-    format!(
+    crate::ai::lang::with_lang(
+        lang,
+        &format!(
         "La pagina qui sotto sul concetto «{concept}» NON cita queste fonti:\n{list}\n\n\
          Integra ciascuna fonte mancante con 1-2 frasi dove è pertinente (mantenendo le citazioni \
          [n] esistenti), oppure — se davvero non è pertinente — aggiungi in fondo una sezione \
          \"## Fonti non pertinenti\" elencandola come \"[n] — motivo in una riga\". \
          Restituisci la pagina COMPLETA aggiornata, senza commenti aggiuntivi.\n\n\
          PAGINA:\n{page_md}"
+        ),
     )
 }
 

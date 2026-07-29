@@ -1,9 +1,10 @@
 <script lang="ts">
   import { shareTo, revealDocument, type ShareTarget } from "$lib/share";
+  import { t } from "$lib/i18n/index.svelte";
 
   let {
     ids,
-    label = "Documento PDF",
+    label = t("Documento PDF"),
     link = null,
     compact = false,
     variant = "button",
@@ -24,6 +25,7 @@
   let pos = $state<{ x: number; y: number } | null>(null);
   let busy = $state(false);
 
+  /* i18n-exempt: `key` e' protocollo verso share.ts, `name` e' un nome proprio di prodotto */
   const TARGETS: { key: ShareTarget; name: string }[] = [
     { key: "whatsapp", name: "WhatsApp" },
     { key: "teams", name: "Microsoft Teams" },
@@ -52,12 +54,12 @@
     if (busy || !ids.length) return;
     busy = true;
     open = false;
-    onstatus?.("Preparazione condivisione…");
+    onstatus?.(t("Preparazione condivisione…"));
     try {
       const r = await shareTo(target, ids, label, link);
       onstatus?.(r.note);
     } catch (e) {
-      onstatus?.("Errore condivisione: " + e);
+      onstatus?.(t("Errore condivisione: {err}", { err: String(e) }));
     } finally {
       busy = false;
       onclose?.();
@@ -70,7 +72,7 @@
       try {
         await revealDocument(ids[0]);
       } catch {
-        onstatus?.("Questo elemento non ha un file da mostrare");
+        onstatus?.(t("Questo elemento non ha un file da mostrare"));
       }
     }
     onclose?.();
@@ -85,19 +87,20 @@
   class:menuitem={variant === "menuitem"}
   onclick={toggle}
   disabled={busy || !ids.length}
-  title="Condividi via WhatsApp, Teams, Gmail o Outlook"
+  title={t("Condividi via WhatsApp, Teams, Gmail o Outlook")}
 >
-  {busy ? "…" : "Condividi"}
+  {busy ? "…" : t("Condividi")}
 </button>
 
 {#if open && pos}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="sharemenu" style="left:{pos.x}px; top:{pos.y}px" onclick={(e) => e.stopPropagation()}>
-    {#each TARGETS as t (t.key)}
-      <button class="shareitem" onclick={() => pick(t.key)}>{t.name}</button>
+    <!-- `tg` e non `t`: la variabile del ciclo non deve oscurare la funzione di traduzione -->
+    {#each TARGETS as tg (tg.key)}
+      <button class="shareitem" onclick={() => pick(tg.key)}>{tg.name}</button>
     {/each}
     <div class="sharesep"></div>
-    <button class="shareitem" onclick={openFolder}>Apri cartella del file</button>
+    <button class="shareitem" onclick={openFolder}>{t("Apri cartella del file")}</button>
   </div>
 {/if}
 
