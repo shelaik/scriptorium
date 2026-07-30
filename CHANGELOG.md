@@ -2,6 +2,14 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.52 — Gli appunti stanno nella loro raccolta
+Richiesta d'uso: un appunto che discute 7-8 paper che si contraddicono deve trovarsi *dentro* quel gruppo, non in fondo a un elenco di `.md` che cresce a ogni sintesi.
+- **Aggancia un appunto a una raccolta**, da due punti: il pulsante **«Raccolta…»** sopra l'editor (per un appunto che hai già scritto) o la nuova sezione **Appunti** nel pannello dell'**Archivio**. Un appunto può stare in più raccolte.
+- **«+ Appunto con i N paper»**: crea l'appunto *già agganciato* e coi paper della raccolta elencati come citazioni `[[@citekey]]`. Le citekey non sono a schermo — stanno nella scheda di ogni paper — quindi l'elenco è la parte noiosa che ti risparmi. **Solo** l'elenco: nessuna struttura imposta, perché quella è tua. L'etichetta del pulsante dice quanti paper finiranno dentro, così non c'è niente da indovinare.
+- **Nell'elenco Appunti**: la raccolta compare come etichetta su ogni voce, e il menu **Raccolta** filtra — «Senza raccolta» ritrova quelli mai sistemati.
+- **I tuoi file non si toccano mai**: sganciare un appunto, o eliminare la raccolta, scioglie solo il legame. Il `.md` resta dov'è. Rinominare un appunto lo tiene nella sua raccolta.
+- Guida aggiornata in **italiano e inglese** (scheda *Scrittura*, sezione *Organizzare*, e una voce di FAQ per lingua).
+
 ## 0.9.51 — Scriptorium parla anche inglese
 - **Italiano o inglese, si cambia in un clic** e senza riavviare: *Impostazioni → Lingua / Language*. La scelta è tua e resta — cambiare la lingua di Windows non cambia quella di Scriptorium. Aggiornando da una versione precedente **resti in italiano**: la lingua di sistema decide solo alla primissima apertura di un'installazione nuova.
 - **Tradotto tutto quello che leggi**: 2.325 voci — non solo i pulsanti, ma i **tooltip** (che dopo l'audit sono la documentazione vera dell'app), le etichette per i lettori di schermo, i messaggi di stato e di errore, la **guida completa** con le sue 7 schede e la FAQ, la Plancia, l'Archivio, il lettore, la Costellazione. Anche i messaggi che arrivano dal motore interno.

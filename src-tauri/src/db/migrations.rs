@@ -362,6 +362,35 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          );",
     )
     .context("creating graph_positions_scoped")?;
+    // Appunti .md agganciati a una raccolta, cosi' un appunto che discute un
+    // gruppo di paper si trova DENTRO quel gruppo invece che in un elenco piatto.
+    //
+    // Perche' nel database e non nel file, che nel vault e' la fonte di verita':
+    // una raccolta esiste SOLO qui, quindi l'appartenenza non potrebbe comunque
+    // essere piu' portabile della raccolta. I .md restano intoccati.
+    //
+    // La chiave e' lo SLUG, non l'id della riga in `notes`: quello viene
+    // rigenerato se un file scompare e ricompare (index_note fa upsert su slug,
+    // unindex_note cancella la riga), mentre lo slug e' il nome del file.
+    //
+    // Nessuna foreign key verso `notes`: quella tabella e' un indice ricostruibile
+    // e una sua potatura momentanea non deve portarsi via le associazioni. Le
+    // righe che puntano a uno slug scomparso sono innocue (le liste fanno JOIN) e
+    // vengono potate dalla riconciliazione d'avvio.
+    //
+    // CASCADE sulla raccolta: cancellare una raccolta scioglie il legame e NON
+    // tocca l'appunto, che e' un file dell'utente.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS note_collections (
+           note_slug     TEXT    NOT NULL,
+           collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+           added_at      TEXT DEFAULT (datetime('now')),
+           PRIMARY KEY (note_slug, collection_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_note_collections_coll
+           ON note_collections(collection_id);",
+    )
+    .context("creating note_collections")?;
     reindex_annotations_if_stale(conn)?;
     backfill_github_urls(conn)?;
     // Assign citekeys to any documents that don't have one yet (cheap no-op once full).

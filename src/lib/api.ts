@@ -1159,7 +1159,23 @@ export interface NoteMeta {
   created_at: number | null;
   /** File mtime as epoch milliseconds. */
   updated_at: number | null;
+  /** Raccolte a cui l'appunto è agganciato (vuoto per la maggioranza). */
+  collections: NoteCollection[];
 }
+/** Una raccolta a cui un appunto è agganciato. */
+export interface NoteCollection {
+  id: number;
+  name: string;
+}
+/** Aggancia (`on`) o sgancia un appunto da una raccolta. Idempotente. */
+export const setNoteCollection = (slug: string, collectionId: number, on: boolean) =>
+  invoke<void>("set_note_collection", { slug, collectionId, on });
+/** Gli appunti agganciati a una raccolta, dal più recente. */
+export const collectionNotes = (collectionId: number) =>
+  invoke<NoteLink[]>("collection_notes", { collectionId });
+/** Quanti appunti ha ciascuna raccolta, come coppie [id, conteggio]. */
+export const noteCountsByCollection = () =>
+  invoke<[number, number][]>("note_counts_by_collection");
 export interface NoteLink {
   slug: string;
   title: string;

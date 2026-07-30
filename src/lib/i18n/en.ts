@@ -17,6 +17,64 @@
 
 
 export const EN: Record<string, string> = {
+  // ---- appunti agganciati alle raccolte ----
+  "APPUNTI":
+    "NOTES",
+  "Raccolta…":
+    "Collection…",
+  "Mostra solo gli appunti di una raccolta":
+    "Show only the notes of one collection",
+  "Tutte":
+    "All",
+  "Senza raccolta":
+    "No collection",
+  "Nessun appunto in questa raccolta.":
+    "No notes in this collection.",
+  "Raccolta: 1":
+    "Collection: 1",
+  "Raccolte: {n}":
+    "Collections: {n}",
+  "Aggancia a una raccolta":
+    "Link to a collection",
+  "Aggancia questo appunto a una raccolta, così lo ritrovi dentro l'Archivio invece che in un elenco piatto":
+    "Link this note to a collection, so you find it inside the Archive instead of in a flat list",
+  "Appunto agganciato a «{nome}»":
+    "Note linked to “{nome}”",
+  "Appunto sganciato da «{nome}»":
+    "Note unlinked from “{nome}”",
+  "Non hai ancora raccolte manuali: creale dall'Archivio.":
+    "You have no manual collections yet: create them from the Archive.",
+  "Non riesco a cambiare la raccolta dell'appunto: {err}":
+    "Could not change the note's collection: {err}",
+  "Nessun appunto agganciato. Un appunto che discute questi paper si trova qui, invece che in fondo a un elenco.":
+    "No notes linked yet. A note discussing these papers belongs here, rather than at the bottom of a flat list.",
+  "Apri questo appunto":
+    "Open this note",
+  "Togli da questa raccolta":
+    "Remove from this collection",
+  "Togli l'appunto da questa raccolta (il file .md non viene toccato)":
+    "Unlink the note from this collection (the .md file is left untouched)",
+  "titolo dell'appunto…":
+    "note title…",
+  "CREO…":
+    "CREATING…",
+  "+ NUOVO APPUNTO":
+    "+ NEW NOTE",
+  "+ APPUNTO CON 1 PAPER":
+    "+ NOTE WITH ITS 1 PAPER",
+  "+ APPUNTO CON I {n} PAPER":
+    "+ NOTE WITH ITS {n} PAPERS",
+  "Crea un appunto .md già agganciato a questa raccolta, con i suoi paper elencati come citazioni":
+    "Create an .md note already linked to this collection, with its papers listed as citations",
+  "Paper della raccolta «{raccolta}»:":
+    "Papers in the “{raccolta}” collection:",
+  "Appunto «{titolo}» creato in questa raccolta":
+    "Note “{titolo}” created in this collection",
+  "Appunto sganciato da questa raccolta (il file .md resta dov'era)":
+    "Note unlinked from this collection (the .md file stays where it was)",
+  "Appunto agganciato alla raccolta «{nome}»":
+    "Note linked to the “{nome}” collection",
+
   // ---- correzioni della review: condivisione, stampa, titoli dei modali AI ----
   "Niente da condividere":
     "Nothing to share",

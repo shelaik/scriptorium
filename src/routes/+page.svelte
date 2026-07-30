@@ -19,6 +19,7 @@
     repairMetadata,
     searchDocuments,
     searchNotes,
+    setNoteCollection,
     type NoteHit,
     searchAnnotations,
     annotationCounts,
@@ -781,7 +782,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.51";
+  const APP_VERSION = "0.9.52";
   const APP_YEAR = "2026";
   let settingsTab = $state<"lang" | "online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -4623,6 +4624,31 @@
     }
     return arr;
   });
+
+  // Filtro per raccolta: 0 = tutte, -1 = solo quelli senza raccolta, altrimenti
+  // l'id. Deliberatamente NON persistito: un filtro nascosto che sopravvive al
+  // riavvio fa credere di aver perso degli appunti.
+  let noteCollFilter = $state(0);
+  /** Le raccolte che hanno almeno un appunto: le sole per cui il filtro ha senso. */
+  const noteCollOptions = $derived.by(() => {
+    const seen = new Map<number, string>();
+    for (const n of notesList) for (const c of n.collections) seen.set(c.id, c.name);
+    return [...seen].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+  });
+  const notesShown = $derived.by(() => {
+    if (noteCollFilter === 0) return notesSorted;
+    if (noteCollFilter === -1) return notesSorted.filter((n) => !n.collections.length);
+    return notesSorted.filter((n) => n.collections.some((c) => c.id === noteCollFilter));
+  });
+  // Una raccolta che perde il suo ultimo appunto (o che viene eliminata) non deve
+  // lasciare il filtro puntato su un'opzione che non c'è più: l'elenco sembrerebbe
+  // vuoto senza motivo.
+  $effect(() => {
+    if (noteCollFilter > 0 && !noteCollOptions.some((c) => c.id === noteCollFilter)) {
+      noteCollFilter = 0;
+    }
+  });
+
   let noteView = $state<NoteView | null>(null);
   let noteDraft = $state(""); // raw markdown in the editor
   /** Normalize newlines when loading a note from disk: the textarea's value/API
@@ -4722,6 +4748,26 @@
       notesList = await listNotes();
     } catch (e) {
       status = t("Errore nel caricare gli appunti: {err}", { err: String(e) });
+    }
+  }
+
+  // ---- appunti agganciati alle raccolte -----------------------------------
+  // L'appartenenza viaggia dentro NoteMeta (una sola query lato Rust), quindi
+  // basta leggerla da `notesList`: nessuna mappa parallela da tenere allineata
+  // nei vari punti che ricaricano l'elenco.
+  let noteCollsOpen = $state(false);
+  const noteCollsOf = (slug: string) => notesList.find((n) => n.slug === slug)?.collections ?? [];
+
+  async function toggleNoteCollection(slug: string, collectionId: number, on: boolean) {
+    try {
+      await setNoteCollection(slug, collectionId, on);
+      await loadNotes(); // rilegge le appartenenze insieme all'elenco
+      const name = collections.find((c) => c.id === collectionId)?.name ?? "";
+      status = on
+        ? t("Appunto agganciato a «{nome}»", { nome: name })
+        : t("Appunto sganciato da «{nome}»", { nome: name });
+    } catch (e) {
+      status = t("Non riesco a cambiare la raccolta dell'appunto: {err}", { err: String(e) });
     }
   }
   async function openNote(slug: string) {
@@ -5602,7 +5648,7 @@
 </script>
 
 <svelte:window
-  onclick={() => { toolMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; mapPop = null; tagEdit = null; }}
+  onclick={() => { toolMenu = null; sortPop = false; indexPop = false; tagPanel = null; collPanel = null; mapPop = null; tagEdit = null; noteCollsOpen = false; }}
   onkeydown={onGlobalKey}
   oncontextmenu={onGlobalContext}
   onfocus={checkClipboard}
@@ -6221,19 +6267,45 @@
                 </select>
               </div>
             {/if}
+            {#if noteCollOptions.length}
+              <div class="notesort">
+                <label class="notesortlbl" for="notecoll-sel">{t("Raccolta")}</label>
+                <!-- Il filtro appare solo se c'è qualcosa da filtrare: senza appunti
+                     agganciati sarebbe un comando che non fa mai niente. -->
+                <select id="notecoll-sel" class="notesortsel" bind:value={noteCollFilter} title={t("Mostra solo gli appunti di una raccolta")}>
+                  <option value={0}>{t("Tutte")}</option>
+                  <option value={-1}>{t("Senza raccolta")}</option>
+                  {#each noteCollOptions as c (c.id)}
+                    <option value={c.id}>{c.name}</option>
+                  {/each}
+                </select>
+              </div>
+            {/if}
             <div class="wikilist">
-              {#each notesSorted as n (n.slug)}
+              {#each notesShown as n (n.slug)}
                 <div class="navrow">
                   <button class="navitem noteitem" class:active={noteView?.slug === n.slug} onclick={() => openNote(n.slug)} title={n.excerpt || n.title}>
                     <span class="notetitle">{n.title}</span>
                     {#if n.excerpt}<span class="noteexc">{n.excerpt}</span>{/if}
                     <span class="notedates" title={t("Ultima modifica · creazione")}>{t("mod. {modificato} · creato {creato}", { modificato: fmtNoteDateShort(n.updated_at), creato: fmtNoteDateShort(n.created_at) })}</span>
+                    {#if n.collections.length}
+                      <span class="notecolls">
+                        {#each n.collections as c (c.id)}<span class="notecoll" title={t("Appunto agganciato alla raccolta «{nome}»", { nome: c.name })}>{c.name}</span>{/each}
+                      </span>
+                    {/if}
                   </button>
                   <button class="x" title={t("Elimina questo appunto")} onclick={() => removeNote(n.slug)}>×</button>
                 </div>
               {/each}
               {#if !notesList.length}
                 <p class="wikiempty">{t("Nessun appunto. Scrivi un titolo qui sopra e premi «Nuovo». Gli appunti sono file .md su disco: collega con [[Titolo appunto]] oppure [[@citekey]] per un paper.")}</p>
+              {:else if !notesShown.length}
+                <!-- Filtro attivo e nessun risultato: dirlo, e offrire l'uscita.
+                     Altrimenti sembra che gli appunti siano spariti. -->
+                <p class="wikiempty">
+                  {t("Nessun appunto in questa raccolta.")}
+                  <button class="linklike" onclick={() => (noteCollFilter = 0)}>{t("Mostra tutti")}</button>
+                </p>
               {/if}
             </div>
           </aside>
@@ -6256,6 +6328,44 @@
               </header>
               <div class="noteactions">
                 <button class="ghost small" disabled={noteRenaming} onclick={startRename} title={t("Rinomina l'appunto: cambia il titolo e il nome del file")}>{t("Rinomina")}</button>
+                <!-- Agganciare l'appunto a una raccolta: è il gesto per un appunto
+                     GIÀ scritto (dall'Archivio si creano solo quelli nuovi). -->
+                <div class="notecollpick">
+                  <button
+                    class="ghost small"
+                    class:on={noteCollsOpen}
+                    onclick={(e) => { e.stopPropagation(); noteCollsOpen = !noteCollsOpen; }}
+                    title={t("Aggancia questo appunto a una raccolta, così lo ritrovi dentro l'Archivio invece che in un elenco piatto")}
+                  >
+                    {noteCollsOf(noteView.slug).length
+                      ? tp(noteCollsOf(noteView.slug).length, "Raccolta: 1", "Raccolte: {n}")
+                      : t("Raccolta…")}
+                  </button>
+                  {#if noteCollsOpen}
+                    {@const openSlug = noteView.slug}
+                    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                    <div
+                      class="menu notecollmenu"
+                      role="menu"
+                      tabindex="-1"
+                      aria-label={t("Aggancia a una raccolta")}
+                      onclick={(e) => e.stopPropagation()}
+                      onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); noteCollsOpen = false; } }}
+                    >
+                      <div class="mtitle">{t("Aggancia a una raccolta")}</div>
+                      {#each collections.filter((c) => !c.is_smart) as c (c.id)}
+                        {@const on = noteCollsOf(openSlug).some((x) => x.id === c.id)}
+                        <button class="medit" role="menuitem" onclick={() => void toggleNoteCollection(openSlug, c.id, !on)}>
+                          <span>{c.name}</span>
+                          {#if on}<span class="mtick">✓</span>{/if}
+                        </button>
+                      {/each}
+                      {#if !collections.filter((c) => !c.is_smart).length}
+                        <div class="bibhint">{t("Non hai ancora raccolte manuali: creale dall'Archivio.")}</div>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
                 <div class="notemodes">
                   <button class="ghost small" class:on={noteMode === "edit"} onclick={() => (noteMode = "edit")} title={t("Modifica il Markdown")}>{t("Modifica")}</button>
                   <button class="ghost small" class:on={noteMode === "split"} onclick={() => { noteMode = "split"; renderLivePreview(); }} title={t("Modifica con anteprima affiancata in tempo reale")}>{t("Affiancato")}</button>
@@ -6349,6 +6459,7 @@
           onOpenGrid={(id, label) => setFilter({ kind: "collection", id, label })}
           onOpenGraph={(id, label) => openGraphForCollection(id, label)}
           onChanged={() => void loadSidebar()}
+          onOpenNote={(slug) => void openNoteHit(slug)}
         />
       {:else if filter.kind === "novita"}
         <div class="novhead">
@@ -9612,6 +9723,18 @@
   .notetitle { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
   .noteexc { font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
   .notedates { font-size: 10px; color: var(--faint); opacity: 0.85; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  /* La raccolta a cui l'appunto è agganciato: la quarta riga entra senza toccare
+     il layout perché .noteitem è già una colonna. */
+  .notecolls { display: flex; flex-wrap: wrap; gap: 3px; max-width: 100%; margin-top: 2px; }
+  /* Il menu «Raccolta…» nella testata dell'appunto. */
+  .notecollpick { position: relative; display: inline-flex; }
+  .notecollmenu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 200px; max-height: 300px; overflow: auto; }
+  .notecoll {
+    font-size: 9.5px; line-height: 14px; padding: 0 5px;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid var(--accent-soft2); border-radius: var(--r-pill);
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   /* Title on its own line; the actions live in the row below (.noteactions). */
   .notehead { border-bottom: none; padding-bottom: 0; margin-bottom: 4px; }
   .notehead .notesaved { font-size: 11.5px; color: var(--faint); white-space: nowrap; }

@@ -504,6 +504,18 @@ mod tests {
             .query_row("SELECT value FROM settings WHERE key = 'ui_lang'", [], |r| r.get(0))
             .optional()?;
         println!("lingua dell'interfaccia vista dal backend: {}", ui.as_deref().unwrap_or("(assente)"));
+        // Appunti agganciati alle raccolte: la tabella deve esistere (prova che la
+        // migrazione e' passata sulla libreria vera) e non contenere legami appesi
+        // a un appunto che non c'e' piu' — quelli farebbero mentire i conteggi.
+        let links: i64 =
+            conn.query_row("SELECT count(*) FROM note_collections", [], |r| r.get(0))?;
+        let dangling: i64 = conn.query_row(
+            "SELECT count(*) FROM note_collections WHERE note_slug NOT IN (SELECT slug FROM notes)",
+            [],
+            |r| r.get(0),
+        )?;
+        println!("appunti agganciati a raccolte: {links} (appesi nel vuoto: {dangling})");
+        assert_eq!(dangling, 0, "associazioni appunto-raccolta rimaste appese");
         assert!(ui.is_some(), "il frontend non ha rispecchiato la lingua: la manopola AI «auto» non funzionerebbe");
         Ok(())
     }

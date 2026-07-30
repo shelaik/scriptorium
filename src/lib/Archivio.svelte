@@ -37,7 +37,13 @@
     mirrorRegenerate,
     mirrorReveal,
     type MirrorStatus,
+    collectionNotes,
+    setNoteCollection,
+    createNote,
+    saveNote,
+    type NoteLink,
   } from "$lib/api";
+  import { refToken } from "$lib/notecite";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { t, tp } from "$lib/i18n/index.svelte";
 
@@ -49,12 +55,15 @@
     onOpenGrid,
     onOpenGraph,
     onChanged,
+    onOpenNote,
   }: {
     onOpenGrid: (id: number, label: string) => void;
     /** Apre la Costellazione ristretta a questa raccolta. */
     onOpenGraph?: (id: number, label: string) => void;
     /** Chiamata dopo ogni mutazione delle raccolte, così la sidebar resta fresca. */
     onChanged?: () => void;
+    /** Apre un appunto .md nella vista Appunti (gestita dalla pagina). */
+    onOpenNote?: (slug: string) => void;
   } = $props();
 
   type SelKey = number | "unfiled"; /* i18n-exempt: "unfiled" è un valore interno, non un'etichetta */
@@ -303,7 +312,96 @@
   $effect(() => {
     void sel;
     void loadDocs();
+    void loadCollNotes();
   });
+
+  // ---- appunti .md agganciati alla raccolta -----------------------------------
+  // Il caso d'uso: un appunto che discute un gruppo di paper si trova DENTRO quel
+  // gruppo, invece che in fondo a un elenco piatto che cresce a ogni sintesi.
+  let collNotes = $state<NoteLink[]>([]);
+  let creatingNote = $state(false);
+  let noteTitleVal = $state("");
+  let noteBusy = $state(false);
+  let notesEpoch = 0;
+
+  async function loadCollNotes() {
+    const epoch = ++notesEpoch;
+    if (typeof sel !== "number") {
+      collNotes = [];
+      return;
+    }
+    try {
+      const out = await collectionNotes(sel);
+      if (epoch === notesEpoch) collNotes = out;
+    } catch {
+      if (epoch === notesEpoch) collNotes = [];
+    }
+  }
+
+  async function unlinkNote(slug: string) {
+    if (typeof sel !== "number") return;
+    try {
+      await setNoteCollection(slug, sel, false);
+      await loadCollNotes();
+      msg = t("Appunto sganciato da questa raccolta (il file .md resta dov'era)");
+    } catch (e) {
+      msg = String(e);
+    }
+  }
+
+  /** Lo scheletro dell'appunto nuovo: un INVENTARIO, non un'impalcatura retorica.
+   *  Titolo, una riga che nomina la raccolta, l'elenco dei paper come citazioni.
+   *  Niente «## Tesi / ## Antitesi»: l'elenco è il dato che l'utente avrebbe
+   *  copiato comunque a mano (le citekey non sono a schermo, stanno nella scheda
+   *  di ogni paper), mentre delle intestazioni imporrebbero una struttura al suo
+   *  pensiero — e una lista si cancella in un gesto, un'impalcatura sbagliata la
+   *  si combatte. */
+  function seedForCollection(title: string, name: string, items: DocumentItem[]): string {
+    // Stesso neutralizzatore di buildQuoteBlock: un titolo che contiene «[[…]]»
+    // non deve generare un collegamento fantasma nel vault.
+    const safe = (s: string) => s.replace(/\[\[/g, "[\\[").replace(/\]\]/g, "]\\]");
+    const head = `# ${safe(title)}\n\n`;
+    if (!items.length) return head;
+    const rows = items.map((d) => {
+      const meta = [d.authors[0], d.year].filter(Boolean).join(", ");
+      return `- ${refToken(d.citekey, d.title ?? "")}${meta ? ` — ${safe(meta)}` : ""}`;
+    });
+    return `${head}${t("Paper della raccolta «{raccolta}»:", { raccolta: safe(name) })}\n\n${rows.join("\n")}\n`;
+  }
+
+  async function doCreateNote() {
+    if (typeof sel !== "number" || noteBusy) return;
+    const target = sel;
+    const name = selNode?.name ?? "";
+    // Titolo vuoto → nome della raccolta: senza questo si cadrebbe nel ripiego di
+    // `create_note`, che scrive un titolo italiano dentro un FILE, dove nessuna
+    // traduzione arriva.
+    const title = (noteTitleVal.trim() || name).trim();
+    if (!title) return;
+    const items = docs.slice(); // istantanea: la lista può cambiare sotto
+    noteBusy = true;
+    try {
+      const slug = await createNote(title);
+      // Prima l'aggancio (un INSERT su una tabella minuscola), poi il corpo (I/O
+      // su disco): se cade il corpo, l'appunto esiste, è intitolato ed è già
+      // visibile qui. Nessun rollback che lo cancelli: `create_note` ha già
+      // scritto un file dell'utente, e distruggerlo perché una seconda scrittura
+      // è fallita sarebbe peggio del difetto.
+      await setNoteCollection(slug, target, true);
+      await saveNote(slug, seedForCollection(title, name, items));
+      creatingNote = false;
+      noteTitleVal = "";
+      await loadCollNotes();
+      onChanged?.();
+      msg = t("Appunto «{titolo}» creato in questa raccolta", { titolo: title });
+      onOpenNote?.(slug);
+    } catch (e) {
+      msg = String(e);
+      await loadCollNotes();
+    } finally {
+      noteBusy = false;
+    }
+  }
   $effect(() => {
     void loadTree();
     void mirrorStatus().then((m) => (mirror = m)).catch(() => {});
@@ -798,6 +896,51 @@
           </div>
           <div class="pnote">{t("Eliminare una raccolta non tocca i paper: le sotto-raccolte risalgono di un livello.")}</div>
 
+          <div class="notesec">
+            <span class="wlbl">{t("APPUNTI")}</span>
+            {#if collNotes.length}
+              <ul class="notelist">
+                {#each collNotes as nt (nt.slug)}
+                  <li>
+                    <button class="notelink" onclick={() => onOpenNote?.(nt.slug)} title={t("Apri questo appunto")}>
+                      {nt.title}
+                    </button>
+                    <button
+                      class="noteoff"
+                      onclick={() => void unlinkNote(nt.slug)}
+                      title={t("Togli l'appunto da questa raccolta (il file .md non viene toccato)")}
+                      aria-label={t("Togli da questa raccolta")}
+                    >×</button>
+                  </li>
+                {/each}
+              </ul>
+            {:else}
+              <div class="pnote">{t("Nessun appunto agganciato. Un appunto che discute questi paper si trova qui, invece che in fondo a un elenco.")}</div>
+            {/if}
+            {#if creatingNote}
+              <input
+                class="mkinput"
+                placeholder={t("titolo dell'appunto…")}
+                bind:value={noteTitleVal}
+                onkeydown={(e) => { if (e.key === "Enter") void doCreateNote(); if (e.key === "Escape") creatingNote = false; }}
+              />
+              <button class="pbtn" onclick={doCreateNote} disabled={noteBusy}>{noteBusy ? t("CREO…") : t("CREA")}</button>
+            {:else}
+              <!-- L'etichetta È la divulgazione: dice quanti paper finiranno
+                   nell'appunto, così non c'è nessuna soglia invisibile da indovinare. -->
+              <button
+                class="pbtn"
+                disabled={loadingDocs || noteBusy}
+                onclick={() => { creatingNote = true; noteTitleVal = selNode?.name ?? ""; }}
+                title={t("Crea un appunto .md già agganciato a questa raccolta, con i suoi paper elencati come citazioni")}
+              >
+                {docs.length
+                  ? tp(docs.length, "+ APPUNTO CON 1 PAPER", "+ APPUNTO CON I {n} PAPER")
+                  : t("+ NUOVO APPUNTO")}
+              </button>
+            {/if}
+          </div>
+
           {#if !selNode.smart}
             <div class="watchrow">
               <span class="wlbl">{t("RICERCA «NOVITÀ»")}</span>
@@ -1064,6 +1207,23 @@
   .pbtn.danger { color: #ff8b94; border-color: rgba(255, 89, 100, 0.4); }
   .pbtn.danger:hover { color: #ff5964; border-color: rgba(255, 89, 100, 0.7); }
   .pnote { font-size: 10px; line-height: 1.5; color: var(--faint); margin-bottom: 8px; }
+  /* Appunti agganciati: stessa grammatica visiva del blocco «Novità» qui sotto
+     (etichetta a tutto-maiuscolo + contenuto), così non sembra un innesto. */
+  .notesec { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 12px; }
+  .notelist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  .notelist li { display: flex; align-items: center; gap: 4px; }
+  .notelink {
+    flex: 1; min-width: 0; text-align: left;
+    background: none; border: none; padding: 3px 0; cursor: pointer;
+    color: var(--text); font-size: 11.5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .notelink:hover { color: var(--accent); text-decoration: underline; }
+  .noteoff {
+    background: none; border: none; cursor: pointer; padding: 0 4px;
+    color: var(--faint); font-size: 13px; line-height: 1; flex: 0 0 auto;
+  }
+  .noteoff:hover { color: var(--danger); }
 
   .nbell { font-size: 10px; text-anchor: end; fill: #ffd166; pointer-events: none; }
   .watchrow { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }

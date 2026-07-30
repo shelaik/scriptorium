@@ -11377,6 +11377,17 @@ pub struct NoteMeta {
     pub created_at: Option<i64>,
     /// File mtime as epoch milliseconds (formatted by the frontend).
     pub updated_at: Option<i64>,
+    /// Raccolte a cui l'appunto e' agganciato (id + nome), per il chip nell'elenco
+    /// e per il filtro. Vuoto per la gran parte degli appunti: e' un'aggiunta,
+    /// non un obbligo.
+    pub collections: Vec<NoteCollection>,
+}
+
+/// Una raccolta a cui un appunto e' agganciato.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NoteCollection {
+    pub id: i64,
+    pub name: String,
 }
 
 #[derive(serde::Serialize)]
@@ -11533,6 +11544,14 @@ pub fn reindex_notes(app: &AppHandle) {
             unindex_note(&conn, &slug);
         }
     }
+    // Le associazioni a una raccolta di appunti che non esistono piu' sul disco
+    // (cancellati o rinominati da fuori). Innocue — le liste fanno JOIN — ma
+    // lasciarle crescere renderebbe i conteggi per raccolta bugiardi.
+    let _ = conn.execute(
+        "DELETE FROM note_collections
+         WHERE note_slug NOT IN (SELECT slug FROM notes)",
+        [],
+    );
 }
 
 /// A note that matched a full-text search.
@@ -11573,19 +11592,116 @@ pub fn search_notes(app: AppHandle, query: String) -> Result<Vec<NoteHit>, Strin
 #[tauri::command]
 pub fn list_notes(app: AppHandle) -> Result<Vec<NoteMeta>, String> {
     let dir = notes_dir(&app);
+    // Le appartenenze in UNA query per tutto il vault, non una per appunto: con
+    // un centinaio di appunti la seconda forma sarebbe un N+1 sul mutex del DB.
+    let mut by_slug: std::collections::HashMap<String, Vec<NoteCollection>> =
+        std::collections::HashMap::new();
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock();
+        let rows: Vec<(String, NoteCollection)> = conn
+            .prepare(
+                "SELECT nc.note_slug, c.id, c.name
+                   FROM note_collections nc JOIN collections c ON c.id = nc.collection_id
+                  ORDER BY c.name COLLATE NOCASE",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        NoteCollection { id: r.get(1)?, name: r.get(2)? },
+                    ))
+                })
+                .map(|it| it.flatten().collect())
+            })
+            .unwrap_or_default();
+        for (slug, coll) in rows {
+            by_slug.entry(slug).or_default().push(coll);
+        }
+    }
     let mut metas: Vec<NoteMeta> = read_vault(&dir)
         .into_iter()
         .map(|(slug, content, created, mtime)| NoteMeta {
-            slug,
             title: notes::note_title(&content),
             excerpt: notes::note_excerpt(&content),
             created_at: created,
             updated_at: mtime,
+            collections: by_slug.remove(&slug).unwrap_or_default(),
+            slug,
         })
         .collect();
     // A sensible default order (newest edit first); the frontend re-sorts on demand.
     metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase())));
     Ok(metas)
+}
+
+/// Aggancia o sgancia un appunto da una raccolta. Idempotente in entrambi i versi:
+/// il chiamante e' un interruttore, non deve sapere lo stato di prima.
+#[tauri::command]
+pub fn set_note_collection(
+    state: State<'_, AppState>,
+    slug: String,
+    collection_id: i64,
+    on: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    if on {
+        conn.execute(
+            "INSERT OR IGNORE INTO note_collections (note_slug, collection_id) VALUES (?1, ?2)",
+            params![slug, collection_id],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        conn.execute(
+            "DELETE FROM note_collections WHERE note_slug = ?1 AND collection_id = ?2",
+            params![slug, collection_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Gli appunti agganciati a una raccolta, dal piu' recente. Il JOIN con `notes`
+/// e' cio' che tiene fuori le associazioni rimaste appese a un file scomparso.
+#[tauri::command]
+pub fn collection_notes(state: State<'_, AppState>, collection_id: i64) -> Result<Vec<NoteLink>, String> {
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT n.slug, COALESCE(NULLIF(TRIM(n.title), ''), n.slug) AS title
+               FROM note_collections nc JOIN notes n ON n.slug = nc.note_slug
+              WHERE nc.collection_id = ?1
+              ORDER BY n.updated_at DESC, title COLLATE NOCASE",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![collection_id], |r| {
+            Ok(NoteLink { slug: r.get(0)?, title: r.get(1)? })
+        })
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    Ok(rows)
+}
+
+/// Quanti appunti ha ciascuna raccolta, come coppie (id, conteggio). Una sola
+/// query per tutto l'albero dell'Archivio, che si ricarica spesso.
+#[tauri::command]
+pub fn note_counts_by_collection(state: State<'_, AppState>) -> Result<Vec<(i64, i64)>, String> {
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT nc.collection_id, count(*)
+               FROM note_collections nc JOIN notes n ON n.slug = nc.note_slug
+              GROUP BY nc.collection_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    Ok(rows)
 }
 
 fn doc_by_citekey(conn: &Connection, key: &str) -> Option<(i64, Option<String>)> {
@@ -11814,7 +11930,15 @@ pub fn rename_note(app: AppHandle, slug: String, new_title: String) -> Result<St
         let state = app.state::<AppState>();
         let conn = state.db.lock();
         if new_slug != slug {
+            // L'appartenenza alle raccolte segue lo slug: senza questo, rinominare
+            // un appunto lo farebbe uscire in silenzio dalla sua raccolta.
+            // Prima l'indice (l'associazione non ha FK verso `notes`, quindi
+            // l'ordine non la trascina), poi il rietichettamento.
             unindex_note(&conn, &slug);
+            let _ = conn.execute(
+                "UPDATE OR REPLACE note_collections SET note_slug = ?1 WHERE note_slug = ?2",
+                params![new_slug, slug],
+            );
         }
         index_note(&conn, &new_slug, &new_content, None);
     }
@@ -11873,6 +11997,9 @@ pub fn save_note(app: AppHandle, slug: String, content_md: String) -> Result<Not
         excerpt: notes::note_excerpt(&content_md),
         created_at: created,
         updated_at: mtime,
+        // Un appunto appena creato non e' in nessuna raccolta: e' il chiamante
+        // che, se viene da una raccolta, la aggancia subito dopo.
+        collections: Vec::new(),
     })
 }
 
@@ -11908,6 +12035,9 @@ pub fn append_to_note(app: AppHandle, slug: String, markdown: String) -> Result<
         excerpt: notes::note_excerpt(&new_content),
         created_at: created,
         updated_at: mtime,
+        // Le raccolte non cambiano appendendo testo; l'elenco si aggiorna al
+        // prossimo `list_notes`, dove sono lette in blocco.
+        collections: Vec::new(),
     })
 }
 
@@ -11927,6 +12057,8 @@ pub fn delete_note(app: AppHandle, slug: String) -> Result<(), String> {
             "DELETE FROM note_vec WHERE note_id NOT IN (SELECT id FROM notes)",
             [],
         );
+        // E il suo legame con le raccolte.
+        let _ = conn.execute("DELETE FROM note_collections WHERE note_slug = ?1", params![slug]);
     }
     pulse::blip(&app, "archivio", &format!("Appunto eliminato: {slug}.md"));
     Ok(())
