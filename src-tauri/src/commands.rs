@@ -7955,6 +7955,18 @@ pub async fn explore_citations(
             .map_err(|e| e.to_string())?;
         r.in_library = exists.is_some();
         r.pub_status = discovery::classify_pub_status(r.doi.as_deref(), r.venue.as_deref(), Some("openalex"));
+        // Stesso arricchimento di `discover_search`: senza, il segno del codice
+        // non sarebbe MAI comparso sulle citazioni, mentre compariva su «Simili»
+        // e «Autore» — lo stesso simbolo con due significati diversi a seconda
+        // di come sei arrivato lì.
+        if r.github_url.is_none() {
+            let hay = format!(
+                "{} {}",
+                r.title.as_deref().unwrap_or(""),
+                r.abstract_text.as_deref().unwrap_or("")
+            );
+            r.github_url = github::first_repo_url(&hay);
+        }
     }
     Ok(nb)
 }

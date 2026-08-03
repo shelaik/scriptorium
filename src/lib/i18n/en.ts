@@ -17,6 +17,9 @@
 
 
 export const EN: Record<string, string> = {
+  "Fra le scoperte online, metti in risalto quelle peer-reviewed o con codice: le altre sbiadiscono, nessuna sparisce":
+    "Among the online discoveries, bring out the peer-reviewed ones and those with code: the others fade, none disappear",
+
   // ---- Costellazione: rigenerare l'indice senza uscire dalla mappa ----
   "✦ {n} fuori mappa":
     "✦ {n} off the map",

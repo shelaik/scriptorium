@@ -2,6 +2,13 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.54 — Peer-reviewed e codice si vedono anche sulle scoperte online
+Esplorando da un paper (*Citazioni* / *Simili* / *Autore*) la domanda è sempre la stessa: **quale di questi aggiungo?** I due segnali che la decidono ora si vedono a colpo d'occhio.
+- **Le stelle fantasma portano gli stessi due segni delle stelle vere**: **✓ verde** se peer-reviewed, **⑂** se ha un repository di codice. Prima esistevano solo sui tuoi paper, e per saperlo di una scoperta dovevi aprirne la scheda una alla volta.
+- **Pulsante ✓⑂** nella barra della mappa: mette in risalto proprio quelle: le altre **sbiadiscono, nessuna sparisce**. Con venti risultati da una ricerca per autore, far emergere i buoni è più utile che nasconderne metà — un filtro che toglie rischia di togliere proprio quello che volevi vedere.
+- Appare solo quando ci sono scoperte, e i segni si disegnano solo da vicino: a mappa rimpicciolita sarebbero puntini indistinguibili.
+- *Correzione*: l'esplorazione per **Citazioni** non cercava il repository di codice (lo facevano solo *Simili* e *Autore*), quindi su quel percorso l'icona non sarebbe **mai** comparsa — lo stesso simbolo avrebbe avuto due significati a seconda di come ci si arrivava.
+
 ## 0.9.53 — La Costellazione si rigenera senza uscire dal programma
 - **«✦ N fuori mappa»**: quando dei paper non hanno ancora l'incorporamento semantico, il conteggio compare in alto nella mappa e **un clic genera l'indice da lì**, con la mappa che si ridisegna da sola a fine lavoro.
 - Prima quel percorso non esisteva: il pulsante **↻** ricarica il grafo, ma se i paper nuovi non hanno l'incorporamento il grafo si ricarica identico — e l'invito «Genera indice» compariva **solo a mappa quasi vuota**. Da una mappa già popolata restava solo uscire, cercare l'icona sulla barra e rientrare.

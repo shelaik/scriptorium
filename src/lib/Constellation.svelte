@@ -67,6 +67,12 @@
     doi?: string | null;
     /** First author, when known — enables "Autore" on the ghost card. */
     author?: string | null;
+    /** Pubblicato in sede peer-reviewed. Gli stessi due segnali che portano le
+     *  stelle della libreria: esplorando da un nodo servono a decidere COSA
+     *  aggiungere, ed e' l'unico momento in cui quella decisione si prende. */
+    peer?: boolean;
+    /** Ha un repository di codice collegato. */
+    gh?: boolean;
   }
   type ExploreRelation = "citations" | "similar" | "author";
 
@@ -196,6 +202,8 @@
 
   let tip = $state<{ x: number; y: number; title: string; meta: string } | null>(null);
   let generating = $state(false); // local guard: the "Genera indice" CTA must not double-fire
+  /** Mette in risalto, fra le scoperte online, quelle peer-reviewed o con codice. */
+  let ghostFocus = $state(false);
 
   // Node color mode: dominant tag (default) · semantic community · year · read state.
   type ColorMode = "tag" | "community" | "year" | "read";
@@ -1534,6 +1542,12 @@
         if (gx < -60 || gx > vw + 60 || gy < -40 || gy > vh + 40) continue;
         const hop = ghostHop.get(g.key) ?? 0;
         const col = ghostColor(hop);
+        // «Metti in risalto»: SBIADISCE chi non ha nessuno dei due segnali,
+        // invece di nasconderlo. Con una ventina di risultati da una ricerca per
+        // autore, quello che serve e' far emergere i buoni — e un filtro che
+        // toglie rischia di togliere proprio quello che avresti voluto vedere.
+        const faded = ghostFocus && !g.peer && !g.gh;
+        c.globalAlpha = faded ? 0.22 : 1;
         // Curved, gently flowing tie to the ghost's base (the seed node, or —
         // for exploration chains — the ghost it was discovered from). The dash
         // offset drifts with time: the chain reads as a live signal.
@@ -1581,10 +1595,21 @@
           c.lineTo(gx + 3.0, gy - 2.2);
           c.stroke();
         }
+        // Gli stessi due segni delle stelle vere, sulle fantasma: esplorando da
+        // un nodo la domanda e' «quale di questi aggiungo?», e peer-reviewed +
+        // codice sono i due segnali che la decidono. Prima bisognava aprire la
+        // scheda di ognuno per saperlo. Sotto BADGE_ZOOM non si disegnano: a
+        // mappa rimpicciolita sarebbero puntini indistinguibili.
+        if (zoom > BADGE_ZOOM) {
+          const gbr = Math.max(3, pr * 0.34);
+          if (g.peer) drawCheckBadge(c, gx + pr * 0.85, gy + pr * 0.85, gbr);
+          if (g.gh) drawForkBadge(c, gx - pr * 0.85, gy + pr * 0.85, gbr);
+        }
         if (zoom > 0.75) {
           c.fillStyle = withAlpha(theme.dim, 0.85);
           c.fillText(ellipsize(g.title || t("Senza titolo"), 26), gx, gy + 17);
         }
+        c.globalAlpha = 1;
       }
       c.textAlign = "left";
     }
@@ -2010,6 +2035,16 @@
       <button title={t("Ingrandisci")} onclick={() => zoomAt(vw / 2, vh / 2, 1.3)}>+</button>
       <button title={t("Riduci")} onclick={() => zoomAt(vw / 2, vh / 2, 1 / 1.3)}>−</button>
       <button title={t("Ricarica il grafo")} onclick={onRefresh}>↻</button>
+      <!-- Appare solo quando ci sono scoperte: e' un comando che senza di quelle
+           non avrebbe niente su cui agire. -->
+      {#if ghosts && ghosts.length > 0}
+        <button
+          class:on={ghostFocus}
+          onclick={() => { ghostFocus = !ghostFocus; schedule(); }}
+          title={t("Fra le scoperte online, metti in risalto quelle peer-reviewed o con codice: le altre sbiadiscono, nessuna sparisce")}
+          aria-pressed={ghostFocus}
+        >✓⑂</button>
+      {/if}
       <!-- Documenti fuori mappa perché privi di embedding. Senza questo, da una
            mappa già popolata non c'era NESSUN modo di rigenerare l'indice: il ↻
            ricarica lo stesso grafo, e l'invito «Genera indice» compare solo a
@@ -2108,6 +2143,8 @@
       <div class="card-meta">
         {ghostCard.year ?? t("s.d.")}
         {#if ghostCard.venue}· {ghostCard.venue}{/if}
+        {#if ghostCard.peer}· <span class="card-peer">{t("✓ peer-reviewed")}</span>{/if}
+        {#if ghostCard.gh}· {t("⑂ GitHub")}{/if}
       </div>
       {#if onGhostExplore}
         <div class="card-sec">{t("Esplora da questa scoperta")}</div>

@@ -782,7 +782,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.53";
+  const APP_VERSION = "0.9.54";
   const APP_YEAR = "2026";
   let settingsTab = $state<"lang" | "online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».
@@ -4372,6 +4372,11 @@
     parentKey: string | null;
     doi: string | null;
     author: string | null;
+    /** I due segnali di triage, calcolati QUI e non nel ciclo di disegno: quello
+     *  gira a ogni fotogramma e non deve rifare la stessa deduzione per ogni
+     *  fantasma 60 volte al secondo. Sono gli stessi segni delle stelle vere. */
+    peer: boolean;
+    gh: boolean;
   }
   let mapGhosts = $state<MapGhost[]>([]);
   let ghostBusy = $state(false);
@@ -4429,6 +4434,8 @@
           parentKey: null,
           doi: r.doi ?? null,
           author: r.authors?.[0] ?? null,
+          peer: isPeer(r),
+          gh: !!r.github_url,
         });
         if (fresh.length >= 12) break; // keep the fan readable
       }
@@ -4499,6 +4506,8 @@
           parentKey: key,
           doi: r.doi ?? null,
           author: r.authors?.[0] ?? null,
+          peer: isPeer(r),
+          gh: !!r.github_url,
         });
         if (fresh.length >= 10) break; // keep the chain readable
       }
