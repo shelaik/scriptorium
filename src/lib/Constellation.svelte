@@ -2010,6 +2010,21 @@
       <button title={t("Ingrandisci")} onclick={() => zoomAt(vw / 2, vh / 2, 1.3)}>+</button>
       <button title={t("Riduci")} onclick={() => zoomAt(vw / 2, vh / 2, 1 / 1.3)}>−</button>
       <button title={t("Ricarica il grafo")} onclick={onRefresh}>↻</button>
+      <!-- Documenti fuori mappa perché privi di embedding. Senza questo, da una
+           mappa già popolata non c'era NESSUN modo di rigenerare l'indice: il ↻
+           ricarica lo stesso grafo, e l'invito «Genera indice» compare solo a
+           mappa quasi vuota. Restava solo uscire, cercare l'icona sulla barra e
+           rientrare. -->
+      {#if graph && graph.total > graph.embedded}
+        <button
+          class="missing"
+          disabled={generating}
+          onclick={startGenerate}
+          title={t("{n} documenti non sono ancora nella mappa: non hanno l'incorporamento semantico. Generalo qui — la mappa si ridisegna da sola quando ha finito.")}
+        >
+          {generating ? t("Indicizzo…") : t("✦ {n} fuori mappa", { n: graph.total - graph.embedded })}
+        </button>
+      {/if}
     </div>
     {#if tuneOpen}
       <div class="tune" role="group" aria-label={t("Densità del grafo")}>
@@ -2220,6 +2235,19 @@
     color: var(--accent);
     border-color: var(--accent);
   }
+  /* «✦ N fuori mappa»: un avviso con dentro il rimedio, quindi porta testo e
+     non può stare nel quadrato 26×26 degli altri comandi. */
+  .hud > button.missing {
+    width: auto;
+    padding: 0 10px;
+    color: var(--accent);
+    border-color: var(--accent-soft2);
+    background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+    font-size: 11.5px;
+    white-space: nowrap;
+  }
+  .hud > button.missing:hover:not(:disabled) { border-color: var(--accent); }
+  .hud > button.missing:disabled { opacity: 0.7; cursor: default; }
   .hudsel {
     height: 26px;
     border: 1px solid var(--border);

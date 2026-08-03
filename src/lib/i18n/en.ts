@@ -17,6 +17,14 @@
 
 
 export const EN: Record<string, string> = {
+  // ---- Costellazione: rigenerare l'indice senza uscire dalla mappa ----
+  "✦ {n} fuori mappa":
+    "✦ {n} off the map",
+  "Indicizzo…":
+    "Indexing…",
+  "{n} documenti non sono ancora nella mappa: non hanno l'incorporamento semantico. Generalo qui — la mappa si ridisegna da sola quando ha finito.":
+    "{n} documents are not on the map yet: they have no semantic embedding. Generate it here — the map redraws itself when it is done.",
+
   // ---- appunti agganciati alle raccolte ----
   "APPUNTI":
     "NOTES",

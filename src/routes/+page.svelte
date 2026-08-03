@@ -782,7 +782,7 @@
     window.addEventListener("mouseup", up);
   }
   let aboutModal = $state(false);
-  const APP_VERSION = "0.9.52";
+  const APP_VERSION = "0.9.53";
   const APP_YEAR = "2026";
   let settingsTab = $state<"lang" | "online" | "ai" | "obsidian" | "connector" | "mcp" | "backup" | "maint">("online");
   // Percorsi dei binari compagni (CLI + server MCP), per la scheda «CLI e MCP».

@@ -2,6 +2,11 @@
 
 Rilasci principali di Scriptorium. Ogni versione è nel messaggio del commit «Release …» corrispondente; qui il sunto.
 
+## 0.9.53 — La Costellazione si rigenera senza uscire dal programma
+- **«✦ N fuori mappa»**: quando dei paper non hanno ancora l'incorporamento semantico, il conteggio compare in alto nella mappa e **un clic genera l'indice da lì**, con la mappa che si ridisegna da sola a fine lavoro.
+- Prima quel percorso non esisteva: il pulsante **↻** ricarica il grafo, ma se i paper nuovi non hanno l'incorporamento il grafo si ricarica identico — e l'invito «Genera indice» compariva **solo a mappa quasi vuota**. Da una mappa già popolata restava solo uscire, cercare l'icona sulla barra e rientrare.
+- Guida aggiornata (italiano e inglese) con i tre modi in cui la mappa si aggiorna: da sola quando importi o elimini, con ↻ dopo aver cambiato la densità, e con «✦ N fuori mappa» quando manca l'indice.
+
 ## 0.9.52 — Gli appunti stanno nella loro raccolta
 Richiesta d'uso: un appunto che discute 7-8 paper che si contraddicono deve trovarsi *dentro* quel gruppo, non in fondo a un elenco di `.md` che cresce a ogni sintesi.
 - **Aggancia un appunto a una raccolta**, da due punti: il pulsante **«Raccolta…»** sopra l'editor (per un appunto che hai già scritto) o la nuova sezione **Appunti** nel pannello dell'**Archivio**. Un appunto può stare in più raccolte.
